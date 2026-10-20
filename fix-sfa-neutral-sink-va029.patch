@@ -1,0 +1,81 @@
+diff --git a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
+index 66e2ffb29..357b710fc 100644
+--- a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
++++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
+@@ -155,6 +155,28 @@ def test_kimi_k3_c8_pack_preserves_raw64_and_group128_scales():
+     assert relative_error < 0.04, f"FP8 cache relative L2 error: {relative_error}"
+ 
+ 
++@torch.inference_mode()
++def test_kimi_k3_c8_single_token_has_no_attention_sink():
++    # With one zero-logit key, attention must return V. The CANN wrapper's
++    # default zero sink would instead halve it, exposing a numerical API trap.
++    latent = torch.ones(1, 1, LATENT_DIM, dtype=torch.bfloat16, device="npu")
++    raw = torch.zeros(1, 1, RAW_DIM, dtype=torch.bfloat16, device="npu")
++    packed = pack_kimi_k3_sfa_c8(latent, raw)
++    cache = torch.empty((1, PAGE_SIZE, 1, PACKED_DIM), dtype=torch.float8_e4m3fn, device="npu")
++    scatter_kimi_k3_sfa_c8(packed, torch.zeros(1, dtype=torch.int64, device="npu"), cache)
++    output = kimi_k3_sfa_c8_attention(
++        torch.zeros((1, 2, LATENT_DIM), dtype=torch.bfloat16, device="npu"),
++        torch.zeros((1, 2, RAW_DIM), dtype=torch.bfloat16, device="npu"),
++        cache,
++        torch.zeros((1, 1), dtype=torch.int32, device="npu"),
++        [0, 1],
++        [1],
++        ATTENTION_SCALE,
++    )
++    expected = _unpack_cpu(packed)[0].expand(1, 2, LATENT_DIM).float()
++    torch.testing.assert_close(output.float().cpu(), expected, atol=SAME_CACHE_ATOL, rtol=SAME_CACHE_RTOL)
++
++
+ @pytest.mark.parametrize("padded_pages", (False, True))
+ @torch.inference_mode()
+ def test_kimi_k3_c8_native_paged_causal_attention_and_append(padded_pages):
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8.py b/tests/ut/attention/test_kimi_k3_sfa_c8.py
+index 20e8e5106..d9a48e6cc 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8.py
+@@ -99,6 +99,9 @@ def _reader_reference(query, key, value, indices, scale, **kwargs):
+     assert kwargs["key_quant_mode"] == kwargs["value_quant_mode"] == kwargs["attention_mode"] == 2
+     assert kwargs["quant_scale_repo_mode"] == 1 and kwargs["tile_size"] == 128 and kwargs["rope_head_dim"] == 64
+     assert kwargs["actual_seq_lengths_query"].tolist() == [query.shape[0]]
++    sinks = kwargs["sinks"]
++    assert sinks.shape == (query.shape[1],) and sinks.dtype == torch.float32
++    assert sinks.device == query.device and torch.isneginf(sinks).all()
+     assert indices.is_contiguous() and indices.dtype == torch.int32
+     kv_len = kwargs["actual_seq_lengths_kv"].item()
+     output = torch.empty((*query.shape[:2], 512), dtype=query.dtype)
+@@ -114,7 +117,9 @@ def _reader_reference(query, key, value, indices, scale, **kwargs):
+         latent, raw, _ = _unpack(cached, query.dtype)
+         keys = torch.cat((latent, raw), dim=-1)
+         scores = (query[row].float() @ keys.T) * scale
+-        output[row] = torch.softmax(scores, dim=-1) @ latent
++        # Model the native sink contribution, not only plain softmax.
++        probabilities = torch.softmax(torch.cat((scores, sinks[:, None]), dim=-1), dim=-1)[:, :-1]
++        output[row] = probabilities @ latent
+     return output, torch.empty(0), torch.empty(0)
+ 
+ 
+diff --git a/vllm_ascend/attention/kimi_k3_sfa_c8.py b/vllm_ascend/attention/kimi_k3_sfa_c8.py
+index de7cfdfb0..e5a0e17de 100644
+--- a/vllm_ascend/attention/kimi_k3_sfa_c8.py
++++ b/vllm_ascend/attention/kimi_k3_sfa_c8.py
+@@ -408,6 +408,10 @@ def kimi_k3_sfa_c8_attention(
+         return output
+     operator = require_kimi_k3_sfa_c8_ops()
+     query = torch.cat((q_latent, q_raw), dim=-1)
++    # CANN 9.2's Python extension replaces sinks=None with zeros, which adds
++    # exp(0) to the softmax denominator. K3 MLA has no attention sink: an
++    # explicit -inf logit contributes zero mass and preserves dense attention.
++    sinks = torch.full((q_latent.shape[1],), -float("inf"), dtype=torch.float32, device=query.device)
+     for request, kv_len in enumerate(kv_lens):
+         start, end = starts[request : request + 2]
+         q_len = end - start
+@@ -444,6 +448,7 @@ def kimi_k3_sfa_c8_attention(
+                 quant_scale_repo_mode=1,
+                 tile_size=GROUP_SIZE,
+                 rope_head_dim=RAW_DIM,
++                sinks=sinks,
+                 return_softmax_lse=False,
+             )
+             if not isinstance(result, (tuple, list)) or len(result) != 3:
