@@ -1,0 +1,36 @@
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8.py b/tests/ut/attention/test_kimi_k3_sfa_c8.py
+index ef2fdd1ec..20e8e5106 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8.py
+@@ -80,7 +80,8 @@ def test_scatter_preserves_page_padding_guards_and_negative_slots(padding, slot_
+         if slot >= 0:
+             expected_cache[slot // 16, slot % 16].copy_(packed[row])
+ 
+-    def scatter(value, indices, target):
++    def scatter(value, indices, *, key_cache):
++        target = key_cache
+         assert value.is_contiguous() and target.is_contiguous()
+         flattened = target.reshape(-1, *target.shape[2:])
+         for row, slot in enumerate(indices.tolist()):
+diff --git a/vllm_ascend/attention/kimi_k3_sfa_c8.py b/vllm_ascend/attention/kimi_k3_sfa_c8.py
+index d75cece4c..de7cfdfb0 100644
+--- a/vllm_ascend/attention/kimi_k3_sfa_c8.py
++++ b/vllm_ascend/attention/kimi_k3_sfa_c8.py
+@@ -324,7 +324,7 @@ def scatter_kimi_k3_sfa_c8(packed: torch.Tensor, slots: torch.Tensor, cache: tor
+     if not callable(scatter):
+         raise RuntimeError("K3 SFA C8 requires native torch_npu.npu_scatter_pa_cache.")
+     if cache.is_contiguous():
+-        scatter(packed.contiguous(), slots.contiguous(), cache)
++        scatter(packed.contiguous(), slots.contiguous(), key_cache=cache)
+         return
+     # ScatterPaCache requires contiguous storage; the reader accepts a padded
+     # block stride. Use a contiguous alias and remap slots without copying KV.
+@@ -339,7 +339,7 @@ def scatter_kimi_k3_sfa_c8(packed: torch.Tensor, slots: torch.Tensor, cache: tor
+     offsets = offsets + indices.remainder(block_size) * rows_per_token
+     offsets = offsets[:, None] + torch.arange(rows_per_token, device=slots.device)
+     offsets = torch.where(indices[:, None] >= 0, offsets, -1)
+-    scatter(packed.reshape(-1, 1, row_width).contiguous(), offsets.flatten(), alias)
++    scatter(packed.reshape(-1, 1, row_width).contiguous(), offsets.flatten(), key_cache=alias)
+ 
+ 
+ def _host_lengths(values: Sequence[int] | torch.Tensor, name: str) -> list[int]:
