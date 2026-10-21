@@ -1,0 +1,431 @@
+diff --git a/docs/source/developer_guide/kimi_k3_sfa_c8.md b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+index 335137f15..8411a5d55 100644
+--- a/docs/source/developer_guide/kimi_k3_sfa_c8.md
++++ b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+@@ -6,7 +6,8 @@
+ 不在 Python 中把 Cache 反量化回 BF16 再调用普通 Attention。
+ 
+ 这是 **FP8 E4M3 + group128 FP32 scale**，不是 group32/E8M0 的标准 MXFP8。
+-本机验证范围是 CPU 契约测试；原生算子精度、完整模型精度和性能需要在 A5 验证。
++本机验证范围是 CPU 契约测试。用户已在 A5 上报告前一版10项原生用例通过；
++本次新增的 head padding 用例及完整模型精度、性能仍需在 A5 验证。
+ 
+ ## 当前范围
+ 
+@@ -15,8 +16,10 @@
+ - MLA Cache 每 token：512 字节 FP8 latent、128 字节 BF16 raw64、
+   16 字节 FP32 scale，共 656 字节，不含页 padding。
+ - KDA state 保持原格式；模型权重量化不变，`kv_b_proj` 必须保持非量化。
+-- 保留现有 TP 和 O-proj/SP 路径；算子允许的本地 Query heads 为
+-  1、2、4、8、16、32、48、64、128。
++- 保留现有 TP 和 O-proj/SP 路径；本地 Query heads 支持1～128。
++  SFA 的原生 heads 为1、2、4、8、16、32、48、64、128；其他 head 数
++  只在 SFA 输入补零到下一个原生支持值，输出沿 head 轴裁回真实值。
++  不改变 Prolog、投影权重、KV Cache、attention scale 或输出 gate。
+ - 原生算子缺失立即报错，没有静默 fallback。
+ 
+ 当前不接入图捕获、PCP/DCP、MTP/投机解码、KV transfer、KV layer parallelism。
+@@ -43,9 +46,11 @@ per-tensor 前处理。BF16 临时 KV 只包含当前 token，不读回/反量
+ Prolog 要求 hidden size 属于
+ `{1024,2048,3072,4096,5120,6144,7168,7680,8192}`，Q rank 为1536或2048，
+ QK nope dim 为128或192；其余维度沿用 latent512、raw64。
+-不额外 padding Query heads，例如48个本地 heads仍以48传给 Prolog 和 SFA。
+-若模型总 heads 为96，TP2得到48，符合当前接口；TP4得到24，不在当前 QSFA
+-支持列表中，启动会报错。减层不改变这一限制，请核对模型配置和 TP。
++例如模型总 heads 为96：TP2的48 heads保持不变；TP4在 SFA 输入24→32，
++TP8在 SFA 输入12→16。普通和 MLAPO 前处理共用同一个 padding/crop 实现。
++Prolog V4 接受1～128个 heads，始终使用真实本地 head 数；不补权重或 MX scale。
++启动时出现 `K3 C8 SFA query-head padding: 12 -> 16` 表示 TP8 padding 已配置，
++不等于已执行完模型请求。
+ 
+ ## 安装和单算子验证
+ 
+@@ -97,6 +102,8 @@ query 分块因果边界、追加 KV、旧 Cache 与 guard 不被覆盖。
+ 非 A5 环境跳过；A5 上缺原生接口会失败，而不是跳过。
+ 
+ 测试同时包含 Prolog V4 两种权重模式与普通前处理的对照。
++当前共20项原生用例：reader覆盖64/12/24 heads，Prolog覆盖2/12 heads，
++包括多token、跨页和追加Decode。此前10项通过不代替新增head padding的实机验证。
+ 先通过单算子测试，再加载减层模型验证链路和性能，最后验证完整模型。
+ 不要把模型能够生成文本当作算子精度验证。
+ 
+@@ -112,7 +119,8 @@ python tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py \
+ `--weight-quant-mode 0` 测 BF16 投影；改为3测 MXFP8 投影。微基准输出两种开关的
+ `preprocess_ms` 和 `preprocess_plus_attention_ms`，使用同步后的主机墙钟时间，
+ 不包括权重准备、Value/O-proj，也不等价于减层模型或完整模型吞吐。
+-本机在上述0.29源码组合下，相关 CPU 回归为360项及22项 subtest 通过，A5 原生测试尚未执行。
++本次 head padding 修改后，相关 CPU 回归为415项及22项 subtest 通过。
++新增 A5 head padding 用例尚未执行。
+ 
+ ## 模型启动
+ 
+diff --git a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
+index 357b710fc..30e6fe173 100644
+--- a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
++++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
+@@ -177,9 +177,10 @@ def test_kimi_k3_c8_single_token_has_no_attention_sink():
+     torch.testing.assert_close(output.float().cpu(), expected, atol=SAME_CACHE_ATOL, rtol=SAME_CACHE_RTOL)
+ 
+ 
++@pytest.mark.parametrize("query_heads", (QUERY_HEADS, 12, 24), ids=("native64", "tp8-heads12", "tp4-heads24"))
+ @pytest.mark.parametrize("padded_pages", (False, True))
+ @torch.inference_mode()
+-def test_kimi_k3_c8_native_paged_causal_attention_and_append(padded_pages):
++def test_kimi_k3_c8_native_paged_causal_attention_and_append(padded_pages, query_heads):
+     generator = torch.Generator().manual_seed(20261020)
+     initial_kv_lengths = (257, 131)
+     initial_query_lengths = (1, 5)
+@@ -220,13 +221,16 @@ def test_kimi_k3_c8_native_paged_causal_attention_and_append(padded_pages):
+             for batch, (begin, end) in enumerate(zip(initial_kv_lengths, final_kv_lengths)):
+                 slots = _slots_for_range(block_table, batch, begin, end)
+                 scatter_kimi_k3_sfa_c8(packed[batch][begin:end], slots.npu(), cache)
+-        query = torch.randn(sum(query_lengths), QUERY_HEADS, LATENT_DIM, generator=generator).to(torch.bfloat16)
+-        raw_query = torch.randn(sum(query_lengths), QUERY_HEADS, RAW_DIM, generator=generator).to(torch.bfloat16)
++        query = torch.randn(sum(query_lengths), query_heads, LATENT_DIM, generator=generator).to(torch.bfloat16)
++        raw_query = torch.randn(sum(query_lengths), query_heads, RAW_DIM, generator=generator).to(torch.bfloat16)
+         expected = _dense_reference(query, raw_query, dequantized_latent, decoded_raw, query_lengths, kv_lengths)
+         bf16_reference = _dense_reference(query, raw_query, source_latent, source_raw, query_lengths, kv_lengths)
+         # Two query rows per native call forces a non-zero prefill chunk offset.
+         output = _run_attention(query, raw_query, cache, block_table, query_lengths, kv_lengths, chunk_rows=2)
+-        assert output.shape == query.shape and torch.isfinite(output).all()
++        # For 12/24 real heads, the native reader pads to 16/32 then crops the
++        # head axis. Multiple requests and rows catch token/head axis mix-ups.
++        assert output.shape == (sum(query_lengths), query_heads, LATENT_DIM)
++        assert torch.isfinite(output).all()
+         torch.testing.assert_close(output, expected, atol=SAME_CACHE_ATOL, rtol=SAME_CACHE_RTOL)
+         quant_relative_error = torch.linalg.vector_norm(output - bf16_reference) / torch.linalg.vector_norm(
+             bf16_reference
+@@ -261,7 +265,7 @@ def test_kimi_k3_c8_native_paged_causal_attention_and_append(padded_pages):
+         assert torch.all(backing_cpu[:, PAGE_SIZE:] == 91)
+ 
+ 
+-def _prolog_case(tokens, weight_quant_mode, epsilon_cq, epsilon_ckv):
++def _prolog_case(tokens, weight_quant_mode, epsilon_cq, epsilon_ckv, *, heads=PROLOG_HEADS):
+     """Use dimensions accepted by MlaPrologV4WeightNz, with non-unit gamma."""
+     generator = torch.Generator().manual_seed(9020)
+ 
+@@ -273,8 +277,8 @@ def _prolog_case(tokens, weight_quant_mode, epsilon_cq, epsilon_ckv):
+         "weight_qkv": random_bf16(
+             PROLOG_HIDDEN_DIM, PROLOG_Q_RANK + LATENT_DIM + RAW_DIM, scale=PROLOG_HIDDEN_DIM**-0.5
+         ),
+-        "weight_uq_qr": random_bf16(PROLOG_Q_RANK, PROLOG_HEADS * (PROLOG_QK_DIM + RAW_DIM), scale=PROLOG_Q_RANK**-0.5),
+-        "weight_uk": random_bf16(PROLOG_HEADS, PROLOG_QK_DIM, LATENT_DIM, scale=PROLOG_QK_DIM**-0.5),
++        "weight_uq_qr": random_bf16(PROLOG_Q_RANK, heads * (PROLOG_QK_DIM + RAW_DIM), scale=PROLOG_Q_RANK**-0.5),
++        "weight_uk": random_bf16(heads, PROLOG_QK_DIM, LATENT_DIM, scale=PROLOG_QK_DIM**-0.5),
+         "gamma_cq": torch.linspace(0.7, 1.3, PROLOG_Q_RANK).to(torch.bfloat16),
+         "gamma_ckv": torch.linspace(1.3, 0.7, LATENT_DIM).to(torch.bfloat16),
+         "epsilon_cq": epsilon_cq,
+@@ -321,7 +325,7 @@ def _cpu_prolog_reference(cpu):
+     qkv = (cpu["hidden"].float() @ cpu["weight_qkv"].float()).to(torch.bfloat16)
+     q_c = rms_norm(qkv[:, :PROLOG_Q_RANK], cpu["gamma_cq"], cpu["epsilon_cq"])
+     q = (q_c.float() @ cpu["weight_uq_qr"].float()).to(torch.bfloat16)
+-    q = q.reshape(-1, PROLOG_HEADS, PROLOG_QK_DIM + RAW_DIM)
++    q = q.reshape(-1, cpu["weight_uk"].shape[0], PROLOG_QK_DIM + RAW_DIM)
+     q_latent = (
+         torch.bmm(q[..., :PROLOG_QK_DIM].transpose(0, 1).float(), cpu["weight_uk"].float())
+         .to(torch.bfloat16)
+@@ -353,7 +357,7 @@ def _ordinary_prolog(hidden, cache, slots, weights):
+ 
+     qkv = linear(hidden, "weight_qkv")
+     q_c = torch_npu.npu_rms_norm(qkv[:, :PROLOG_Q_RANK].contiguous(), weights["gamma_cq"], weights["epsilon_cq"])[0]
+-    q = linear(q_c, "weight_uq_qr").reshape(-1, PROLOG_HEADS, PROLOG_QK_DIM + RAW_DIM)
++    q = linear(q_c, "weight_uq_qr").reshape(-1, weights["weight_uk"].shape[0], PROLOG_QK_DIM + RAW_DIM)
+     q_latent = (
+         torch.bmm(q[..., :PROLOG_QK_DIM].transpose(0, 1).contiguous(), weights["weight_uk"])
+         .transpose(0, 1)
+@@ -390,14 +394,17 @@ def _assert_prolog_cache_guards(backing, slots):
+ 
+ 
+ @pytest.mark.parametrize("weight_quant_mode", (0, 3), ids=("bf16", "mxfp8"))
++@pytest.mark.parametrize("query_heads", (PROLOG_HEADS, 12), ids=("native2", "tp8-heads12"))
+ @pytest.mark.parametrize(
+     "tokens,padded_pages,epsilon_cq,epsilon_ckv",
+     ((1, False, 1e-6, 1e-6), (7, False, 0.02, 0.04), (129, True, 0.02, 0.04)),
+     ids=("decode", "nondefault-rms", "page-boundary-hybrid-stride"),
+ )
+ @torch.inference_mode()
+-def test_kimi_k3_c8_prolog_on_off_no_rope(weight_quant_mode, tokens, padded_pages, epsilon_cq, epsilon_ckv):
+-    cpu, ordinary, fused = _prolog_case(tokens + 1, weight_quant_mode, epsilon_cq, epsilon_ckv)
++def test_kimi_k3_c8_prolog_on_off_no_rope(
++    weight_quant_mode, query_heads, tokens, padded_pages, epsilon_cq, epsilon_ckv
++):
++    cpu, ordinary, fused = _prolog_case(tokens + 1, weight_quant_mode, epsilon_cq, epsilon_ckv, heads=query_heads)
+     hidden = cpu["hidden"].npu()
+     expected_q, expected_raw_q, expected_latent, expected_raw_k = _cpu_prolog_reference(cpu)
+     off_backing, off_cache, table = _prolog_cache(tokens + 1, padded_pages)
+@@ -412,8 +419,10 @@ def test_kimi_k3_c8_prolog_on_off_no_rope(weight_quant_mode, tokens, padded_page
+         slots = all_slots[begin:end].npu()
+         q_off, raw_off = _ordinary_prolog(hidden[begin:end], off_cache, slots, ordinary)
+         q_on, raw_on = kimi_k3_sfa_c8_prolog(hidden[begin:end], on_cache, slots, **fused)
+-        assert q_on.shape == (end - begin, PROLOG_HEADS, LATENT_DIM)
+-        assert raw_on.shape == (end - begin, PROLOG_HEADS, RAW_DIM)
++        # Prolog and projection weights keep the real local head count; only
++        # the downstream SFA call pads the BF16 query and crops its output.
++        assert q_on.shape == q_off.shape == (end - begin, query_heads, LATENT_DIM)
++        assert raw_on.shape == raw_off.shape == (end - begin, query_heads, RAW_DIM)
+         assert _relative_l2(q_on, q_off) < projection_tolerance
+         assert _relative_l2(raw_on, raw_off) < projection_tolerance
+         # These comparisons specifically detect an accidental rotation of raw64.
+@@ -447,6 +456,7 @@ def test_kimi_k3_c8_prolog_on_off_no_rope(weight_quant_mode, tokens, padded_page
+                 chunk_rows=17,
+                 scale=PROLOG_ATTENTION_SCALE,
+             )
++            assert output.shape == (end - begin, query_heads, LATENT_DIM)
+             torch.testing.assert_close(output, expected_attention, atol=SAME_CACHE_ATOL, rtol=SAME_CACHE_RTOL)
+             cached.append((latent, raw, scales))
+             outputs.append(output)
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8.py b/tests/ut/attention/test_kimi_k3_sfa_c8.py
+index d9a48e6cc..71bcbf899 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8.py
+@@ -95,6 +95,7 @@ def test_scatter_preserves_page_padding_guards_and_negative_slots(padding, slot_
+ 
+ def _reader_reference(query, key, value, indices, scale, **kwargs):
+     assert key is value
++    assert query.shape[1] in sfa.SUPPORTED_HEADS and query.is_contiguous()
+     assert kwargs["layout_query"] == "TND" and kwargs["layout_kv"] == "PA_BSND"
+     assert kwargs["key_quant_mode"] == kwargs["value_quant_mode"] == kwargs["attention_mode"] == 2
+     assert kwargs["quant_scale_repo_mode"] == 1 and kwargs["tile_size"] == 128 and kwargs["rope_head_dim"] == 64
+@@ -125,10 +126,12 @@ def _reader_reference(query, key, value, indices, scale, **kwargs):
+ 
+ @pytest.mark.parametrize("causal", [False, True])
+ @pytest.mark.parametrize("index_budget", [2, 10, 1024])
+-def test_attention_preserves_dense_semantics_for_chunks_requests_and_empty_request(causal, index_budget):
++@pytest.mark.parametrize("heads", [2, 12, 24, 48, 96])
++def test_attention_preserves_dense_semantics_for_chunks_requests_and_empty_request(causal, index_budget, heads):
+     torch.manual_seed(7)
+     cache = _pack(torch.randn(3 * 16, 512).bfloat16(), torch.randn(3 * 16, 64).bfloat16()).reshape(3, 16, 1, 656)
+-    query = torch.randn(5, 2, 576).bfloat16()
++    query = torch.randn(5, heads, 576).bfloat16()
++    original_query, original_cache = query.clone(), cache.view(torch.uint8).clone()
+     starts, kv_lens = [0, 3, 3, 5], [5, 0, 4]
+     table = torch.tensor([[2], [0], [1]], dtype=torch.int32)
+     scale = 576**-0.5
+@@ -153,10 +156,28 @@ def test_attention_preserves_dense_semantics_for_chunks_requests_and_empty_reque
+             scores = query[row].float() @ torch.cat((latent, raw), dim=-1).T * scale
+             expected[row] = torch.softmax(scores, dim=-1) @ latent
+     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
++    assert actual.shape == (5, heads, 512) and actual.is_contiguous()
++    torch.testing.assert_close(query, original_query)
++    torch.testing.assert_close(cache.view(torch.uint8), original_cache)
+     for call in native.call_args_list:
+         indices = call.args[3]
+         assert indices.numel() <= max(index_budget, max(kv_lens))
+         assert call.kwargs["sparse_mode"] == (3 if causal else 0)
++        assert call.args[0].shape[1] == sfa.get_kimi_k3_sfa_c8_padded_heads(heads)
++        assert torch.count_nonzero(call.args[0][:, heads:]) == 0
++
++
++@pytest.mark.parametrize(
++    "heads,expected", [(1, 1), (3, 4), (12, 16), (24, 32), (33, 48), (48, 48), (96, 128), (128, 128)]
++)
++def test_native_head_padding_uses_smallest_supported_count(heads, expected):
++    assert sfa.get_kimi_k3_sfa_c8_padded_heads(heads) == expected
++
++
++@pytest.mark.parametrize("heads", [0, 129])
++def test_native_head_padding_rejects_out_of_range(heads):
++    with pytest.raises(ValueError, match="local query heads"):
++        sfa.get_kimi_k3_sfa_c8_padded_heads(heads)
+ 
+ 
+ def test_missing_native_extension_fails_without_dequantization_fallback():
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py b/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
+index 05f771beb..2ac71cc68 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
+@@ -49,8 +49,10 @@ def _group128_impl():
+     return impl
+ 
+ 
+-def test_group128_native_prerequisites_are_checked():
++@pytest.mark.parametrize("heads", [2, 12, 24, 48, 96])
++def test_group128_native_prerequisites_are_checked(heads):
+     impl = _group128_impl()
++    impl.num_heads = heads
+     with (
+         patch.object(mla_v1, "get_ascend_config", return_value=SimpleNamespace(kvpp_config=SimpleNamespace(size=1))),
+         patch.object(mla_v1, "require_kimi_k3_sfa_c8_ops") as require_ops,
+@@ -74,7 +76,8 @@ def test_group128_native_prerequisites_are_checked():
+         ("impl", "fa_quant_layer", True, "ModelSlim"),
+         ("impl", "use_mla_rope", True, "No-RoPE"),
+         ("impl", "qk_rope_head_dim", 0, "raw64"),
+-        ("impl", "num_heads", 20, "local query heads"),
++        ("impl", "num_heads", 0, "local query heads"),
++        ("impl", "num_heads", 129, "local query heads"),
+         ("impl", "enable_kv_nz", True, "enable_kv_nz=false"),
+         ("impl", "speculative_config", object(), "MTP"),
+     ],
+@@ -97,8 +100,10 @@ def test_group128_unsupported_modes_fail_before_native_dispatch(owner, field, va
+ @pytest.mark.parametrize("tuple_cache", [False, True])
+ @pytest.mark.parametrize("causal", [False, True])
+ @pytest.mark.parametrize("prolog_mode", [None, 0, 3])
+-def test_group128_forward_uses_packed_native_reader_for_mixed_prefill_decode(tuple_cache, causal, prolog_mode):
++@pytest.mark.parametrize("heads", [2, 12])
++def test_group128_forward_uses_packed_native_reader_for_mixed_prefill_decode(tuple_cache, causal, prolog_mode, heads):
+     impl = _group128_impl()
++    impl.num_heads = heads
+     impl.enable_kimi_k3_sfa_c8 = True
+     impl.q_lora_rank = 2
+     impl.v_head_dim = 3
+@@ -108,12 +113,12 @@ def test_group128_forward_uses_packed_native_reader_for_mixed_prefill_decode(tup
+     impl.q_a_layernorm = lambda x: x + 1
+     impl.kv_a_layernorm = lambda x: x * 0.5
+     impl._q_proj_and_k_up_proj = lambda x: (
+-        x[:, :, None].expand(-1, -1, 512),
+-        x[:, :, None].expand(-1, -1, 64),
++        x[:, :1, None].expand(-1, heads, 512),
++        x[:, :1, None].expand(-1, heads, 64),
+     )
+-    impl._v_up_proj_batch_major = lambda x: x[:, :, :3].reshape(-1, 6)
++    impl._v_up_proj_batch_major = lambda x: x[:, :, :3].reshape(-1, heads * 3)
+     impl.use_output_gate = True
+-    impl.g_proj = lambda x: (torch.zeros(x.shape[0], 6, dtype=x.dtype),)
++    impl.g_proj = lambda x: (torch.zeros(x.shape[0], heads * 3, dtype=x.dtype),)
+     impl.o_proj = MagicMock(side_effect=lambda x, **kwargs: (x,))
+     packed_cache = torch.empty(4, 128, 1, 656, dtype=torch.float8_e4m3fn)
+     packed_rows = torch.empty(5, 1, 656, dtype=torch.float8_e4m3fn)
+@@ -127,8 +132,8 @@ def test_group128_forward_uses_packed_native_reader_for_mixed_prefill_decode(tup
+         causal=causal,
+         num_prefills=1,
+     )
+-    latent_out = torch.arange(5 * 2 * 512, dtype=torch.float32).reshape(5, 2, 512).to(torch.bfloat16)
+-    output = torch.empty(6, 6, dtype=torch.bfloat16)
++    latent_out = torch.arange(5 * heads * 512, dtype=torch.float32).reshape(5, heads, 512).to(torch.bfloat16)
++    output = torch.empty(6, heads * 3, dtype=torch.bfloat16)
+     impl.enable_mlapo = prolog_mode is not None
+     if impl.enable_mlapo:
+         impl.mlapo_weight_quant_mode = prolog_mode
+@@ -139,8 +144,8 @@ def test_group128_forward_uses_packed_native_reader_for_mixed_prefill_decode(tup
+         impl.kv_a_layernorm = SimpleNamespace(weight=object(), variance_epsilon=1e-4)
+         impl.fused_qkv_a_proj = MagicMock(side_effect=AssertionError("must not execute ordinary projections"))
+         impl._q_proj_and_k_up_proj = MagicMock(side_effect=AssertionError("must not project twice"))
+-    q_latent = torch.ones(5, 2, 512, dtype=torch.bfloat16)
+-    q_raw = torch.ones(5, 2, 64, dtype=torch.bfloat16)
++    q_latent = torch.ones(5, heads, 512, dtype=torch.bfloat16)
++    q_raw = torch.ones(5, heads, 64, dtype=torch.bfloat16)
+     with (
+         patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
+         patch.object(mla_v1, "pack_kimi_k3_sfa_c8", return_value=packed_rows) as pack,
+@@ -173,8 +178,8 @@ def test_group128_forward_uses_packed_native_reader_for_mixed_prefill_decode(tup
+     assert native.call_args.args[2] is packed_cache
+     assert native.call_args.args[4:7] == ([0, 1, 5], [9, 7], 0.125)
+     assert native.call_args.kwargs == {"causal": causal}
+-    torch.testing.assert_close(output[:5], latent_out[:, :, :3].reshape(5, 6) * 0.5)
+-    torch.testing.assert_close(output[5], torch.zeros(6, dtype=torch.bfloat16))
++    torch.testing.assert_close(output[:5], latent_out[:, :, :3].reshape(5, heads * 3) * 0.5)
++    torch.testing.assert_close(output[5], torch.zeros(heads * 3, dtype=torch.bfloat16))
+     assert impl.o_proj.call_args.kwargs == {"is_prefill": True}
+ 
+ 
+@@ -260,7 +265,7 @@ def _group128_weight_impl(mxfp8=False, heads=2):
+ 
+ 
+ @pytest.mark.parametrize("mxfp8", [False, True])
+-@pytest.mark.parametrize("heads", [2, 48])
++@pytest.mark.parametrize("heads", [2, 12, 24, 48])
+ def test_group128_prolog_weight_preparation_preserves_linears_and_local_heads(mxfp8, heads):
+     impl = _group128_weight_impl(mxfp8, heads)
+     projections = (impl.fused_qkv_a_proj, impl.q_proj)
+diff --git a/vllm_ascend/attention/kimi_k3_sfa_c8.py b/vllm_ascend/attention/kimi_k3_sfa_c8.py
+index e5a0e17de..15478d8e8 100644
+--- a/vllm_ascend/attention/kimi_k3_sfa_c8.py
++++ b/vllm_ascend/attention/kimi_k3_sfa_c8.py
+@@ -29,6 +29,13 @@ PROLOG_NZ_FORMAT = 29
+ MX_GROUP_SIZE = 32
+ 
+ 
++def get_kimi_k3_sfa_c8_padded_heads(num_heads: int) -> int:
++    """Smallest native SFA head count; projection/cache heads stay unchanged."""
++    if not 1 <= num_heads <= SUPPORTED_HEADS[-1]:
++        raise ValueError(f"K3 SFA C8 requires 1..{SUPPORTED_HEADS[-1]} local query heads.")
++    return next(heads for heads in SUPPORTED_HEADS if heads >= num_heads)
++
++
+ def require_kimi_k3_sfa_c8_ops() -> Callable:
+     """Fail explicitly when the native CANN 9.2 extension is unavailable.
+ 
+@@ -379,8 +386,8 @@ def kimi_k3_sfa_c8_attention(
+         raise ValueError("q_raw must have shape [T, H, 64] matching q_latent.")
+     if q_latent.dtype not in (torch.bfloat16, torch.float16) or q_raw.dtype != q_latent.dtype:
+         raise ValueError("SFA query components must have matching BF16 or FP16 dtypes.")
+-    if q_latent.shape[1] not in SUPPORTED_HEADS:
+-        raise ValueError(f"K3 SFA C8 query heads must be one of {SUPPORTED_HEADS}.")
++    num_heads = q_latent.shape[1]
++    native_heads = get_kimi_k3_sfa_c8_padded_heads(num_heads)
+     if block_table.ndim != 2 or block_table.dtype != torch.int32:
+         raise ValueError("block_table must be a two-dimensional int32 tensor.")
+     if any(tensor.device != q_latent.device for tensor in (q_raw, packed_cache, block_table)):
+@@ -407,11 +414,18 @@ def kimi_k3_sfa_c8_attention(
+     if q_latent.shape[0] == 0:
+         return output
+     operator = require_kimi_k3_sfa_c8_ops()
+-    query = torch.cat((q_latent, q_raw), dim=-1)
++    if native_heads == num_heads:
++        query = torch.cat((q_latent, q_raw), dim=-1)
++    else:
++        # Heads are independent with one shared KV head. Pad only the SFA
++        # operand, not projections, Prolog weights, cache or output-gate data.
++        query = q_latent.new_zeros((q_latent.shape[0], native_heads, LATENT_DIM + RAW_DIM))
++        query[:, :num_heads, :LATENT_DIM].copy_(q_latent)
++        query[:, :num_heads, LATENT_DIM:].copy_(q_raw)
+     # CANN 9.2's Python extension replaces sinks=None with zeros, which adds
+     # exp(0) to the softmax denominator. K3 MLA has no attention sink: an
+     # explicit -inf logit contributes zero mass and preserves dense attention.
+-    sinks = torch.full((q_latent.shape[1],), -float("inf"), dtype=torch.float32, device=query.device)
++    sinks = torch.full((native_heads,), -float("inf"), dtype=torch.float32, device=query.device)
+     for request, kv_len in enumerate(kv_lens):
+         start, end = starts[request : request + 2]
+         q_len = end - start
+@@ -454,7 +468,9 @@ def kimi_k3_sfa_c8_attention(
+             if not isinstance(result, (tuple, list)) or len(result) != 3:
+                 raise RuntimeError("K3 SFA C8 requires the three-output KvQuantSparseFlashAttentionV2 API.")
+             attention_out = result[0]
+-            if attention_out.shape != (chunk_len, q_latent.shape[1], LATENT_DIM):
++            if attention_out.shape != (chunk_len, native_heads, LATENT_DIM):
+                 raise RuntimeError("KvQuantSparseFlashAttentionV2 returned an incompatible MLA output shape.")
+-            output[start + local_start : start + local_end].copy_(attention_out)
++            # Crop the head axis (not token axis), then copy into the original
++            # contiguous [T, H, 512] contract consumed by Value up-projection.
++            output[start + local_start : start + local_end].copy_(attention_out[:, :num_heads])
+     return output
+diff --git a/vllm_ascend/attention/mla_v1.py b/vllm_ascend/attention/mla_v1.py
+index b3df112b6..6ef75d830 100644
+--- a/vllm_ascend/attention/mla_v1.py
++++ b/vllm_ascend/attention/mla_v1.py
+@@ -33,6 +33,7 @@ from vllm_ascend.attention.kimi_k3_sfa_c8 import (
+     PROLOG_HIDDEN_SIZES,
+     PROLOG_Q_RANKS,
+     PROLOG_QK_DIMS,
++    get_kimi_k3_sfa_c8_padded_heads,
+     kimi_k3_sfa_c8_attention,
+     kimi_k3_sfa_c8_prolog,
+     pack_kimi_k3_sfa_c8,
+@@ -924,8 +925,13 @@ class AscendMLAImpl(MLAAttentionImpl):
+             )
+         if self.use_mla_rope or (self.kv_lora_rank, self.qk_rope_head_dim, self.num_kv_heads) != (512, 64, 1):
+             raise ValueError("K3 group128 SFA C8 requires No-RoPE MLA with latent512 + raw64 and one KV head.")
+-        if self.num_heads not in (1, 2, 4, 8, 16, 32, 48, 64, 128):
+-            raise ValueError(f"QSFA V2 does not support {self.num_heads} local query heads.")
++        native_heads = get_kimi_k3_sfa_c8_padded_heads(self.num_heads)
++        if native_heads != self.num_heads:
++            logger.warning_once(
++                "K3 C8 SFA query-head padding: %d -> %d; projections, Prolog and KV cache stay unpadded.",
++                self.num_heads,
++                native_heads,
++            )
+         if self.enable_kv_nz:
+             raise ValueError("K3 group128 SFA C8 requires enable_kv_nz=false (packed PA_BSND cache).")
+         parallel = config.parallel_config
+@@ -1183,8 +1189,9 @@ class AscendMLAImpl(MLAAttentionImpl):
+     def _process_weights_for_kimi_k3_sfa_c8(self) -> None:
+         """Prepare V4 weights without changing the checkpoint's quantization.
+ 
+-        This is separate from the FIA/per-tensor setup: QSFA uses packed656,
+-        no query-head padding, and BF16 Q even when the cache is FP8.
++        This is separate from the FIA/per-tensor setup: QSFA uses packed656
++        and BF16 Q even when the cache is FP8. Any head padding is applied
++        only at the SFA reader boundary; Prolog keeps the real local heads.
+         """
+         projections = (self.fused_qkv_a_proj, self.q_proj)
+         if any(proj is None for proj in projections) or self.q_lora_rank not in PROLOG_Q_RANKS:
