@@ -1,0 +1,1559 @@
+diff --git a/docs/source/developer_guide/kimi_k3_sfa_c8.md b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+index 8411a5d55..dbd251c7f 100644
+--- a/docs/source/developer_guide/kimi_k3_sfa_c8.md
++++ b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+@@ -7,11 +7,11 @@
+ 
+ 这是 **FP8 E4M3 + group128 FP32 scale**，不是 group32/E8M0 的标准 MXFP8。
+ 本机验证范围是 CPU 契约测试。用户已在 A5 上报告前一版10项原生用例通过；
+-本次新增的 head padding 用例及完整模型精度、性能仍需在 A5 验证。
++本次新增的 head padding、NPUGraph 用例及完整模型精度、性能仍需在 A5 验证。
+ 
+ ## 当前范围
+ 
+-- MRV2，`--enforce-eager`，BF16 激活。
++- MRV2，eager 或 `FULL_DECODE_ONLY`，BF16 激活。
+ - Prefill、Decode、混合批次、带历史 KV 的 chunked prefill。
+ - MLA Cache 每 token：512 字节 FP8 latent、128 字节 BF16 raw64、
+   16 字节 FP32 scale，共 656 字节，不含页 padding。
+@@ -22,7 +22,8 @@
+   不改变 Prolog、投影权重、KV Cache、attention scale 或输出 gate。
+ - 原生算子缺失立即报错，没有静默 fallback。
+ 
+-当前不接入图捕获、PCP/DCP、MTP/投机解码、KV transfer、KV layer parallelism。
++当前仅接入单 token Decode 图捕获，Prefill/混合批次保持 eager。
++不接入通用 FULL、PIECEWISE、PCP/DCP、MTP/投机解码、KV transfer、KV layer parallelism。
+ 不支持的组合在启动时拒绝。
+ 
+ `enable_mlapo` 现在控制这条 C8 路径的前处理，Prefill、Decode 和混合批次均生效：
+@@ -92,7 +93,8 @@ CANN 和模型权重版本配套。CANN 版本固定为 9.2.0；同时需要该
+ ```bash
+ pip install -v -e . --no-deps --no-build-isolation
+ pytest -sv --noconftest \
+-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py
++  tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py \
++  tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
+ ```
+ 
+ 单算子测试不需要模型权重，覆盖真实 group128 量化、656 字节打包、
+@@ -102,7 +104,7 @@ query 分块因果边界、追加 KV、旧 Cache 与 guard 不被覆盖。
+ 非 A5 环境跳过；A5 上缺原生接口会失败，而不是跳过。
+ 
+ 测试同时包含 Prolog V4 两种权重模式与普通前处理的对照。
+-当前共20项原生用例：reader覆盖64/12/24 heads，Prolog覆盖2/12 heads，
++原有20项原生用例：reader覆盖64/12/24 heads，Prolog覆盖2/12 heads，
+ 包括多token、跨页和追加Decode。此前10项通过不代替新增head padding的实机验证。
+ 先通过单算子测试，再加载减层模型验证链路和性能，最后验证完整模型。
+ 不要把模型能够生成文本当作算子精度验证。
+@@ -119,8 +121,11 @@ python tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py \
+ `--weight-quant-mode 0` 测 BF16 投影；改为3测 MXFP8 投影。微基准输出两种开关的
+ `preprocess_ms` 和 `preprocess_plus_attention_ms`，使用同步后的主机墙钟时间，
+ 不包括权重准备、Value/O-proj，也不等价于减层模型或完整模型吞吐。
+-本次 head padding 修改后，相关 CPU 回归为415项及22项 subtest 通过。
+-新增 A5 head padding 用例尚未执行。
++新增14项图用例（合计34项）覆盖普通／Prolog × BF16／MXFP8 投影 × 12/24/48 heads，
++同一图改变活跃请求数、Q/hidden、KV 长度、slot、页表，检查零输出和 Cache 写保护；
++另有私有／共享 graph pool 下多 bucket 切换、连续追加历史的用例。
++原生图测试使用与 MRV2 一致的默认捕获模式，不启用 `auto_dispatch_capture`。
++一例使用32768宽的静态索引，实际 KV 长度仍较短，不能据此声称长上下文性能已验证。
+ 
+ ## 模型启动
+ 
+@@ -154,7 +159,7 @@ MLA Cache。不要混用 ModelSlim 的 FAQuant/FAKQuant per-tensor C8 配置；
+ 启动日志应出现：
+ 
+ ```text
+-K3 native QSFA C8 enabled: FP8 group128 with FP32 scales, BF16 raw64, full KV indices, MRV2 eager only.
++K3 native QSFA C8 enabled: FP8 group128 with FP32 scales, BF16 raw64, full KV indices, MRV2 eager / FULL_DECODE_ONLY.
+ ```
+ 
+ 基线对比时关闭 `enable_kimi_k3_sfa_c8`，其他条件保持一致。
+@@ -164,6 +169,36 @@ K3 native QSFA C8 enabled: FP8 group128 with FP32 scales, BF16 raw64, full KV in
+ 至少验证 batch=1、batch>1、不同长度请求和带历史 Cache 的分块 Prefill，
+ 再逐步增大上下文；记录输出/任务精度、峰值显存、TTFT 和生成吞吐。
+ 
++## Decode 图模式
++
++先通过同一镜像内的全部原生用例，再在上述模型命令中**删除** `--enforce-eager`，
++添加（已有 compilation-config 时合并，不重复传入）：
++
++```bash
++--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
++```
++
++`enable_mlapo=false/true` 均接入此路径，普通与融合使用同一个 batched SFA reader。
++这里只捕获单 token Decode；Prefill 不捕获。不要同时打开 MTP 或切到通用 FULL。
++
++MRV2 在每次 replay 前更新固定地址的 device KV lengths、完整逻辑 indices、
++block table 和 slots。每个 bucket 独立保存这些缓冲区；捕获时虽然 forward mode
++为 NONE，仍由专用 metadata 选择固定形状路径。SFA 直接读设备元数据，不注册 FIA
++任务更新。padding 行的 slot 为-1、KV length 为0，输出通过 masked_fill 清零，
++不能用乘0代替，因为算子可能没有写入这些行。
++replay 前还会核对所有 C8 MLA 层的图 metadata 和 bucket；若云插件替换了 model
++state 却未刷新 C8 metadata，会明确报错，不允许静默使用捕获时的旧值。
++
++验证不能停在“图捕获成功”：需真实生成多轮 token，覆盖并发1/3/8/1、不同长度、
++请求退出/补入和 chunked prefill；对比 eager 与 graph 的输出/任务指标，并通过
++profiling 确认实际 replay 和 QSFA 执行。单算子的 heads12/24/48 对应 TP8/4/2 的
++算子形状，不等价于已通过三种 TP 的多卡通信或减层模型测试。
++
++性能边界：图路径的索引宽度固定为 `max_model_len`。SFA 的实际 KV 循环由运行时
++KV length 截断，但每步更新索引仍为 O(bucket × max_model_len)，较大静态宽度也
++可能关闭原生算子的向量化 gather 优化。因此4096验证通过后，必须单独测原配置
++160000，不能先宣称图模式必定提速或长上下文开销不变。
++
+ ## 实现位置
+ 
+ | 文件 | 职责 |
+@@ -171,7 +206,10 @@ K3 native QSFA C8 enabled: FP8 group128 with FP32 scales, BF16 raw64, full KV in
+ | `vllm_ascend/ascend_config.py` | 默认关闭的实验开关 |
+ | `vllm_ascend/attention/mla_v1.py` | K3 适用检查、完整批次元数据、普通／Prolog 分支与权重准备 |
+ | `vllm_ascend/attention/kimi_k3_sfa_c8.py` | 原生 Prolog V4、量化、字节打包、scatter、全索引 SFA 读取 |
++| `vllm_ascend/attention/kimi_k3_sfa_c8_graph.py` | 固定地址 Decode 元数据和 batched SFA 图路径 |
+ | `vllm_ascend/worker/v2/attn_utils.py` | packed Cache 的容量、分配和分页 view |
++| `vllm_ascend/worker/v2/model_states/mamba_hybrid.py` | 仅为 C8 FULL Decode 传递 padded bucket 大小 |
++| `vllm_ascend/worker/v2/aclgraph_utils.py` | replay 前拒绝缺失或错误 bucket 的 C8 metadata |
+ 
+ 不修改 ModelRunner V1，也不把模型的 `is_sparse` 改为 true。
+ `mla_v1.py` 是 Attention 实现文件名，不表示启用 ModelRunner V1。
+@@ -197,12 +235,21 @@ Prolog 接口依据：[CANN 9.2.0 V4WeightNz 文档](https://gitcode.com/cann/op
+ VLLM_VERSION=0.29.0 PYTHONPATH=/path/to/vllm-v0.29.0:. python -m pytest -q \
+   tests/ut/attention/test_kimi_k3_sfa_c8_integration.py \
+   tests/ut/attention/test_kimi_k3_sfa_c8.py \
++  tests/ut/attention/test_kimi_k3_sfa_c8_graph.py \
+   tests/ut/attention/test_mla_v1.py \
+   tests/ut/worker/test_attn_utils_v2.py \
+   tests/ut/attention/test_sfa_v1.py \
+-  tests/ut/models/test_kimi_k3_adapter.py
++  tests/ut/models/test_kimi_k3_adapter.py \
++  tests/ut/worker/test_model_runner_v2_mamba.py \
++  tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py
+ ```
+ 
+ CPU 测试覆盖开关、两种投影权重准备、原生调用参数、混合批次元数据、
+ packed Cache 容量/页 stride/非零 offset/KDA dtype，以及原有 MLA/SFA 回归。
+ `ruff`、Python 编译和补丁应用检查也已通过。NPU 测试和微基准仍需在 A5 执行。
++
++本次上列定向 CPU 回归为517项通过、22项 subtest通过；它们不模拟真实 NPUGraph。
++额外检查整个 `test_model_runner_v2.py` 时有一个基线既有失败：测试期待
++`broadcast_draft_tokens`，源码已调用 `broadcast_drafts`，本补丁未修改该逻辑。
++仓库级 `format.sh ci` 因本机未安装 pre-commit 未执行完成，已执行改动文件的
++Ruff、格式及 diff 检查。新增34项原生用例尚待 A5 执行，不能宣称已通过。
+diff --git a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
+new file mode 100644
+index 000000000..7185c8e7a
+--- /dev/null
++++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
+@@ -0,0 +1,377 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""A5 native K3 C8 decode-graph replay checks, without model checkpoints.
++
++Run on the A5/CANN 9.2 environment, not the CPU mock test environment:
++pytest -sv --noconftest tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
++
++One captured B4 graph is replayed with 4 -> 1 -> 3 -> 4 active requests.
++All metadata updates and independent references stay outside capture.
++"""
++
++import math
++
++import pytest
++import torch
++
++from vllm_ascend.attention.kimi_k3_sfa_c8 import (
++    kimi_k3_sfa_c8_prolog,
++    pack_kimi_k3_sfa_c8,
++    require_kimi_k3_sfa_c8_ops,
++    require_kimi_k3_sfa_c8_prolog_ops,
++    scatter_kimi_k3_sfa_c8,
++)
++from vllm_ascend.attention.kimi_k3_sfa_c8_graph import KimiK3C8DecodeState, kimi_k3_sfa_c8_decode
++from vllm_ascend.device.device_config import check_ascend_device_type, is_950
++
++from . import test_kimi_k3_sfa_c8 as native
++
++CAPACITY = 4
++MAX_LIVE_KV_LENGTH = 130
++SHORT_MODEL_LENGTH = 256
++LONG_MODEL_LENGTH = 32768
++PAGE_PADDING_ROWS = 2
++REPLAY_LENGTHS = ((127, 128, 129, 130), (128,), (129, 127, 128), (130, 129, 130, 127))
++WARMUP_ITERATIONS = 2
++GRAPH_BUCKETS = (4, 1, 8)
++BUCKET_REPLAYS = ((4, (127, 127, 127, 127)), (1, (128,)), (8, (129, 128, 128, 128, 127, 127)), (4, (130, 129, 129)))
++
++
++@pytest.fixture(scope="module", autouse=True)
++def require_a5_native_c8_graph():
++    if not torch.npu.is_available() or not is_950():
++        pytest.skip("K3 C8 NPUGraph checks require a real Ascend 950 and A5 VA build.")
++    check_ascend_device_type()
++    try:
++        require_kimi_k3_sfa_c8_ops()
++        require_kimi_k3_sfa_c8_prolog_ops()
++    except RuntimeError as exc:
++        pytest.fail(str(exc))
++
++
++def _graph_cache(capacity=CAPACITY):
++    pages_per_request = math.ceil(MAX_LIVE_KV_LENGTH / native.PAGE_SIZE)
++    page_count = capacity * pages_per_request
++    backing = torch.full(
++        (page_count + 4, native.PAGE_SIZE + PAGE_PADDING_ROWS, 1, native.PACKED_DIM),
++        native.CACHE_GUARD_BYTE,
++        dtype=torch.uint8,
++        device="npu",
++    )
++    # Nonzero storage offset plus padding between pages must survive capture.
++    cache = backing[1:-1, : native.PAGE_SIZE].view(torch.float8_e4m3fn)
++    return backing, cache
++
++
++def _step_table(phase, capacity=CAPACITY):
++    pages_per_request = math.ceil(MAX_LIVE_KV_LENGTH / native.PAGE_SIZE)
++    page_count = capacity * pages_per_request
++    # Every replay changes every request's physical pages; 0/last stay guards.
++    return torch.arange(page_count, 0, -1, dtype=torch.int32).roll(phase).reshape(capacity, pages_per_request)
++
++
++def _prepare_replay(phase, lengths, backings, caches, hidden, state):
++    """Prepare a changed batch outside capture, preserving all graph addresses."""
++    generator = torch.Generator().manual_seed(9200 + phase)
++    table = _step_table(phase)
++    slots = torch.stack(
++        [native._slots_for_range(table, row, length - 1, length)[0] for row, length in enumerate(lengths)]
++    )
++    # Nonzero inactive inputs make stale rows observable; only metadata masks
++    # may stop their cache writes and zero their output.
++    hidden.copy_((torch.randn(hidden.shape, generator=generator) * (0.125 + phase * 0.015)).to(torch.bfloat16).npu())
++    for backing in backings:
++        backing.fill_(native.CACHE_GUARD_BYTE)
++    for row, length in enumerate(lengths):
++        latent = torch.randn(length - 1, 1, native.LATENT_DIM, generator=generator).to(torch.bfloat16)
++        raw = torch.randn(length - 1, 1, native.RAW_DIM, generator=generator).to(torch.bfloat16)
++        packed = pack_kimi_k3_sfa_c8(latent.npu(), raw.npu())
++        prefix_slots = native._slots_for_range(table, row, 0, length - 1).npu()
++        for cache in caches:
++            scatter_kimi_k3_sfa_c8(packed, prefix_slots, cache)
++    lengths_cpu = torch.tensor(lengths, dtype=torch.int32)
++    state.update(lengths_cpu, table.npu(), slots.npu(), len(lengths), seq_lens_device=lengths_cpu.npu())
++    return table, slots, backings[0].cpu()
++
++
++def _state_addresses(state):
++    return tuple(
++        getattr(state, name).data_ptr()
++        for name in (
++            "seq_lens",
++            "query_ends",
++            "block_table",
++            "slots",
++            "active",
++            "positions",
++            "indices",
++            "invalid_indices",
++        )
++    )
++
++
++def _assert_only_current_slots_changed(backing, before, slots):
++    actual = backing.cpu()
++    changed = torch.zeros(actual.shape[:2], dtype=torch.bool)
++    changed[slots // native.PAGE_SIZE + 1, slots % native.PAGE_SIZE] = True
++    # Includes all existing prefix rows, inactive requests, unused pages, the
++    # leading/trailing storage guards and the two padding rows in every page.
++    torch.testing.assert_close(actual[~changed], before[~changed], atol=0, rtol=0)
++
++
++def _dense_decode_from_packed(query, raw_query, cache, table, lengths):
++    cache_bytes = cache.view(torch.uint8).cpu()
++    latent, raw = [], []
++    for row, length in enumerate(lengths):
++        slots = native._slots_for_range(table, row, 0, length)
++        unpacked = native._unpack_cpu(cache_bytes[slots // native.PAGE_SIZE, slots % native.PAGE_SIZE])
++        latent.append(unpacked[0])
++        raw.append(unpacked[1])
++    return native._dense_reference(
++        query.cpu(),
++        raw_query.cpu(),
++        latent,
++        raw,
++        [1] * len(lengths),
++        lengths,
++        scale=native.PROLOG_ATTENTION_SCALE,
++    )
++
++
++@pytest.mark.parametrize("query_heads", (12, 24, 48), ids=("tp8-heads12", "tp4-heads24", "tp2-heads48"))
++@pytest.mark.parametrize("path", ("ordinary-bf16", "ordinary-mxfp8", "mlapo-bf16", "mlapo-mxfp8"))
++@torch.inference_mode()
++def test_kimi_k3_c8_native_decode_graph_replay(path, query_heads):
++    weight_quant_mode = 3 if path.endswith("mxfp8") else 0
++    cpu, ordinary, fused = native._prolog_case(CAPACITY, weight_quant_mode, 0.02, 0.04, heads=query_heads)
++    hidden = cpu["hidden"].npu()
++    graph_backing, graph_cache = _graph_cache()
++    eager_backing, eager_cache = _graph_cache()
++    # This case validates a 32768-wide fixed index buffer with short live
++    # contexts, not a claim about full 32768-token throughput or accuracy.
++    max_seq_len = LONG_MODEL_LENGTH if path == "mlapo-mxfp8" and query_heads == 12 else SHORT_MODEL_LENGTH
++    state = KimiK3C8DecodeState(CAPACITY, max_seq_len, math.ceil(max_seq_len / native.PAGE_SIZE), hidden.device)
++    addresses = _state_addresses(state)
++    hidden_address, cache_address = hidden.data_ptr(), graph_cache.data_ptr()
++
++    def preprocess(cache):
++        if path.startswith("ordinary"):
++            return native._ordinary_prolog(hidden, cache, state.slots, ordinary)
++        return kimi_k3_sfa_c8_prolog(hidden, cache, state.slots, **fused)
++
++    def pipeline():
++        query, raw_query = preprocess(graph_cache)
++        output = kimi_k3_sfa_c8_decode(query, raw_query, graph_cache, state, native.PROLOG_ATTENTION_SCALE)
++        return query, raw_query, output
++
++    _prepare_replay(0, REPLAY_LENGTHS[0], (graph_backing, eager_backing), (graph_cache, eager_cache), hidden, state)
++    for _ in range(WARMUP_ITERATIONS):
++        pipeline()
++    torch.npu.synchronize()
++    graph = torch.npu.NPUGraph()
++    # Match MRV2's default/global capture mode; auto-dispatch could hide an
++    # operator that cannot participate in the actual production graph.
++    with torch.npu.graph(graph, stream=torch.npu.current_stream()):
++        graph_query, graph_raw, graph_output = pipeline()
++    output_address = graph_output.data_ptr()
++
++    for phase, lengths in enumerate(REPLAY_LENGTHS):
++        table, slots, before = _prepare_replay(
++            phase, lengths, (graph_backing, eager_backing), (graph_cache, eager_cache), hidden, state
++        )
++        assert _state_addresses(state) == addresses
++        assert hidden.data_ptr() == hidden_address and graph_cache.data_ptr() == cache_address
++        assert graph_output.data_ptr() == output_address
++        graph.replay()
++        actual = graph_output.float().cpu()
++        active = len(lengths)
++        assert actual.shape == (CAPACITY, query_heads, native.LATENT_DIM)
++        assert torch.isfinite(actual).all()
++        torch.testing.assert_close(actual[active:], torch.zeros_like(actual[active:]), atol=0, rtol=0)
++
++        eager_query, eager_raw = preprocess(eager_cache)
++        torch.testing.assert_close(
++            graph_query.cpu(), eager_query.cpu(), atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL
++        )
++        torch.testing.assert_close(
++            graph_raw.cpu(), eager_raw.cpu(), atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL
++        )
++        torch.testing.assert_close(graph_backing.cpu(), eager_backing.cpu(), atol=0, rtol=0)
++        _assert_only_current_slots_changed(graph_backing, before, slots)
++        # This reference uses the ordinary eager reader rather than the new
++        # graph decode API, so an incorrect fixed-batch layout cannot agree
++        # merely because both sides exercise the same graph metadata logic.
++        eager_output = native._run_attention(
++            eager_query[:active],
++            eager_raw[:active],
++            eager_cache,
++            table[:active],
++            [1] * active,
++            lengths,
++            chunk_rows=1,
++            scale=native.PROLOG_ATTENTION_SCALE,
++        )
++        dense_output = _dense_decode_from_packed(graph_query[:active], graph_raw[:active], graph_cache, table, lengths)
++        torch.testing.assert_close(
++            actual[:active], eager_output, atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL
++        )
++        torch.testing.assert_close(
++            actual[:active], dense_output, atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL
++        )
++
++
++def _prepare_bucket_replay(buffers, phase, lengths, backing, cache, *, initialize_cache=True):
++    """Update scheduler-owned device values without replacing captured buffers."""
++    generator = torch.Generator().manual_seed(9300 + phase)
++    # Continuous bucket switches retain page ownership; lengths and slots
++    # advance. The other parametrized test covers changing physical tables.
++    table = _step_table(phase if initialize_cache else 0, max(GRAPH_BUCKETS))[: len(lengths)]
++    slot_values = [native._slots_for_range(table, row, length - 1, length)[0] for row, length in enumerate(lengths)]
++    slots = torch.stack(slot_values) if slot_values else torch.empty(0, dtype=torch.int64)
++    for name in ("query", "raw_query", "latent", "raw"):
++        target = buffers[name]
++        target.copy_(torch.randn(target.shape, generator=generator).to(torch.bfloat16).npu())
++    if initialize_cache:
++        backing.fill_(native.CACHE_GUARD_BYTE)
++        for row, length in enumerate(lengths):
++            latent = torch.randn(length - 1, 1, native.LATENT_DIM, generator=generator).to(torch.bfloat16)
++            raw = torch.randn(length - 1, 1, native.RAW_DIM, generator=generator).to(torch.bfloat16)
++            prefix_slots = native._slots_for_range(table, row, 0, length - 1).npu()
++            scatter_kimi_k3_sfa_c8(pack_kimi_k3_sfa_c8(latent.npu(), raw.npu()), prefix_slots, cache)
++    lengths_cpu = torch.tensor(lengths, dtype=torch.int32)
++    buffers["state"].update(lengths_cpu, table.npu(), slots.npu(), len(lengths), seq_lens_device=lengths_cpu.npu())
++    return table, slots
++
++
++def _bucket_pipeline(buffers, cache):
++    packed = pack_kimi_k3_sfa_c8(buffers["latent"], buffers["raw"])
++    scatter_kimi_k3_sfa_c8(packed, buffers["state"].slots, cache)
++    return kimi_k3_sfa_c8_decode(
++        buffers["query"], buffers["raw_query"], cache, buffers["state"], native.PROLOG_ATTENTION_SCALE
++    )
++
++
++@pytest.mark.parametrize("shared_pool", (False, True), ids=("private-pools", "mrv2-shared-pool"))
++@torch.inference_mode()
++def test_kimi_k3_c8_native_graph_bucket_switch_with_eager_interleave(shared_pool):
++    """Capture B4/B1/B8 separately, switch 4 -> 1 -> 8 -> 4, then all inactive."""
++    heads = 12
++    backing, cache = _graph_cache(max(GRAPH_BUCKETS))
++    cache_address = cache.data_ptr()
++    pool = torch.npu.graph_pool_handle() if shared_pool else None
++    buckets = {}
++    for capacity in GRAPH_BUCKETS:
++        buffers = {
++            "state": KimiK3C8DecodeState(
++                capacity, SHORT_MODEL_LENGTH, SHORT_MODEL_LENGTH // native.PAGE_SIZE, cache.device
++            ),
++            "query": torch.empty((capacity, heads, native.LATENT_DIM), dtype=torch.bfloat16, device=cache.device),
++            "raw_query": torch.empty((capacity, heads, native.RAW_DIM), dtype=torch.bfloat16, device=cache.device),
++            "latent": torch.empty((capacity, 1, native.LATENT_DIM), dtype=torch.bfloat16, device=cache.device),
++            "raw": torch.empty((capacity, 1, native.RAW_DIM), dtype=torch.bfloat16, device=cache.device),
++        }
++        _prepare_bucket_replay(buffers, capacity, (127,) * capacity, backing, cache)
++        for _ in range(WARMUP_ITERATIONS):
++            _bucket_pipeline(buffers, cache)
++        torch.npu.synchronize()
++        graph = torch.npu.NPUGraph()
++        with torch.npu.graph(graph, pool=pool, stream=torch.npu.current_stream()):
++            output = _bucket_pipeline(buffers, cache)
++        buffers["graph"] = graph
++        buffers["output"] = output
++        buffers["addresses"] = _state_addresses(buffers["state"])
++        buffers["input_addresses"] = tuple(buffers[name].data_ptr() for name in ("query", "raw_query", "latent", "raw"))
++        buffers["output_address"] = output.data_ptr()
++        buckets[capacity] = buffers
++    assert len({item["state"].seq_lens.data_ptr() for item in buckets.values()}) == len(GRAPH_BUCKETS)
++    # Shared graph pools may reuse output storage between buckets. Require
++    # each captured output's address to remain fixed, not globally distinct.
++
++    # Initialize each request's first 126 tokens once. No cache reset or
++    # re-prefill is allowed during the actual bucket-switch replay sequence.
++    _prepare_bucket_replay(buckets[max(GRAPH_BUCKETS)], 0, (127,) * max(GRAPH_BUCKETS), backing, cache)
++    first_b4_output = None
++    graph_written_history = {}
++    for phase, (capacity, lengths) in enumerate((*BUCKET_REPLAYS, (4, ()))):
++        buffers = buckets[capacity]
++        table, slots = _prepare_bucket_replay(buffers, phase, lengths, backing, cache, initialize_cache=False)
++        cache_before = cache.view(torch.uint8).cpu()
++        for previous_slot, previous_bytes in graph_written_history.items():
++            torch.testing.assert_close(
++                cache_before[previous_slot // native.PAGE_SIZE, previous_slot % native.PAGE_SIZE],
++                previous_bytes,
++                atol=0,
++                rtol=0,
++            )
++        active = len(lengths)
++        if active:
++            # Real eager writer/reader interleave: change both current slots
++            # and a history row. The graph must preserve the history edit,
++            # overwrite only its current slots and read the new query values.
++            # Edit history position zero, never the previous graph-written
++            # decode tokens: those must become inputs to later graph replays.
++            eager_slots = torch.cat(
++                [
++                    torch.cat(
++                        (
++                            native._slots_for_range(table, row, 0, 1),
++                            native._slots_for_range(table, row, length - 1, length),
++                        )
++                    )
++                    for row, length in enumerate(lengths)
++                ]
++            )
++            eager_latent = buffers["latent"][:active].repeat_interleave(2, dim=0) * 0.75
++            eager_raw = buffers["raw"][:active].repeat_interleave(2, dim=0) * 0.5
++            scatter_kimi_k3_sfa_c8(pack_kimi_k3_sfa_c8(eager_latent, eager_raw), eager_slots.npu(), cache)
++            buffers["query"].add_(0.125)
++            eager_output = native._run_attention(
++                buffers["query"][:active],
++                buffers["raw_query"][:active],
++                cache,
++                table,
++                [1] * active,
++                lengths,
++                chunk_rows=1,
++                scale=native.PROLOG_ATTENTION_SCALE,
++            )
++            eager_reference = _dense_decode_from_packed(
++                buffers["query"][:active], buffers["raw_query"][:active], cache, table, lengths
++            )
++            torch.testing.assert_close(
++                eager_output, eager_reference, atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL
++            )
++            buffers["query"].mul_(0.875)
++        before = backing.cpu()
++        assert cache.data_ptr() == cache_address
++        assert _state_addresses(buffers["state"]) == buffers["addresses"]
++        assert (
++            tuple(buffers[name].data_ptr() for name in ("query", "raw_query", "latent", "raw"))
++            == buffers["input_addresses"]
++        )
++        assert buffers["output"].data_ptr() == buffers["output_address"]
++        buffers["graph"].replay()
++        actual = buffers["output"].float().cpu()
++        assert actual.shape == (capacity, heads, native.LATENT_DIM) and torch.isfinite(actual).all()
++        torch.testing.assert_close(actual[active:], torch.zeros_like(actual[active:]), atol=0, rtol=0)
++        _assert_only_current_slots_changed(backing, before, slots)
++        if active:
++            cache_after = cache.view(torch.uint8).cpu()
++            expected_packed = (
++                pack_kimi_k3_sfa_c8(buffers["latent"][:active], buffers["raw"][:active]).view(torch.uint8).cpu()
++            )
++            torch.testing.assert_close(
++                cache_after[slots // native.PAGE_SIZE, slots % native.PAGE_SIZE], expected_packed, atol=0, rtol=0
++            )
++            for slot in slots.tolist():
++                graph_written_history[slot] = cache_after[slot // native.PAGE_SIZE, slot % native.PAGE_SIZE].clone()
++            expected = _dense_decode_from_packed(
++                buffers["query"][:active], buffers["raw_query"][:active], cache, table, lengths
++            )
++            torch.testing.assert_close(
++                actual[:active], expected, atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL
++            )
++            if phase == 0:
++                first_b4_output = actual.clone()
++            elif capacity == 4:
++                assert not torch.equal(actual[:active], first_b4_output[:active])
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py b/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py
+new file mode 100644
+index 000000000..fea218057
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py
+@@ -0,0 +1,292 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""CPU contracts for fixed-address decode; these do not emulate NPUGraph."""
++
++from unittest.mock import Mock, patch
++
++import pytest
++import torch
++
++from vllm_ascend.attention import kimi_k3_sfa_c8 as sfa
++from vllm_ascend.attention import kimi_k3_sfa_c8_graph as graph
++
++
++def _state(capacity=4, max_seq_len=48, table_width=3):
++    return graph.KimiK3C8DecodeState(capacity, max_seq_len, table_width, torch.device("cpu"))
++
++
++def _buffers(state):
++    return {name: value for name, value in vars(state).items() if isinstance(value, torch.Tensor)}
++
++
++def _snapshot(state):
++    return {name: tensor.clone() for name, tensor in _buffers(state).items()}
++
++
++def _assert_snapshot(state, snapshot):
++    for name, expected in snapshot.items():
++        torch.testing.assert_close(getattr(state, name), expected)
++
++
++def _cache(blocks=6, block_size=16):
++    """Construct valid group128 payload independently of the production packer."""
++    generator = torch.Generator().manual_seed(17)
++    latent = torch.randn(blocks, block_size, 1, 4, 128, generator=generator).bfloat16().float()
++    latent *= torch.tensor([0.125, 0.5, 2.0, 8.0]).view(1, 1, 1, 4, 1)
++    scales = latent.abs().amax(dim=-1).clamp_min(1e-12) / torch.finfo(torch.float8_e4m3fn).max
++    quantized = (latent / scales[..., None]).flatten(-2).to(torch.float8_e4m3fn)
++    raw = torch.randn(blocks, block_size, 1, 64, generator=generator).bfloat16()
++    return torch.cat((quantized.view(torch.uint8), raw.view(torch.uint8), scales.view(torch.uint8)), dim=-1).view(
++        torch.float8_e4m3fn
++    )
++
++
++def _dequantize(packed):
++    scales = packed[..., 640:].contiguous().view(torch.float32)
++    latent = (packed[..., :512].float() * scales.repeat_interleave(128, dim=-1)).bfloat16().float()
++    raw = packed[..., 512:640].contiguous().view(torch.bfloat16).float()
++    return latent, raw
++
++
++def _native_reference(query, key, value, indices, scale, **kwargs):
++    """Mock the device interface, including unwritten zero-length rows."""
++    assert key is value
++    assert query.is_contiguous() and query.dtype == torch.bfloat16
++    assert indices.is_contiguous() and indices.dtype == torch.int32
++    assert kwargs["layout_query"] == "TND" and kwargs["layout_kv"] == "PA_BSND"
++    assert kwargs["key_quant_mode"] == kwargs["value_quant_mode"] == kwargs["attention_mode"] == 2
++    assert kwargs["sparse_block_size"] == 1 and kwargs["sparse_mode"] == 3
++    assert kwargs["quant_scale_repo_mode"] == 1 and kwargs["tile_size"] == 128
++    assert kwargs["rope_head_dim"] == 64 and kwargs["return_softmax_lse"] is False
++    assert kwargs["actual_seq_lengths_query"].dtype == torch.int32
++    assert kwargs["actual_seq_lengths_kv"].dtype == torch.int32
++    sinks = kwargs["sinks"]
++    assert sinks.dtype == torch.float32 and sinks.shape == (query.shape[1],)
++    assert torch.isneginf(sinks).all()
++    output = torch.full((*query.shape[:2], 512), float("nan"), dtype=query.dtype)
++    start = 0
++    for batch, end in enumerate(kwargs["actual_seq_lengths_query"].tolist()):
++        length = int(kwargs["actual_seq_lengths_kv"][batch])
++        for row in range(start, end):
++            if length == 0:
++                continue
++            visible = length - (end - start) + row - start + 1
++            selected = indices[row, 0]
++            selected = selected[(selected >= 0) & (selected < visible)].long()
++            pages = kwargs["block_table"][batch, selected // key.shape[1]].long()
++            latent, raw = _dequantize(key[pages, selected % key.shape[1], 0])
++            scores = query[row].float() @ torch.cat((latent, raw), dim=-1).T * scale
++            probabilities = torch.softmax(torch.cat((scores, sinks[:, None]), dim=-1), dim=-1)[:, :-1]
++            output[row] = probabilities @ latent
++        start = end
++    return output, torch.empty(0), torch.empty(0)
++
++
++def _expected(query, cache, table, lengths, capacity):
++    """Dense all-KV reference that does not read the generated sparse indices."""
++    expected = torch.zeros(capacity, query.shape[1], 512, dtype=torch.bfloat16)
++    for batch, length in enumerate(lengths):
++        positions = torch.arange(length)
++        packed = cache[table[batch, positions // cache.shape[1]].long(), positions % cache.shape[1], 0]
++        latent, raw = _dequantize(packed)
++        scores = query[batch].float() @ torch.cat((latent, raw), dim=-1).T * (192**-0.5)
++        expected[batch] = torch.softmax(scores, dim=-1) @ latent
++    return expected
++
++
++@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
++def test_updates_preserve_buffer_addresses_and_clear_old_rows(slot_dtype):
++    state = _state()
++    addresses = {name: (value.data_ptr(), value.stride(), value.shape) for name, value in _buffers(state).items()}
++    for lengths in ([1, 17, 33, 48], [16], [], [5, 32]):
++        n = len(lengths)
++        table = torch.arange(n * 2, dtype=torch.int32).reshape(n, 2)
++        slots = torch.arange(n, dtype=slot_dtype) + 19
++        state.update(torch.tensor(lengths, dtype=torch.int64), table, slots, n)
++        assert addresses == {
++            name: (value.data_ptr(), value.stride(), value.shape) for name, value in _buffers(state).items()
++        }
++        assert state.seq_lens.tolist() == [*lengths, *([0] * (4 - n))]
++        assert state.slots.tolist() == [*slots.tolist(), *([-1] * (4 - n))]
++        assert state.active.tolist() == [*([True] * n), *([False] * (4 - n))]
++        assert state.query_ends.tolist() == [1, 2, 3, 4]
++        assert torch.count_nonzero(state.block_table[n:]) == 0
++        assert torch.count_nonzero(state.block_table[:, 2:]) == 0
++        torch.testing.assert_close(state.block_table[:n, :2], table)
++        for row in range(4):
++            length = lengths[row] if row < n else 0
++            expected = torch.full((48,), -1, dtype=torch.int32)
++            expected[:length] = torch.arange(length, dtype=torch.int32)
++            torch.testing.assert_close(state.indices[row, 0], expected)
++            torch.testing.assert_close(state.invalid_indices[row, 0], expected == -1)
++
++
++def test_buckets_and_eager_reader_do_not_mutate_each_others_state():
++    first, second = _state(2), _state(4)
++    table = torch.tensor([[4, 1, 2], [3, 5, 0]], dtype=torch.int32)
++    first.update(torch.tensor([17, 5]), table, torch.tensor([17, 53]), 2)
++    first_snapshot = _snapshot(first)
++    second.update(torch.tensor([9]), table[:1], torch.tensor([73]), 1)
++    _assert_snapshot(first, first_snapshot)
++    second_snapshot = _snapshot(second)
++    assert all(a.data_ptr() != b.data_ptr() for a, b in zip(_buffers(first).values(), _buffers(second).values()))
++    cache = _cache()
++    query = torch.randn(2, 12, 576).bfloat16()
++    with patch.object(sfa, "require_kimi_k3_sfa_c8_ops", return_value=_native_reference):
++        sfa.kimi_k3_sfa_c8_attention(query[..., :512], query[..., 512:], cache, table[:1], [0, 2], [17], 192**-0.5)
++    _assert_snapshot(first, first_snapshot)
++    _assert_snapshot(second, second_snapshot)
++    first.update(torch.tensor([32]), table[:1], torch.tensor([31]), 1)
++    _assert_snapshot(second, second_snapshot)
++
++
++@pytest.mark.parametrize("heads,native_heads", [(12, 16), (24, 32), (48, 48)])
++def test_batched_native_decode_padding_dynamic_metadata_and_dense_reference(heads, native_heads):
++    torch.manual_seed(23)
++    state, cache = _state(), _cache()
++    cache_before = cache.view(torch.uint8).clone()
++    native = Mock(side_effect=_native_reference)
++    for lengths, table in (
++        ([16, 17, 33], [[5, 0, 1], [4, 1, 2], [3, 2, 0]]),
++        ([17], [[2, 5, 0]]),
++        ([], []),
++        ([32, 48], [[1, 3, 5], [0, 4, 2]]),
++    ):
++        n = len(lengths)
++        pages = torch.tensor(table, dtype=torch.int32).reshape(n, 3)
++        slots = torch.tensor(
++            [int(pages[i, (length - 1) // 16]) * 16 + (length - 1) % 16 for i, length in enumerate(lengths)]
++        ).long()
++        state.update(torch.tensor(lengths, dtype=torch.int64), pages, slots, n)
++        query = torch.randn(4, heads, 576).bfloat16()
++        query[n:] = float("nan")
++        original = query.clone()
++        metadata_before = _snapshot(state)
++        with patch.object(graph, "require_kimi_k3_sfa_c8_ops", return_value=native):
++            actual = graph.kimi_k3_sfa_c8_decode(query[..., :512], query[..., 512:], cache, state, 192**-0.5)
++        expected = _expected(query, cache, pages, lengths, 4)
++        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
++        assert actual.shape == (4, heads, 512) and actual.is_contiguous()
++        assert actual.dtype == torch.bfloat16 and torch.isfinite(actual).all()
++        assert torch.count_nonzero(actual[n:]) == 0
++        torch.testing.assert_close(query, original, equal_nan=True)
++        torch.testing.assert_close(cache.view(torch.uint8), cache_before)
++        _assert_snapshot(state, metadata_before)
++        call = native.call_args
++        assert call.args[0].shape == (4, native_heads, 576)
++        assert torch.count_nonzero(call.args[0][:, heads:]) == 0
++        assert call.args[3] is state.indices
++        assert call.kwargs["block_table"] is state.block_table
++        assert call.kwargs["actual_seq_lengths_query"] is state.query_ends
++        assert call.kwargs["actual_seq_lengths_kv"] is state.seq_lens
++        assert state.slots[:n].tolist() == slots.tolist()
++    assert native.call_count == 4
++
++
++@pytest.mark.parametrize("dims", [(0, 16, 1), (2, 0, 1), (2, 16, 0), (-1, 16, 1)])
++def test_state_rejects_invalid_dimensions(dims):
++    with pytest.raises(ValueError, match="positive"):
++        _state(*dims)
++
++
++@pytest.mark.parametrize(
++    "changes,match",
++    [
++        ({"num_actual_tokens": -1}, "captured bucket"),
++        ({"num_actual_tokens": 5}, "captured bucket"),
++        ({"seq_lens_cpu": torch.ones(2, 1, dtype=torch.int64)}, "CPU sequence"),
++        ({"seq_lens_cpu": torch.empty(2, device="meta")}, "CPU sequence"),
++        ({"seq_lens_cpu": torch.tensor([2])}, "Missing active"),
++        ({"slot_mapping": torch.tensor([1])}, "Missing active"),
++        ({"slot_mapping": torch.ones(2, 1, dtype=torch.int64)}, "Missing active"),
++        ({"seq_lens_cpu": torch.tensor([0, 2])}, "KV lengths"),
++        ({"seq_lens_cpu": torch.tensor([-1, 2])}, "KV lengths"),
++        ({"seq_lens_cpu": torch.tensor([2, 49])}, "KV lengths"),
++        ({"block_table": torch.zeros(1, 3, dtype=torch.int32)}, "block table"),
++        ({"block_table": torch.zeros(2, 4, dtype=torch.int32)}, "block table"),
++        ({"block_table": torch.zeros(6, dtype=torch.int32)}, "block table"),
++        ({"block_table": torch.zeros(2, 3, dtype=torch.int64)}, "tables/slots"),
++        ({"slot_mapping": torch.ones(2, dtype=torch.float32)}, "tables/slots"),
++        ({"block_table": torch.zeros(2, 3, dtype=torch.int32, device="meta")}, "same device"),
++        ({"slot_mapping": torch.ones(2, dtype=torch.int64, device="meta")}, "same device"),
++    ],
++)
++def test_invalid_update_is_rejected_before_mutating_state(changes, match):
++    state = _state()
++    args = {
++        "seq_lens_cpu": torch.tensor([2, 3]),
++        "block_table": torch.zeros(2, 3, dtype=torch.int32),
++        "slot_mapping": torch.tensor([1, 2]),
++        "num_actual_tokens": 2,
++    }
++    state.update(**args)
++    snapshot = _snapshot(state)
++    args.update(changes)
++    with pytest.raises(ValueError, match=match):
++        state.update(**args)
++    _assert_snapshot(state, snapshot)
++
++
++@pytest.mark.parametrize(
++    "changes,match",
++    [
++        ({"q_latent": torch.zeros(4, 512, dtype=torch.bfloat16)}, "graph query"),
++        ({"q_latent": torch.zeros(3, 12, 512, dtype=torch.bfloat16)}, "graph query"),
++        ({"q_latent": torch.zeros(4, 12, 511, dtype=torch.bfloat16)}, "graph query"),
++        ({"q_raw": torch.zeros(4, 12, 63, dtype=torch.bfloat16)}, "raw query"),
++        ({"q_raw": torch.zeros(4, 11, 64, dtype=torch.bfloat16)}, "raw query"),
++        ({"q_latent": torch.zeros(4, 12, 512, dtype=torch.float16)}, "BF16"),
++        ({"q_raw": torch.zeros(4, 12, 64, dtype=torch.float16)}, "BF16"),
++        ({"q_raw": torch.zeros(4, 12, 64, dtype=torch.bfloat16, device="meta")}, "one device"),
++        ({"packed_cache": torch.zeros(1, 16, 1, 656, dtype=torch.bfloat16)}, "FP8"),
++        ({"packed_cache": torch.zeros(1, 16, 1, 655, dtype=torch.float8_e4m3fn)}, "656"),
++    ],
++)
++def test_decode_rejects_bad_shapes_before_native_call(changes, match):
++    args = {
++        "q_latent": torch.zeros(4, 12, 512, dtype=torch.bfloat16),
++        "q_raw": torch.zeros(4, 12, 64, dtype=torch.bfloat16),
++        "packed_cache": _cache(),
++        "state": _state(),
++        "scale": 192**-0.5,
++    }
++    args.update(changes)
++    with patch.object(graph, "require_kimi_k3_sfa_c8_ops") as native, pytest.raises(ValueError, match=match):
++        graph.kimi_k3_sfa_c8_decode(**args)
++    native.assert_not_called()
++
++
++@pytest.mark.parametrize("heads", [0, 129])
++def test_decode_rejects_unsupported_head_counts(heads):
++    with patch.object(graph, "require_kimi_k3_sfa_c8_ops") as native, pytest.raises(ValueError, match="query heads"):
++        graph.kimi_k3_sfa_c8_decode(
++            torch.zeros(4, heads, 512, dtype=torch.bfloat16),
++            torch.zeros(4, heads, 64, dtype=torch.bfloat16),
++            _cache(),
++            _state(),
++            192**-0.5,
++        )
++    native.assert_not_called()
++
++
++@pytest.mark.parametrize(
++    "result,match",
++    [
++        (torch.empty(4, 16, 512), "three-output"),
++        ((torch.empty(4, 16, 512), torch.empty(0)), "three-output"),
++        ((torch.empty(4, 12, 512), torch.empty(0), torch.empty(0)), "incompatible shape"),
++        ((torch.empty(3, 16, 512), torch.empty(0), torch.empty(0)), "incompatible shape"),
++    ],
++)
++def test_decode_checks_native_output_contract(result, match):
++    with (
++        patch.object(graph, "require_kimi_k3_sfa_c8_ops", return_value=Mock(return_value=result)),
++        pytest.raises(RuntimeError, match=match),
++    ):
++        graph.kimi_k3_sfa_c8_decode(
++            torch.zeros(4, 12, 512, dtype=torch.bfloat16),
++            torch.zeros(4, 12, 64, dtype=torch.bfloat16),
++            _cache(),
++            _state(),
++            192**-0.5,
++        )
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py b/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
+index 2ac71cc68..59a436de0 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
+@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
+ 
+ import pytest
+ import torch
++from vllm.config import CUDAGraphMode
+ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+ 
+ from vllm_ascend.ascend_config import AscendConfig
+@@ -381,3 +382,127 @@ def test_group128_metadata_keeps_all_requests_after_decode_metadata_narrows_view
+     assert metadata.query_lens == [1, 4]
+     assert metadata.seq_lens_cpu.tolist() == [9, 7]
+     assert metadata.block_tables.tolist() == [[2], [0]]
++
++
++@pytest.mark.parametrize("mode", list(CUDAGraphMode))
++def test_group128_graph_config_accepts_only_full_decode(mode):
++    impl = _group128_impl()
++    impl.vllm_config.model_config.enforce_eager = False
++    impl.vllm_config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
++    with (
++        patch.object(mla_v1, "get_ascend_config", return_value=SimpleNamespace(kvpp_config=SimpleNamespace(size=1))),
++        patch.object(mla_v1, "require_kimi_k3_sfa_c8_ops"),
++    ):
++        if mode == CUDAGraphMode.FULL_DECODE_ONLY:
++            impl._validate_kimi_k3_sfa_c8()
++        else:
++            with pytest.raises(ValueError, match="FULL_DECODE_ONLY"):
++                impl._validate_kimi_k3_sfa_c8()
++
++
++def _graph_common(capacity, actual):
++    return SimpleNamespace(
++        num_reqs=capacity,
++        num_actual_tokens=actual,
++        graph_pad_size=capacity,
++        query_start_loc=torch.arange(capacity + 1, dtype=torch.int32),
++        query_start_loc_cpu=torch.arange(capacity + 1, dtype=torch.int32),
++        _seq_lens_cpu=torch.tensor([129] * actual + [0] * (capacity - actual), dtype=torch.int32),
++        seq_lens=torch.tensor([129] * actual + [0] * (capacity - actual), dtype=torch.int32),
++        block_table_tensor=torch.arange(capacity * 2, dtype=torch.int32).view(capacity, 2),
++        slot_mapping=torch.arange(capacity, dtype=torch.int64),
++        causal=True,
++    )
++
++
++def test_group128_mrv2_builder_preserves_capture_addresses_across_buckets():
++    builder = mla_v1.AscendMLAMetadataBuilder.__new__(mla_v1.AscendMLAMetadataBuilder)
++    builder.enable_kimi_k3_sfa_c8 = True
++    builder.kimi_k3_c8_decode_states = {}
++    builder.metadata_cls = mla_v1.AscendMLAMetadata
++    builder.model_config = SimpleNamespace(max_model_len=256)
++    builder.device = torch.device("cpu")
++    captured = builder.build_for_cudagraph_capture(_graph_common(4, 4))
++    state = captured.kimi_k3_c8_decode_state
++    pointers = [t.data_ptr() for t in (state.indices, state.seq_lens, state.block_table, state.slots)]
++    for capacity, actual in ((4, 1), (1, 1), (8, 3), (4, 3), (4, 0), (4, 4)):
++        metadata = builder.build(0, _graph_common(capacity, actual))
++        assert metadata.num_actual_tokens == actual
++        assert metadata.num_prefills == 0 and metadata.decode is None
++        assert metadata.num_input_tokens == capacity
++        assert metadata.slot_mapping.numel() == capacity
++        assert metadata.kimi_k3_c8_decode_state.active.tolist() == [True] * actual + [False] * (capacity - actual)
++        if capacity == 4:
++            assert metadata.kimi_k3_c8_decode_state is state
++            assert pointers == [t.data_ptr() for t in (state.indices, state.seq_lens, state.block_table, state.slots)]
++
++
++@pytest.mark.parametrize("capturing", [False, True])
++@pytest.mark.parametrize("prolog_mode", [None, 0, 3])
++def test_group128_graph_forward_uses_bucket_rows_without_reading_host_lengths(capturing, prolog_mode):
++    impl = _group128_impl()
++    impl.enable_kimi_k3_sfa_c8 = True
++    impl.enable_mlapo = prolog_mode is not None
++    impl.num_heads = 12
++    impl.v_head_dim = 3
++    impl.q_lora_rank = 2
++    impl.scale = 0.125
++    hidden = torch.ones(4, 578, dtype=torch.bfloat16)
++    impl.fused_qkv_a_proj = lambda x: (x,)
++    impl.q_a_layernorm = lambda x: x
++    impl.kv_a_layernorm = lambda x: x
++    q = torch.ones(4, 12, 512, dtype=torch.bfloat16)
++    raw = torch.ones(4, 12, 64, dtype=torch.bfloat16)
++    impl._q_proj_and_k_up_proj = lambda x: (q, raw)
++    impl._v_up_proj_batch_major = lambda x: x[:, :, :3].reshape(4, 36)
++    impl.use_output_gate = False
++    impl.o_proj = MagicMock(side_effect=lambda x, **kw: (x,))
++    cache = torch.empty(4, 128, 1, 656, dtype=torch.float8_e4m3fn)
++    state = SimpleNamespace(capacity=4)
++    metadata = SimpleNamespace(
++        kimi_k3_c8_decode_state=state,
++        num_actual_tokens=2,
++        num_prefills=0,
++        slot_mapping=torch.tensor([3, 4, -1, -1]),
++        # Accessing eager lengths here would be a bug even during warmup.
++        query_lens=None,
++        seq_lens_cpu=None,
++    )
++    if impl.enable_mlapo:
++        impl.mlapo_weight_quant_mode = prolog_mode
++        impl.mlapo_dynamic_mx_quant_scale_alg = 0
++        impl.weight_dq = impl.weight_uq_qr = impl.weight_dkv_kr = impl.mlapo_W_UK_T = object()
++        impl.dequant_scale_w_dq = impl.dequant_scale_w_uq_qr = impl.dequant_scale_w_dkv_kr = None
++        impl.q_a_layernorm = SimpleNamespace(weight=object(), variance_epsilon=1e-6)
++        impl.kv_a_layernorm = SimpleNamespace(weight=object(), variance_epsilon=1e-6)
++    output = torch.empty(4, 36, dtype=torch.bfloat16)
++    with (
++        patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(capturing=capturing)),
++        patch.object(mla_v1, "pack_kimi_k3_sfa_c8", return_value=object()),
++        patch.object(mla_v1, "scatter_kimi_k3_sfa_c8") as scatter,
++        patch.object(mla_v1, "kimi_k3_sfa_c8_prolog", return_value=(q, raw)) as prolog,
++        patch.object(mla_v1, "kimi_k3_sfa_c8_decode", return_value=q) as decode,
++        patch.object(mla_v1, "kimi_k3_sfa_c8_attention", side_effect=AssertionError("eager reader in graph")),
++        patch.object(mla_v1, "record_attention_compute_start"),
++    ):
++        impl.forward("mla", hidden, (cache,), metadata, output)
++    assert decode.call_args.args[3] is state
++    assert decode.call_args.args[0].shape[0] == 4
++    writer = prolog if impl.enable_mlapo else scatter
++    slots_arg = 2 if impl.enable_mlapo else 1
++    assert writer.call_args.args[slots_arg].tolist() == [3, 4, -1, -1]
++    assert impl.o_proj.call_args.kwargs == {"is_prefill": False}
++
++
++def test_group128_graph_update_skips_kda_and_c8_without_fia_tasks():
++    context = SimpleNamespace(
++        attn_metadata={
++            "kda": SimpleNamespace(),
++            "mla": SimpleNamespace(decode=object(), kimi_k3_c8_decode_state=object()),
++        }
++    )
++    with (
++        patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False)),
++        patch.object(mla_v1, "get_graph_params", return_value=None),
++    ):
++        AscendMLAImpl.update_graph_params(None, context, 4)
+diff --git a/tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py b/tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py
+new file mode 100644
+index 000000000..f8a404183
+--- /dev/null
++++ b/tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py
+@@ -0,0 +1,104 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++from contextlib import nullcontext
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++
++import pytest
++
++from vllm_ascend.worker.v2 import aclgraph_utils as graph_utils
++
++
++def _config():
++    return SimpleNamespace(
++        compilation_config=SimpleNamespace(
++            static_forward_context={
++                "kda.0": SimpleNamespace(),
++                "mla.1": SimpleNamespace(impl=SimpleNamespace(enable_kimi_k3_sfa_c8=True)),
++                "mla.2": SimpleNamespace(impl=SimpleNamespace(enable_kimi_k3_sfa_c8=True)),
++                "other.3": SimpleNamespace(impl=SimpleNamespace(enable_kimi_k3_sfa_c8=False)),
++            }
++        )
++    )
++
++
++def _metadata(capacity=4):
++    shared = SimpleNamespace(kimi_k3_c8_decode_state=SimpleNamespace(capacity=capacity))
++    return {"kda.0": SimpleNamespace(), "mla.1": shared, "mla.2": shared}
++
++
++@pytest.mark.parametrize("capacity", [1, 2, 4, 8])
++def test_c8_graph_replay_accepts_matching_bucket_with_kda_metadata(capacity):
++    graph_utils._validate_kimi_k3_c8_replay_metadata(_config(), _metadata(capacity), capacity)
++
++
++@pytest.mark.parametrize("metadata", [None, {}, {"kda.0": SimpleNamespace()}])
++def test_c8_graph_replay_rejects_missing_layer_metadata(metadata):
++    with pytest.raises(RuntimeError, match="model state did not refresh C8 graph metadata"):
++        graph_utils._validate_kimi_k3_c8_replay_metadata(_config(), metadata, 4)
++
++
++@pytest.mark.parametrize("bad_layer", [SimpleNamespace(), SimpleNamespace(kimi_k3_c8_decode_state=None)])
++def test_c8_graph_replay_checks_every_mla_layer(bad_layer):
++    metadata = _metadata()
++    metadata["mla.2"] = bad_layer
++    with pytest.raises(RuntimeError, match="mla.2.*model state did not refresh"):
++        graph_utils._validate_kimi_k3_c8_replay_metadata(_config(), metadata, 4)
++
++
++@pytest.mark.parametrize("capacity", [None, 1, 8])
++def test_c8_graph_replay_rejects_wrong_capacity(capacity):
++    with pytest.raises(RuntimeError, match="expected capacity=4"):
++        graph_utils._validate_kimi_k3_c8_replay_metadata(_config(), _metadata(capacity), 4)
++
++
++def test_non_c8_graph_metadata_contract_is_unchanged():
++    config = _config()
++    for layer in config.compilation_config.static_forward_context.values():
++        layer.impl = SimpleNamespace(enable_kimi_k3_sfa_c8=False)
++    graph_utils._validate_kimi_k3_c8_replay_metadata(config, None, 4)
++
++
++def _manager(metadata):
++    return SimpleNamespace(
++        vllm_config=_config(),
++        model_runner=SimpleNamespace(model_state=SimpleNamespace(attn_metadata=metadata), attn_groups=[]),
++        update_stream=object(),
++        _graph_relay=Mock(return_value="legacy replay"),
++        _updatable_graph_replay=Mock(return_value="updatable replay"),
++    )
++
++
++def test_invalid_c8_metadata_blocks_before_either_graph_replay():
++    manager = _manager({})
++    with (
++        patch.object(graph_utils, "_get_graph_update_backend") as backend,
++        pytest.raises(RuntimeError, match="replaying capture-time metadata is unsafe"),
++    ):
++        graph_utils.ModelAclGraphManager.run_fullgraph(manager, SimpleNamespace(num_tokens=4))
++    backend.assert_not_called()
++    manager._graph_relay.assert_not_called()
++    manager._updatable_graph_replay.assert_not_called()
++
++
++@pytest.mark.parametrize("updatable", [False, True])
++def test_valid_c8_metadata_preserves_graph_dispatch(updatable):
++    metadata = _metadata()
++    manager = _manager(metadata)
++    desc = SimpleNamespace(num_tokens=4)
++    backend = object()
++    with (
++        patch.object(graph_utils, "set_current_vllm_config", return_value=nullcontext()),
++        patch.object(graph_utils, "_get_graph_update_backend", return_value=backend),
++        patch.object(graph_utils, "use_updatable_graph", return_value=updatable),
++    ):
++        result = graph_utils.ModelAclGraphManager.run_fullgraph(manager, desc)
++    if updatable:
++        assert result == "updatable replay"
++        manager._updatable_graph_replay.assert_called_once_with(desc, metadata)
++        manager._graph_relay.assert_not_called()
++    else:
++        assert result == "legacy replay"
++        manager._graph_relay.assert_called_once_with(backend, desc, 4, metadata)
++        manager._updatable_graph_replay.assert_not_called()
+diff --git a/tests/ut/worker/test_model_runner_v2_mamba.py b/tests/ut/worker/test_model_runner_v2_mamba.py
+index 9659a9d0a..fe0e90177 100644
+--- a/tests/ut/worker/test_model_runner_v2_mamba.py
++++ b/tests/ut/worker/test_model_runner_v2_mamba.py
+@@ -321,9 +321,14 @@ def test_prepare_inputs_propagates_padded_request_count():
+ 
+ 
+ @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
++@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.get_ascend_config")
+ @pytest.mark.parametrize("num_spec", [0, 3])
+-@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
+-def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_metadata, num_spec, graph_mode):
++@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
++@pytest.mark.parametrize("enable_c8", [False, True])
++def test_prepare_attn_keeps_actual_counts_separate_from_padding(
++    mock_get_ascend_config, mock_build_attn_metadata, num_spec, graph_mode, enable_c8
++):
++    mock_get_ascend_config.return_value = SimpleNamespace(enable_kimi_k3_sfa_c8=enable_c8)
+     expected_metadata = {"gdn": object()}
+     mock_build_attn_metadata.return_value = expected_metadata
+     state = SimpleNamespace(
+@@ -366,6 +371,8 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
+     graph_requests = 4 if graph_mode == CUDAGraphMode.FULL else 2
+     assert kwargs["num_reqs"] == graph_requests
+     assert kwargs["num_tokens"] == graph_requests * (num_spec + 1)
++    expected_graph_pad = kwargs["num_tokens"] if enable_c8 and graph_mode == CUDAGraphMode.FULL else -1
++    assert kwargs["graph_pad_size"] == expected_graph_pad
+     model_metadata = kwargs["model_specific_attn_metadata"]
+     if num_spec:
+         assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * graph_requests
+diff --git a/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py b/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py
+new file mode 100644
+index 000000000..42c9a6429
+--- /dev/null
++++ b/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py
+@@ -0,0 +1,150 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Fixed-address, single-token decode metadata for K3 C8 NPUGraph replay.
++
++One state belongs to one metadata builder and graph bucket. Updates happen
++before replay, never inside capture. No global state or historical KV copies.
++"""
++
++import torch
++
++from vllm_ascend.attention.kimi_k3_sfa_c8 import (
++    GROUP_SIZE,
++    LATENT_DIM,
++    RAW_DIM,
++    _validate_cache,
++    get_kimi_k3_sfa_c8_padded_heads,
++    require_kimi_k3_sfa_c8_ops,
++)
++
++
++class KimiK3C8DecodeState:
++    def __init__(self, capacity: int, max_seq_len: int, block_table_width: int, device: torch.device):
++        if min(capacity, max_seq_len, block_table_width) <= 0:
++            raise ValueError("C8 decode graph buffer dimensions must be positive.")
++        self.capacity = capacity
++        self.max_seq_len = max_seq_len
++        self.seq_lens = torch.zeros(capacity, dtype=torch.int32, device=device)
++        self.query_ends = torch.arange(1, capacity + 1, dtype=torch.int32, device=device)
++        self.block_table = torch.zeros((capacity, block_table_width), dtype=torch.int32, device=device)
++        self.slots = torch.full((capacity,), -1, dtype=torch.int64, device=device)
++        self.active = torch.zeros(capacity, dtype=torch.bool, device=device)
++        self.positions = torch.arange(max_seq_len, dtype=torch.int32, device=device).view(1, 1, -1)
++        self.indices = torch.full((capacity, 1, max_seq_len), -1, dtype=torch.int32, device=device)
++        self.invalid_indices = torch.ones((capacity, 1, max_seq_len), dtype=torch.bool, device=device)
++
++    def update(
++        self,
++        seq_lens_cpu: torch.Tensor,
++        block_table: torch.Tensor,
++        slot_mapping: torch.Tensor,
++        num_actual_tokens: int,
++        *,
++        seq_lens_device: torch.Tensor | None = None,
++    ) -> None:
++        """Refresh values in place, including every previously active tail row."""
++        n = num_actual_tokens
++        if not 0 <= n <= self.capacity:
++            raise ValueError("Active decode rows exceed the captured bucket.")
++        if seq_lens_cpu.device.type != "cpu" or seq_lens_cpu.ndim != 1:
++            raise ValueError("C8 graph updates require scheduler CPU sequence lengths.")
++        if seq_lens_cpu.dtype not in (torch.int32, torch.int64):
++            raise ValueError("Decode sequence lengths must be integer tensors.")
++        if seq_lens_cpu.numel() < n or slot_mapping.ndim != 1 or slot_mapping.numel() < n:
++            raise ValueError("Missing active decode lengths or slots.")
++        lengths = seq_lens_cpu[:n]
++        if n and (bool((lengths <= 0).any()) or bool((lengths > self.max_seq_len).any())):
++            raise ValueError("Active decode KV lengths must be in [1, max_model_len].")
++        if block_table.ndim != 2 or block_table.shape[0] < n or block_table.shape[1] > self.block_table.shape[1]:
++            raise ValueError("Decode block table does not fit its fixed graph buffer.")
++        if block_table.dtype != torch.int32 or slot_mapping.dtype not in (torch.int32, torch.int64):
++            raise ValueError("Decode tables/slots require int32 and int32/int64 respectively.")
++        if block_table.device != self.block_table.device or slot_mapping.device != self.slots.device:
++            raise ValueError("Decode metadata must be on the same device as its graph buffers.")
++        if seq_lens_device is not None and (
++            seq_lens_device.device != self.seq_lens.device
++            or seq_lens_device.ndim != 1
++            or seq_lens_device.numel() < n
++            or seq_lens_device.dtype not in (torch.int32, torch.int64)
++        ):
++            raise ValueError("Invalid device decode sequence lengths.")
++        self.seq_lens.zero_()
++        # MRV2 already has device lengths: avoid both H2D and an async read
++        # from the scheduler's mutable CPU/NumPy buffer. The CPU-only test
++        # convenience path intentionally uses a blocking copy.
++        self.seq_lens[:n].copy_(lengths if seq_lens_device is None else seq_lens_device[:n])
++        self.slots.fill_(-1)
++        self.slots[:n].copy_(slot_mapping[:n])
++        self.block_table.zero_()
++        self.block_table[:n, : block_table.shape[1]].copy_(block_table[:n])
++        self.active.zero_()
++        self.active[:n].fill_(True)
++        self.indices.copy_(self.positions)
++        torch.ge(self.positions, self.seq_lens.view(-1, 1, 1), out=self.invalid_indices)
++        self.indices.masked_fill_(self.invalid_indices, -1)
++
++
++def kimi_k3_sfa_c8_decode(
++    q_latent: torch.Tensor,
++    q_raw: torch.Tensor,
++    packed_cache: torch.Tensor,
++    state: KimiK3C8DecodeState,
++    scale: float,
++) -> torch.Tensor:
++    """One native batched SFA call; no host lengths or data-dependent loops.
++
++    The CANN tiler sees fixed shapes. Runtime KV lengths, indices and page-table
++    values are read from device memory, so FIA-style task updates are unnecessary.
++    """
++    _validate_cache(packed_cache)
++    if q_latent.ndim != 3 or q_latent.shape[0] != state.capacity or q_latent.shape[-1] != LATENT_DIM:
++        raise ValueError("C8 graph query must be [bucket, heads, 512].")
++    if q_raw.shape != (*q_latent.shape[:2], RAW_DIM):
++        raise ValueError("C8 graph raw query must match [bucket, heads, 64].")
++    if q_latent.dtype != torch.bfloat16 or q_raw.dtype != q_latent.dtype:
++        raise ValueError("K3 C8 graph queries must be BF16.")
++    if any(t.device != q_latent.device for t in (q_raw, packed_cache, state.indices)):
++        raise ValueError("K3 C8 graph operands must be on one device.")
++    heads = q_latent.shape[1]
++    native_heads = get_kimi_k3_sfa_c8_padded_heads(heads)
++    if heads == native_heads:
++        query = torch.cat((q_latent, q_raw), dim=-1)
++    else:
++        query = q_latent.new_zeros((state.capacity, native_heads, LATENT_DIM + RAW_DIM))
++        query[:, :heads, :LATENT_DIM].copy_(q_latent)
++        query[:, :heads, LATENT_DIM:].copy_(q_raw)
++    # No attention sink. CANN's omitted argument would inject a zero logit.
++    sinks = torch.full((native_heads,), -float("inf"), dtype=torch.float32, device=query.device)
++    result = require_kimi_k3_sfa_c8_ops()(
++        query,
++        packed_cache,
++        packed_cache,
++        state.indices,
++        float(scale),
++        key_quant_mode=2,
++        value_quant_mode=2,
++        block_table=state.block_table,
++        actual_seq_lengths_query=state.query_ends,
++        actual_seq_lengths_kv=state.seq_lens,
++        sparse_block_size=1,
++        layout_query="TND",
++        layout_kv="PA_BSND",
++        sparse_mode=3,
++        attention_mode=2,
++        quant_scale_repo_mode=1,
++        tile_size=GROUP_SIZE,
++        rope_head_dim=RAW_DIM,
++        sinks=sinks,
++        return_softmax_lse=False,
++    )
++    if not isinstance(result, (tuple, list)) or len(result) != 3:
++        raise RuntimeError("C8 graph decode requires the three-output native QSFA V2 interface.")
++    if (
++        result[0].shape != (state.capacity, native_heads, LATENT_DIM)
++        or result[0].dtype != q_latent.dtype
++        or result[0].device != q_latent.device
++    ):
++        raise RuntimeError("Native C8 graph output has an incompatible shape, dtype or device.")
++    # Kernels may leave zero-length rows unwritten. Multiplication by zero
++    # cannot remove NaNs; mask them before the Value/output projections.
++    return result[0][:, :heads].masked_fill(~state.active[:, None, None], 0).contiguous()
+diff --git a/vllm_ascend/attention/mla_v1.py b/vllm_ascend/attention/mla_v1.py
+index 6ef75d830..d5d34ebb7 100644
+--- a/vllm_ascend/attention/mla_v1.py
++++ b/vllm_ascend/attention/mla_v1.py
+@@ -6,7 +6,7 @@ import numpy as np
+ import torch
+ import torch.nn.functional as F
+ import torch_npu
+-from vllm.config import VllmConfig, get_current_vllm_config
++from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+ from vllm.distributed.parallel_state import get_pcp_group
+ from vllm.logger import logger
+ from vllm.model_executor.layers.attention.mla_attention import (
+@@ -41,6 +41,7 @@ from vllm_ascend.attention.kimi_k3_sfa_c8 import (
+     require_kimi_k3_sfa_c8_prolog_ops,
+     scatter_kimi_k3_sfa_c8,
+ )
++from vllm_ascend.attention.kimi_k3_sfa_c8_graph import KimiK3C8DecodeState, kimi_k3_sfa_c8_decode
+ from vllm_ascend.attention.utils import (
+     MLAPO_MAX_SUPPORTED_TOKENS,
+     AscendCommonAttentionMetadata,
+@@ -237,6 +238,7 @@ class AscendMLAMetadata:
+     decode: AscendMLADecodeMetadata | None = None
+     prefill: AscendMLAPrefillMetadata | None = None
+     reshape_cache_event: torch.npu.Event = None
++    kimi_k3_c8_decode_state: KimiK3C8DecodeState | None = None
+ 
+     def __post_init__(self):
+         pass
+@@ -314,6 +316,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         self.enable_kimi_k3_sfa_c8 = bool(
+             layer_names and getattr(static_forward_context[layer_names[0]].impl, "enable_kimi_k3_sfa_c8", False) is True
+         )
++        self.kimi_k3_c8_decode_states: dict[int, KimiK3C8DecodeState] = {}
+         self.cos_cache = None
+         self.sin_cache = None
+ 
+@@ -474,6 +477,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         common_attn_metadata: AscendCommonAttentionMetadata,
+         fast_build: bool = False,
+     ) -> AscendMLAMetadata:
++        if getattr(self, "enable_kimi_k3_sfa_c8", False) and common_attn_metadata.graph_pad_size > 0:
++            return self._build_kimi_k3_c8_decode(common_attn_metadata)
+         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+         num_reqs = common_attn_metadata.num_reqs
+         query_start_loc = common_attn_metadata.query_start_loc
+@@ -549,6 +554,53 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+             self._finalize_pcp_metadata(metadata, expanded_slot_mapping)
+         return metadata
+ 
++    def _build_kimi_k3_c8_decode(self, common: AscendCommonAttentionMetadata) -> AscendMLAMetadata:
++        """Refresh fixed device metadata before replay (also used during warmup).
++
++        MRV2 captures forward with runtime mode NONE, so the explicit metadata,
++        not the forward-context mode, selects the fixed-shape decode path.
++        """
++        capacity = common.graph_pad_size
++        n = common.num_actual_tokens
++        query_lens = common.query_start_loc_cpu[1:] - common.query_start_loc_cpu[:-1]
++        if (
++            capacity != common.num_reqs
++            or not 0 <= n <= capacity
++            or query_lens.numel() < capacity
++            or not bool((query_lens[:capacity] == 1).all())
++        ):
++            raise ValueError("K3 C8 graphs require one query token per padded decode request.")
++        if not common.causal:
++            raise ValueError("K3 C8 decode graphs require causal attention.")
++        seq_lens_cpu = common._seq_lens_cpu
++        if seq_lens_cpu is None:
++            seq_lens_cpu = common.seq_lens_cpu
++        if seq_lens_cpu is None:
++            raise ValueError("K3 C8 graph metadata requires scheduler CPU KV lengths.")
++        state = self.kimi_k3_c8_decode_states.get(capacity)
++        if state is None:
++            state = KimiK3C8DecodeState(
++                capacity, self.model_config.max_model_len, common.block_table_tensor.shape[1], self.device
++            )
++            self.kimi_k3_c8_decode_states[capacity] = state
++        state.update(seq_lens_cpu, common.block_table_tensor, common.slot_mapping, n, seq_lens_device=common.seq_lens)
++        return self.metadata_cls(
++            num_input_tokens=capacity,
++            num_actual_tokens=n,
++            slot_mapping=state.slots,
++            query_start_loc=common.query_start_loc,
++            seq_lens=state.seq_lens,
++            seq_lens_cpu=seq_lens_cpu,
++            block_tables=state.block_table,
++            num_decodes=n,
++            num_decode_tokens=n,
++            num_prefills=0,
++            query_lens=[1] * n,
++            attn_state=AscendAttentionState.DecodeOnly,
++            causal=True,
++            kimi_k3_c8_decode_state=state,
++        )
++
+     def _finalize_pcp_metadata(
+         self,
+         metadata: AscendMLAMetadata,
+@@ -769,6 +821,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+ 
+     def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+         capture_metadata = copy(common_attn_metadata)
++        if getattr(self, "enable_kimi_k3_sfa_c8", False):
++            capture_metadata.graph_pad_size = capture_metadata.num_reqs
++            return self._build_kimi_k3_c8_decode(capture_metadata)
+         if capture_metadata.attn_state is None:
+             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+         if self.dcp_enabled and capture_metadata.is_prefilling is None:
+@@ -896,7 +951,7 @@ class AscendMLAImpl(MLAAttentionImpl):
+                 require_kimi_k3_sfa_c8_prolog_ops()
+             logger.warning_once(
+                 "K3 native QSFA C8 enabled: FP8 group128 with FP32 scales, "
+-                "BF16 raw64, full KV indices, MRV2 eager only. "
++                "BF16 raw64, full KV indices, MRV2 eager / FULL_DECODE_ONLY. "
+                 "enable_mlapo=%s. This is not group32/E8M0 MXFP8.",
+                 self.enable_mlapo,
+             )
+@@ -914,8 +969,9 @@ class AscendMLAImpl(MLAAttentionImpl):
+             raise ValueError("K3 group128 SFA C8 requires Ascend A5 FP8 attention support.")
+         if not config.use_v2_model_runner:
+             raise ValueError("K3 group128 SFA C8 requires VLLM_USE_V2_MODEL_RUNNER=1 (MRV2).")
+-        if not model.enforce_eager:
+-            raise ValueError("K3 group128 SFA C8 currently requires --enforce-eager; graph mode is not integrated.")
++        graph_mode = getattr(getattr(config, "compilation_config", None), "cudagraph_mode", None)
++        if not model.enforce_eager and graph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
++            raise ValueError("K3 group128 SFA C8 requires --enforce-eager or cudagraph_mode=FULL_DECODE_ONLY.")
+         if model.dtype != torch.bfloat16:
+             raise ValueError("K3 group128 SFA C8 requires --dtype bfloat16.")
+         if config.cache_config.cache_dtype != "auto" or self.fa_quant_layer:
+@@ -966,7 +1022,14 @@ class AscendMLAImpl(MLAAttentionImpl):
+         else:
+             graph_params = get_graph_params()
+             attn_metadata = forward_context.attn_metadata
+-            attn_keys = [k for k in attn_metadata if getattr(attn_metadata[k], "decode", None) is not None]
++            # K3 QSFA metadata is refreshed in place before replay. It must
++            # never be zipped into FIA's captured task-parameter tuples.
++            attn_keys = [
++                k
++                for k in attn_metadata
++                if getattr(attn_metadata[k], "decode", None) is not None
++                and getattr(attn_metadata[k], "kimi_k3_c8_decode_state", None) is None
++            ]
+         # FIXME: Behold! We are using a temporary hack here to update the args
+         # for each layer's attention op in the graph.
+         num_layers = len(attn_keys)
+@@ -2346,22 +2409,24 @@ class AscendMLAImpl(MLAAttentionImpl):
+         dequantization, Top-K selection, indexer, or per-tensor FIA fallback.
+         Host lengths are already available from the MRV2 metadata builder.
+         """
+-        if _EXTRA_CTX.capturing:
+-            raise RuntimeError("K3 group128 SFA C8 is eager-only.")
++        decode_state = getattr(attn_metadata, "kimi_k3_c8_decode_state", None)
++        if _EXTRA_CTX.capturing and decode_state is None:
++            raise RuntimeError("K3 C8 capture requires fixed FULL_DECODE_ONLY metadata.")
+         cache = kv_cache[0] if isinstance(kv_cache, (tuple, list)) else kv_cache
+-        num_tokens = attn_metadata.num_actual_tokens
++        num_tokens = decode_state.capacity if decode_state is not None else attn_metadata.num_actual_tokens
+         if num_tokens == 0:
+             return output.fill_(0)
+-        query_lens = attn_metadata.query_lens
+-        if query_lens is None or sum(query_lens) != num_tokens:
+-            raise ValueError("K3 group128 SFA C8 requires unpadded host query lengths from MRV2.")
+-        seq_lens_cpu = attn_metadata.seq_lens_cpu
+-        if seq_lens_cpu.device.type != "cpu":
+-            raise ValueError("K3 group128 SFA C8 requires host KV lengths; device synchronization is not allowed.")
+-        kv_lens = seq_lens_cpu.tolist()
+-        query_starts = [0]
+-        for length in query_lens:
+-            query_starts.append(query_starts[-1] + length)
++        if decode_state is None:
++            query_lens = attn_metadata.query_lens
++            if query_lens is None or sum(query_lens) != num_tokens:
++                raise ValueError("K3 group128 SFA C8 requires unpadded host query lengths from MRV2.")
++            seq_lens_cpu = attn_metadata.seq_lens_cpu
++            if seq_lens_cpu.device.type != "cpu":
++                raise ValueError("K3 group128 SFA C8 requires host KV lengths; device synchronization is not allowed.")
++            kv_lens = seq_lens_cpu.tolist()
++            query_starts = [0]
++            for length in query_lens:
++                query_starts.append(query_starts[-1] + length)
+ 
+         if self.enable_mlapo:
+             q_latent, q_raw = kimi_k3_sfa_c8_prolog(
+@@ -2398,16 +2463,21 @@ class AscendMLAImpl(MLAAttentionImpl):
+             packed = pack_kimi_k3_sfa_c8(latent, raw)
+             scatter_kimi_k3_sfa_c8(packed, attn_metadata.slot_mapping[:num_tokens], cache)
+         record_attention_compute_start()
+-        latent_output = kimi_k3_sfa_c8_attention(
+-            q_latent[:num_tokens],
+-            q_raw[:num_tokens],
+-            cache,
+-            attn_metadata.block_tables,
+-            query_starts,
+-            kv_lens,
+-            self.scale,
+-            causal=attn_metadata.causal,
+-        )
++        if decode_state is not None:
++            latent_output = kimi_k3_sfa_c8_decode(
++                q_latent[:num_tokens], q_raw[:num_tokens], cache, decode_state, self.scale
++            )
++        else:
++            latent_output = kimi_k3_sfa_c8_attention(
++                q_latent[:num_tokens],
++                q_raw[:num_tokens],
++                cache,
++                attn_metadata.block_tables,
++                query_starts,
++                kv_lens,
++                self.scale,
++                causal=attn_metadata.causal,
++            )
+         projected = self._v_up_proj_batch_major(latent_output)
+         o_proj_input = hidden_states.new_zeros(hidden_states.shape[0], self.num_heads * self.v_head_dim)
+         o_proj_input[:num_tokens] = projected
+diff --git a/vllm_ascend/worker/v2/aclgraph_utils.py b/vllm_ascend/worker/v2/aclgraph_utils.py
+index 9dd584108..04bef9d87 100644
+--- a/vllm_ascend/worker/v2/aclgraph_utils.py
++++ b/vllm_ascend/worker/v2/aclgraph_utils.py
+@@ -16,7 +16,7 @@
+ # limitations under the License.
+ # This file is a part of the vllm-ascend project.
+ #
+-from collections.abc import Callable
++from collections.abc import Callable, Mapping
+ from contextlib import contextmanager
+ from functools import partial
+ from typing import Any
+@@ -123,6 +123,31 @@ def _get_graph_update_backend(
+     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
+ 
+ 
++def _validate_kimi_k3_c8_replay_metadata(
++    vllm_config: VllmConfig,
++    attn_metadata: Mapping[str, Any] | None,
++    num_tokens: int,
++) -> None:
++    """Reject stale capture metadata before submitting a K3 C8 graph replay.
++
++    Cloud/model-provided runner states can bypass the standard hybrid state.
++    Selecting our attention implementation alone is therefore not sufficient:
++    every C8 MLA layer must receive the refreshed fixed-size decode state.
++    """
++    for layer_name, layer in vllm_config.compilation_config.static_forward_context.items():
++        if getattr(getattr(layer, "impl", None), "enable_kimi_k3_sfa_c8", False) is not True:
++            continue
++        layer_metadata = attn_metadata.get(layer_name) if isinstance(attn_metadata, Mapping) else None
++        state = getattr(layer_metadata, "kimi_k3_c8_decode_state", None)
++        capacity = getattr(state, "capacity", None)
++        if state is None or capacity != num_tokens:
++            raise RuntimeError(
++                f"K3 C8 FULL graph replay blocked for {layer_name!r}: the model state did not refresh "
++                f"C8 graph metadata for this bucket (expected capacity={num_tokens}, got {capacity}). "
++                "Use a C8-aware MRV2 model state; replaying capture-time metadata is unsafe."
++            )
++
++
+ class ModelAclGraphManager(ModelCudaGraphManager):
+     """ACL Model Cuda Graph Manager for Ascend NPUs."""
+ 
+@@ -159,9 +184,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
+         """Override run_fullgraph to update full graph params in run_fullgraph."""
+         num_tokens = desc.num_tokens
+         assert self.update_stream is not None
++        attn_metadata = self.model_runner.model_state.attn_metadata
++        _validate_kimi_k3_c8_replay_metadata(self.vllm_config, attn_metadata, num_tokens)
+         with set_current_vllm_config(self.vllm_config):
+             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+-        attn_metadata = self.model_runner.model_state.attn_metadata
+ 
+         if use_updatable_graph(attn_backend):
+             return self._updatable_graph_replay(desc, attn_metadata)
+diff --git a/vllm_ascend/worker/v2/model_states/mamba_hybrid.py b/vllm_ascend/worker/v2/model_states/mamba_hybrid.py
+index 667001771..f4902613b 100644
+--- a/vllm_ascend/worker/v2/model_states/mamba_hybrid.py
++++ b/vllm_ascend/worker/v2/model_states/mamba_hybrid.py
+@@ -36,6 +36,7 @@ from vllm.v1.worker.mamba_utils import (
+ )
+ from vllm.v1.worker.utils import AttentionGroup
+ 
++from vllm_ascend.ascend_config import get_ascend_config
+ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+ from vllm_ascend.worker.v2.model_states.default import AscendModelState
+@@ -320,6 +321,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
+             seq_lens_np=input_batch.seq_lens_np,
+             positions=input_batch.positions,
+             attn_state=input_batch.attn_state,
++            # K3 C8 uses this marker to refresh its persistent decode bucket.
++            # Preserve legacy metadata for other hybrid backends: their MLA
++            # graph_pad_size handling assumes the MRV1 speculative layout.
++            graph_pad_size=(
++                num_tokens
++                if cudagraph_mode == CUDAGraphMode.FULL and get_ascend_config().enable_kimi_k3_sfa_c8 is True
++                else -1
++            ),
+             model_specific_attn_metadata=model_specific_metadata,
+             for_cudagraph_capture=for_capture,
+         )
