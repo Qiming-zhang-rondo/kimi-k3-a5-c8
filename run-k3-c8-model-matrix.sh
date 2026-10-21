@@ -363,6 +363,8 @@ def run_case(args, label, command, env, output_dir):
                 raise RuntimeError("Expected K3 C8 implementation log missing; AV may not be using patched VA.")
             if "mlapo" in label and "K3 C8 MLAPO: Prolog V4 No-RoPE" not in text:
                 raise RuntimeError("Expected Prolog V4 path log missing.")
+            if "decode_graph" in label and "ACL graph replay is active for the V2 target model" not in text:
+                raise RuntimeError("MRV2 graph replay marker missing; capture/startup alone is not a graph pass.")
         except KeyboardInterrupt:
             record["error"] = "Interrupted by user."
             raise
