@@ -1,0 +1,91 @@
+diff --git a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
+index 7185c8e7a..27cf2551f 100644
+--- a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
++++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py
+@@ -169,10 +169,14 @@ def test_kimi_k3_c8_native_decode_graph_replay(path, query_heads):
+         pipeline()
+     torch.npu.synchronize()
+     graph = torch.npu.NPUGraph()
++    # Standalone pytest runs on the default stream, unlike MRV2's outer
++    # graph_capture context. Capture must use an explicit non-default stream.
++    capture_stream = torch.npu.Stream()
+     # Match MRV2's default/global capture mode; auto-dispatch could hide an
+     # operator that cannot participate in the actual production graph.
+-    with torch.npu.graph(graph, stream=torch.npu.current_stream()):
++    with torch.npu.graph(graph, stream=capture_stream):
+         graph_query, graph_raw, graph_output = pipeline()
++    torch.npu.current_stream().wait_stream(capture_stream)
+     output_address = graph_output.data_ptr()
+ 
+     for phase, lengths in enumerate(REPLAY_LENGTHS):
+@@ -259,6 +263,8 @@ def test_kimi_k3_c8_native_graph_bucket_switch_with_eager_interleave(shared_pool
+     backing, cache = _graph_cache(max(GRAPH_BUCKETS))
+     cache_address = cache.data_ptr()
+     pool = torch.npu.graph_pool_handle() if shared_pool else None
++    # Reuse the same non-default stream for every graph sharing this pool.
++    capture_stream = torch.npu.Stream()
+     buckets = {}
+     for capacity in GRAPH_BUCKETS:
+         buffers = {
+@@ -275,8 +281,9 @@ def test_kimi_k3_c8_native_graph_bucket_switch_with_eager_interleave(shared_pool
+             _bucket_pipeline(buffers, cache)
+         torch.npu.synchronize()
+         graph = torch.npu.NPUGraph()
+-        with torch.npu.graph(graph, pool=pool, stream=torch.npu.current_stream()):
++        with torch.npu.graph(graph, pool=pool, stream=capture_stream):
+             output = _bucket_pipeline(buffers, cache)
++        torch.npu.current_stream().wait_stream(capture_stream)
+         buffers["graph"] = graph
+         buffers["output"] = output
+         buffers["addresses"] = _state_addresses(buffers["state"])
+diff --git a/tests/ut/attention/test_kimi_k3_graph_capture_stream.py b/tests/ut/attention/test_kimi_k3_graph_capture_stream.py
+new file mode 100644
+index 000000000..75b8c9cb4
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_graph_capture_stream.py
+@@ -0,0 +1,45 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Source regression for the standalone NPU tests; not an NPU capture test."""
++
++import ast
++from pathlib import Path
++
++import pytest
++
++
++@pytest.mark.parametrize(
++    "name",
++    [
++        "test_kimi_k3_c8_native_decode_graph_replay",
++        "test_kimi_k3_c8_native_graph_bucket_switch_with_eager_interleave",
++    ],
++)
++def test_native_capture_uses_owned_side_stream_and_joins_it(name):
++    source = (
++        Path(__file__).resolve().parents[2] / "e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py"
++    )
++    tree = ast.parse(source.read_text())
++    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
++    # Top-level allocation also ensures all buckets reuse one stream.
++    allocation = next(
++        node
++        for node in function.body
++        if isinstance(node, ast.Assign)
++        and any(isinstance(target, ast.Name) and target.id == "capture_stream" for target in node.targets)
++    )
++    assert ast.unparse(allocation.value) == "torch.npu.Stream()"
++    capture = next(
++        node
++        for node in ast.walk(function)
++        if isinstance(node, ast.Call) and ast.unparse(node.func) == "torch.npu.graph"
++    )
++    stream = next(keyword.value for keyword in capture.keywords if keyword.arg == "stream")
++    assert isinstance(stream, ast.Name) and stream.id == "capture_stream"
++    assert allocation.lineno < capture.lineno
++    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
++    assert any(ast.unparse(node) == "torch.npu.synchronize()" and node.lineno < capture.lineno for node in calls)
++    assert any(
++        ast.unparse(node) == "torch.npu.current_stream().wait_stream(capture_stream)" and node.lineno > capture.lineno
++        for node in calls
++    )
