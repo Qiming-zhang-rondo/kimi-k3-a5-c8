@@ -1,0 +1,98 @@
+diff --git a/docs/source/developer_guide/kimi_k3_sfa_c8.md b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+index dbd251c7f..2e1bee10b 100644
+--- a/docs/source/developer_guide/kimi_k3_sfa_c8.md
++++ b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+@@ -1,5 +1,12 @@
+ # Kimi K3 A5 group128 C8 — VA 0.29 回移版
+ 
++启动开关推荐使用 `additional_config.enable_sparse_sfa_c8=true`。
++K3 模型会将其路由到本页描述的 full-KV C8 路径，不启用 indexer 或 Top-K。
++内部保留独立的 K3 标记，以免与其他模型的 sparse C8 Cache/图路径混淆。
++旧名 `enable_kimi_k3_sfa_c8` 暂时兼容；两者同时传入且值不同会报错。
++仍须使用 `--kv-cache-dtype auto`。使用新名之前须更新此配置适配补丁，
++旧版本只修改启动命令不能启用 K3 C8。下文旧名示例仍可使用。
++
+ 该路径让 K3 的 No-RoPE MLA 通过 CANN 9.2.0 原生
+ `KvQuantSparseFlashAttentionV2` 读取 FP8 group128 Cache。
+ 保留全部有效 KV 和因果注意力语义，不新增 indexer，不执行 Top-K，
+diff --git a/vllm_ascend/ascend_config.py b/vllm_ascend/ascend_config.py
+index edbee3460..ff1eeb122 100644
+--- a/vllm_ascend/ascend_config.py
++++ b/vllm_ascend/ascend_config.py
+@@ -35,6 +35,23 @@ if TYPE_CHECKING:
+ _MEGA_MOE_SUPPORTED = None
+ 
+ 
++def _resolve_kimi_k3_c8_flag(architectures, additional_config, legacy_enabled, sparse_enabled):
++    """Route the public SFA C8 switch to K3 without changing sparse-model derivation.
++
++    The internal K3 flag remains distinct: K3 reads full KV, unlike indexer SFA.
++    Values have already passed AscendConfig's bool validation.
++    """
++    is_k3 = any(
++        name in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
++        for name in (architectures or [])
++    )
++    if not is_k3 or "enable_sparse_sfa_c8" not in additional_config:
++        return legacy_enabled
++    if "enable_kimi_k3_sfa_c8" in additional_config and legacy_enabled != sparse_enabled:
++        raise ValueError("Conflicting K3 C8 switches; use only enable_sparse_sfa_c8.")
++    return sparse_enabled
++
++
+ def is_mega_moe_supported() -> bool:
+     """Whether the megamoe op is available at runtime.
+ 
+@@ -775,6 +792,17 @@ class AscendConfig:
+ 
+         use_sparse = model_uses_sfa_sparse(vc.model_config)
+ 
++        # Resolve K3's public alias before the legacy sparse-model flag is derived.
++        # Keep its internal dispatch separate so hybrid cache/graph consumers do
++        # not confuse K3's full-KV reader with indexer-based sparse attention.
++        self.enable_kimi_k3_sfa_c8 = _resolve_kimi_k3_c8_flag(
++            getattr(vc.model_config, "architectures", None),
++            vc.additional_config or {},
++            self.enable_kimi_k3_sfa_c8,
++            validate_additional_config_bool(
++                (vc.additional_config or {}).get("enable_sparse_sfa_c8", False), "enable_sparse_sfa_c8"
++            ),
++        )
+         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
+         kv_transfer_config = vc.kv_transfer_config
+diff --git a/tests/ut/attention/test_kimi_k3_c8_config_alias.py b/tests/ut/attention/test_kimi_k3_c8_config_alias.py
+new file mode 100644
+index 000000000..20c1d6a4d
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_c8_config_alias.py
+@@ -0,0 +1,29 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import pytest
++
++from vllm_ascend.ascend_config import _resolve_kimi_k3_c8_flag
++
++
++@pytest.mark.parametrize("arch", ["KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration"])
++@pytest.mark.parametrize("enabled", [False, True])
++def test_public_switch_routes_k3(arch, enabled):
++    assert _resolve_kimi_k3_c8_flag([arch], {"enable_sparse_sfa_c8": enabled}, False, enabled) is enabled
++
++
++@pytest.mark.parametrize("enabled", [False, True])
++def test_legacy_switch_preserved(enabled):
++    assert _resolve_kimi_k3_c8_flag(["KimiK3ForCausalLM"], {}, enabled, False) is enabled
++
++
++@pytest.mark.parametrize("legacy,new", [(False, True), (True, False)])
++def test_conflict_fails(legacy, new):
++    with pytest.raises(ValueError, match="Conflicting"):
++        _resolve_kimi_k3_c8_flag(
++            ["KimiK3ForCausalLM"], {"enable_kimi_k3_sfa_c8": legacy, "enable_sparse_sfa_c8": new}, legacy, new
++        )
++
++
++@pytest.mark.parametrize("arch", [None, [], ["GlmMoeDsaForCausalLM"], ["DeepseekV3ForCausalLM"]])
++def test_non_k3_does_not_enter_k3_path(arch):
++    assert _resolve_kimi_k3_c8_flag(arch, {"enable_sparse_sfa_c8": True}, False, True) is False
