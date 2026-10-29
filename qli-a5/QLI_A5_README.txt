@@ -24,6 +24,11 @@ QLI V2 / QLI DSL：A5 单算子精度及性能测试
    保留源文件 __file__，兼容 metadata 同目录的 _aicpu 预编译文件查找。
    未指定路径时，优先已配置的 ops 源码，再找脚本/当前目录旁的 cannbot-source。
    多个源码位置或已加载的同名不同模块会明确报错，不静默覆盖。
+   已安装 wheel 的加载顺序固定为：cann_ops_transformer.ops →
+   cann_ops_transformer_dsl → cann_ops_transformer_dsl.ops.attention.quant_lightning_indexer_dsl →
+   cann_ops_transformer.ops.ds41。即使只测 DSL 也先加载 Native ops。
+   原因是 wheel 初始化会直接读取 sys.modules["cann_ops_transformer.ops"]；
+   find_spec 能定位文件不代表已经完成模块导入。该顺序不替代源码映射或 NPU 执行检查。
 5. 推荐空闲独占设备；保持电源、频率、温度与其他任务干扰条件一致。
 
 执行（在脚本所在目录）
@@ -46,6 +51,8 @@ run_qli_installed.py 是带日志的启动入口：下载固定 SHA256 的新版
 先执行 DSL metadata 编译/运行检查，再进行上述比较；不安装包或修改编译器。
 此前的 AICPU 'cstdint' file not found 是独立工具链问题；路径映射不能修复它。
 若再次发生，启动脚本会保留完整错误并停止，不宣称 QLI 已运行成功。
+启动时打印 runner_version；diagnostics.json 保存启动器和测试脚本版本/哈希，
+避免 /mnt 下不同下载时间的同名脚本混用。
 
 只测一个长序列并导出 profiler（分别导出两实现的 trace）：
   python test_qli_a5.py --suite full --case qli_64k --profile --output results_64k_profile

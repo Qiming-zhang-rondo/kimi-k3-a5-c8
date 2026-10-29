@@ -364,21 +364,34 @@ def self_test():
 
 def load_backends(args):
     result = {}
-    if args.backend in ("both", "dsl"):
+    use_dsl = args.backend in ("both", "dsl")
+    use_installed_dsl = use_dsl and args.dsl_source == "ops"
+    # The experimental wheel's __init__ reads sys.modules["cann_ops_transformer.ops"].
+    # find_spec() is not enough: finish importing Native before any DSL package.
+    # This prerequisite also applies when only the DSL backend is requested.
+    if args.backend in ("both", "native") or use_installed_dsl:
+        native = importlib.import_module("cann_ops_transformer.ops")
+        if args.backend in ("both", "native"):
+            result["native"] = (native.quant_lightning_indexer, native.quant_lightning_indexer_metadata)
+    if use_installed_dsl:
+        importlib.import_module("cann_ops_transformer_dsl")
+        registered = importlib.import_module(
+            "cann_ops_transformer_dsl.ops.attention.quant_lightning_indexer_dsl")
+        # Keep the Torch dispatcher for timing; do not replace it with the Python wrapper.
+        dispatcher = importlib.import_module("cann_ops_transformer.ops.ds41")
+        print(f"Installed DSL wrapper loaded: {registered.__file__}", flush=True)
+    if use_dsl:
         files = resolve_dsl_files(args)
         install_dsl_modules(files, namespace="ops" if args.dsl_source == "ops" else "")
         print("DSL source mapping (unmodified files):", flush=True)
         for name, path in files.items():
             print(f"  {name}: {path}", flush=True)
-    if args.backend in ("both", "native"):
-        mod = importlib.import_module("cann_ops_transformer.ops")
-        result["native"] = (mod.quant_lightning_indexer, mod.quant_lightning_indexer_metadata)
-    if args.backend in ("both", "dsl"):
+    if use_dsl:
         if args.dsl_source == "samples":
             mod = importlib.import_module("quant_lightning_indexer_dsl")
             meta = importlib.import_module("quant_lightning_indexer_metadata_dsl")
         else:
-            mod = meta = importlib.import_module("cann_ops_transformer.ops.ds41")
+            mod = meta = dispatcher
         result["dsl"] = (mod.quant_lightning_indexer, meta.quant_lightning_indexer_metadata)
     return result
 
