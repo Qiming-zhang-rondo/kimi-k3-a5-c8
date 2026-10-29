@@ -17,8 +17,13 @@ QLI V2 / QLI DSL：A5 单算子精度及性能测试
    cannbot-dsl 样例当前说明要求 CANN 9.2.0、CANNBotDSL 0.7.0。
 3. torch、torch_npu、numpy，以及已安装并可导入的 cann_ops_transformer。
    原生 MXFP4 要求 torch.float4_e2m1fn_x2 和 torch.float8_e8m0fnu。
-4. ops 模式还需要其配套 DSL 实现 ops.quant_lightning_indexer_dsl / metadata 模块。
-   仅 git clone 源码并不等同于已安装算子包。缺失依赖时脚本明确报错，不自动改用另一实现。
+4. ops 模式需要安装 experimental DSL wheel，以及两份实际 DSL 源码。
+   --dsl-root 可指定已有 cannbot-source 仓库、samples 目录或 flat ops 目录。
+   脚本仅在当前进程内将选定源码映射到扩展所需的两个 ops.* 模块，仍调用
+   已安装的 cann_ops_transformer.ops.ds41，不复制/修改源码或 site-packages。
+   保留源文件 __file__，兼容 metadata 同目录的 _aicpu 预编译文件查找。
+   未指定路径时，优先已配置的 ops 源码，再找脚本/当前目录旁的 cannbot-source。
+   多个源码位置或已加载的同名不同模块会明确报错，不静默覆盖。
 5. 推荐空闲独占设备；保持电源、频率、温度与其他任务干扰条件一致。
 
 执行（在脚本所在目录）
@@ -31,10 +36,21 @@ QLI V2 / QLI DSL：A5 单算子精度及性能测试
 全套：含 B=12、Sq=6、Sk=64K/128K、TopK=512、causal、cmp_ratio=2：
   python test_qli_a5.py --suite full --output results_full
 
+已安装导师命令构建的 wheel，源码位于已有 cannbot-source 时：
+  python test_qli_a5.py --backend both --dsl-source ops --dsl-root /mnt/qli-a5-ready.I3M02Q/cannbot-source --suite full --fail-fast --profile
+若 cannbot-dsl 只安装在此前创建的 venv，使用该 venv/bin/python；它通过
+system-site-packages 访问原 conda 环境中已安装的 Torch 扩展，无须重装。
+--fail-fast 遇到用例失败后不再计时或执行后续长序列用例。
+
+run_qli_installed.py 是带日志的启动入口：下载固定 SHA256 的新版测试脚本，
+先执行 DSL metadata 编译/运行检查，再进行上述比较；不安装包或修改编译器。
+此前的 AICPU 'cstdint' file not found 是独立工具链问题；路径映射不能修复它。
+若再次发生，启动脚本会保留完整错误并停止，不宣称 QLI 已运行成功。
+
 只测一个长序列并导出 profiler（分别导出两实现的 trace）：
   python test_qli_a5.py --suite full --case qli_64k --profile --output results_64k_profile
 
-如果要比较刚才浏览的 cannbot-dsl 样例，而非 ops-transformer 内的 DSL：
+若要直接调用源码而不经过已安装的 Torch DSL dispatcher：
   python test_qli_a5.py --suite full --dsl-source samples --dsl-root /path/to/cannbot-dsl --output results_samples
 
 可指定 --device npu:1、--backend native 或 dsl、--seed、--warmup 20、

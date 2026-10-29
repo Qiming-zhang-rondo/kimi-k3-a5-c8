@@ -8,10 +8,13 @@ import argparse
 import csv
 import hashlib
 import importlib
+import importlib.machinery
 import importlib.metadata
+import importlib.util
 import inspect
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import statistics
@@ -19,9 +22,132 @@ import subprocess
 import sys
 import time
 import traceback
+import types
 from dataclasses import asdict, dataclass
 
 import numpy as np
+
+
+DSL_MODULES = ("quant_lightning_indexer_metadata_dsl", "quant_lightning_indexer_dsl")
+
+
+def _dsl_file_pairs(root):
+    """Accept either upstream samples layout or an external flat ops directory."""
+    root = Path(root).expanduser().resolve()
+    layouts = [
+        {name: root / "samples" / name / (name + ".py") for name in DSL_MODULES},
+        {name: root / name / (name + ".py") for name in DSL_MODULES},
+        {name: root / "ops" / (name + ".py") for name in DSL_MODULES},
+        {name: root / (name + ".py") for name in DSL_MODULES},
+    ]
+    return [files for files in layouts if all(p.is_file() for p in files.values())]
+
+
+def _choose_dsl_files(pairs):
+    unique = {}
+    for files in pairs:
+        # Keep distinct locations separate: adjacent prebuilt metadata binaries may differ.
+        key = tuple(str(files[n].resolve()) for n in DSL_MODULES)
+        unique[key] = {n: files[n].resolve() for n in DSL_MODULES}
+    if len(unique) > 1:
+        raise RuntimeError("Multiple DSL source locations found; select one with --dsl-root: "
+                           + "; ".join(key[0] for key in unique))
+    return next(iter(unique.values())) if unique else None
+
+
+def resolve_dsl_files(args):
+    """Resolve the requested files, without installing packages or copying kernels."""
+    explicit = args.dsl_root or os.environ.get("CANNBOTDSL_TEST_OPS_DIR")
+    if explicit:
+        files = _choose_dsl_files(_dsl_file_pairs(explicit))
+        if files is None:
+            raise RuntimeError(f"Incomplete DSL source at {explicit}: need both "
+                               "quant_lightning_indexer_dsl.py and quant_lightning_indexer_metadata_dsl.py")
+        return files
+    if args.dsl_source == "ops":
+        try:
+            spec = importlib.util.find_spec("ops")
+        except (ImportError, ValueError):
+            spec = None
+        pairs = []
+        for loc in (getattr(spec, "submodule_search_locations", None) or []):
+            pairs.extend(_dsl_file_pairs(loc))
+        files = _choose_dsl_files(pairs)
+        if files:
+            return files
+    # The original download placed the harness next to cannbot-source.
+    roots = [Path(__file__).resolve().parent / "cannbot-source", Path.cwd() / "cannbot-source"]
+    files = _choose_dsl_files([pair for root in roots for pair in _dsl_file_pairs(root)])
+    if files is None:
+        raise RuntimeError("DSL source files not found. Pass --dsl-root /path/to/cannbot-source "
+                           "(or /path/to/ops). No package reinstall is required for path mapping.")
+    return files
+
+
+def install_dsl_modules(files, namespace="ops"):
+    """Expose exact source files under the imports expected by the installed wrapper.
+
+    Original __file__ paths are preserved for JIT source inspection and adjacent
+    _aicpu binaries. Only this process changes; existing modules are never replaced.
+    """
+    targets = [(name, (namespace + "." if namespace else "") + name,
+                Path(files[name]).resolve()) for name in DSL_MODULES]
+    for _, target, path in targets:
+        existing = sys.modules.get(target)
+        if existing is not None and (not getattr(existing, "__file__", None)
+                                     or Path(existing.__file__).resolve() != path):
+            raise RuntimeError(f"Conflicting loaded DSL module {target}: "
+                               f"{getattr(existing, '__file__', None)}; requested {path}")
+    parent = None
+    created_parent = False
+    if namespace:
+        parent = sys.modules.get(namespace)
+        if parent is None:
+            try:
+                parent = importlib.import_module(namespace)
+            except ModuleNotFoundError as exc:
+                if exc.name != namespace:
+                    raise
+                parent = types.ModuleType(namespace)
+                parent.__path__ = []
+                parent.__package__ = namespace
+                parent.__spec__ = importlib.machinery.ModuleSpec(namespace, loader=None, is_package=True)
+                sys.modules[namespace] = parent
+                created_parent = True
+        if not hasattr(parent, "__path__"):
+            raise RuntimeError(f"{namespace} is already a non-package module")
+    added = []
+    old_attrs = {}
+    absent = object()
+    try:
+        for short, target, path in targets:
+            module = sys.modules.get(target)
+            # Importing an existing parent package can itself populate these names.
+            if module is not None and (not getattr(module, "__file__", None)
+                                       or Path(module.__file__).resolve() != path):
+                raise RuntimeError(f"Conflicting loaded DSL module {target}: "
+                                   f"{getattr(module, '__file__', None)}; requested {path}")
+            if module is None:
+                spec = importlib.util.spec_from_file_location(target, path)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[target] = module
+                added.append(target)
+                spec.loader.exec_module(module)
+            if parent is not None:
+                old_attrs[short] = getattr(parent, short, absent)
+                setattr(parent, short, module)
+        return [sys.modules[target] for _, target, _ in targets]
+    except Exception:
+        for target in added:
+            sys.modules.pop(target, None)
+        for short, previous in old_attrs.items():
+            if previous is absent:
+                delattr(parent, short)
+            else:
+                setattr(parent, short, previous)
+        if created_parent:
+            sys.modules.pop(namespace, None)
+        raise
 
 
 @dataclass
@@ -238,16 +364,17 @@ def self_test():
 
 def load_backends(args):
     result = {}
+    if args.backend in ("both", "dsl"):
+        files = resolve_dsl_files(args)
+        install_dsl_modules(files, namespace="ops" if args.dsl_source == "ops" else "")
+        print("DSL source mapping (unmodified files):", flush=True)
+        for name, path in files.items():
+            print(f"  {name}: {path}", flush=True)
     if args.backend in ("both", "native"):
         mod = importlib.import_module("cann_ops_transformer.ops")
         result["native"] = (mod.quant_lightning_indexer, mod.quant_lightning_indexer_metadata)
     if args.backend in ("both", "dsl"):
         if args.dsl_source == "samples":
-            if not args.dsl_root:
-                raise ValueError("--dsl-root is required with --dsl-source samples")
-            root = Path(args.dsl_root).resolve()/"samples"
-            sys.path[:0] = [str(root/"quant_lightning_indexer_dsl"),
-                            str(root/"quant_lightning_indexer_metadata_dsl")]
             mod = importlib.import_module("quant_lightning_indexer_dsl")
             meta = importlib.import_module("quant_lightning_indexer_metadata_dsl")
         else:
@@ -355,7 +482,7 @@ def main():
     parser.add_argument("--case", help="Run one named case from the selected suite")
     parser.add_argument("--backend", choices=["both", "native", "dsl"], default="both")
     parser.add_argument("--dsl-source", choices=["ops", "samples"], default="ops")
-    parser.add_argument("--dsl-root", help="Path to a checked-out cannbot-dsl repository")
+    parser.add_argument("--dsl-root", help="Existing cannbot-dsl repo, samples directory or flat ops directory; works with both sources")
     parser.add_argument("--device", default="npu:0")
     parser.add_argument("--seed", type=int, default=20261029)
     parser.add_argument("--warmup", type=int, default=20)
@@ -364,6 +491,7 @@ def main():
     parser.add_argument("--rtol", type=float, default=1/128)
     parser.add_argument("--atol", type=float, default=2.5e-5)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--fail-fast", action="store_true", help="Stop after a case fails; skip its timings and subsequent cases")
     parser.add_argument("--output", default="qli_results_"+time.strftime("%Y%m%d_%H%M%S"))
     args = parser.parse_args()
     if args.self_test:
@@ -379,8 +507,8 @@ def main():
     if (out/"results.json").exists():
         parser.error("Output already contains results.json; choose a fresh --output directory")
     report = dict(args=vars(args), cases=[], environment=dict(python=sys.version, platform=platform.platform()),
-                  sources=dict(ops_transformer="a18ec2631ccf4b8ed08027d7d38bc3c1816f929a",
-                               cannbot_dsl="606a737579356baa31da5674452f60673681cff0"))
+                  inspected_reference_revisions=dict(ops_transformer="a18ec2631ccf4b8ed08027d7d38bc3c1816f929a",
+                                                     cannbot_dsl="606a737579356baa31da5674452f60673681cff0"))
     save_report(out, report)
     try:
         import torch
@@ -389,7 +517,7 @@ def main():
         report["environment"].update(torch=torch.__version__, torch_npu=torch_npu.__version__,
                                      device=torch.npu.get_device_name(torch.npu.current_device()),
                                      numpy=np.__version__)
-        for package in ("cann-ops-transformer", "cannbot-dsl"):
+        for package in ("cann-ops-transformer", "cann-ops-transformer-dsl", "cannbot-dsl"):
             try:
                 report["environment"][package] = importlib.metadata.version(package)
             except importlib.metadata.PackageNotFoundError:
@@ -405,6 +533,9 @@ def main():
         dsl_module = "ops.quant_lightning_indexer_dsl" if args.dsl_source == "ops" else "quant_lightning_indexer_dsl"
         if "dsl" in backends:
             report["dsl_implementation"] = file_identity(importlib.import_module(dsl_module).quant_lightning_indexer)
+            metadata_module = ("ops." if args.dsl_source == "ops" else "") + "quant_lightning_indexer_metadata_dsl"
+            report["dsl_metadata_implementation"] = file_identity(
+                importlib.import_module(metadata_module).quant_lightning_indexer_metadata)
         for ci, c in enumerate(cases):
             print(f"[{c.name}] input={asdict(c)}", flush=True)
             entry = dict(case=asdict(c), backends={})
@@ -460,6 +591,10 @@ def main():
                         print(result["error"], file=sys.stderr, flush=True)
                     print(f"  {name}: {result['status']}", flush=True)
                     save_report(out, report)
+                if args.fail_fast and any(r["status"] != "PASS" for r in entry["backends"].values()):
+                    report["stopped_early"] = c.name
+                    print("Stopping after failed case; no further reference or timing runs.", flush=True)
+                    break
                 if len(outputs) == 2:
                     overlaps = []
                     for a, b in zip(outputs["native"][:, 0], outputs["dsl"][:, 0]):
