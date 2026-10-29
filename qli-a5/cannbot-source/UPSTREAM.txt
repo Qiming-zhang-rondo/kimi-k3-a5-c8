@@ -1,0 +1,5 @@
+Unmodified QLI and metadata source files for Ascend A5 tests.
+Source: https://gitcode.com/cann/cannbot-dsl
+Revision: 606a737579356baa31da5674452f60673681cff0
+Original paths preserved under samples/.
+Copyright notices retained. See LICENSE for CANN Open Software License Agreement Version 2.0.

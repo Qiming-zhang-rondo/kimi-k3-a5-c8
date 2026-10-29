@@ -1,0 +1,35 @@
+{
+  "version": "0.7.0",
+  "wheels": [
+    {
+      "filename": "cannbot_dsl-0.7.0-cp310-cp310-manylinux_2_28_aarch64.whl",
+      "url": "https://files.pythonhosted.org/packages/e9/59/e5e44a811c6118ea6e7f9f79d31f9d6eadc2dffaf5733d8a883043728534/cannbot_dsl-0.7.0-cp310-cp310-manylinux_2_28_aarch64.whl",
+      "sha256": "780cc06b0a80de19787aac84d03583c47d27494da3e6f9506501f830afa8ad80"
+    },
+    {
+      "filename": "cannbot_dsl-0.7.0-cp310-cp310-manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/c8/62/a3f329cde7166ab8302bbab3bef0b456f64850a03f3085bdf51ded2b7c76/cannbot_dsl-0.7.0-cp310-cp310-manylinux_2_28_x86_64.whl",
+      "sha256": "6cc38bb43e80ad17ad09b1490ffd98b6925deaa5d2d635b939f782bf1346cbec"
+    },
+    {
+      "filename": "cannbot_dsl-0.7.0-cp311-cp311-manylinux_2_28_aarch64.whl",
+      "url": "https://files.pythonhosted.org/packages/21/91/d3f1963f671c9063594c1604fb47115ae01ca1ca2466c31e5786b1d7a795/cannbot_dsl-0.7.0-cp311-cp311-manylinux_2_28_aarch64.whl",
+      "sha256": "28691280da199b46deb5034af99b2e3b67094cd903a7be27bf49b8536cbd0449"
+    },
+    {
+      "filename": "cannbot_dsl-0.7.0-cp311-cp311-manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/93/d7/da88ec750b27fd9fc9bb06fa5114328a8b3eea47454fd51cfe429f663951/cannbot_dsl-0.7.0-cp311-cp311-manylinux_2_28_x86_64.whl",
+      "sha256": "5aa95eb338436f988cadffd63f9c204ae75ff5dd1b57ed66ff11eb4709556668"
+    },
+    {
+      "filename": "cannbot_dsl-0.7.0-cp312-cp312-manylinux_2_28_aarch64.whl",
+      "url": "https://files.pythonhosted.org/packages/a5/bc/c2310566631092a83c3794c81ffe454327a7adb6f1e02344f4bc4234dbf7/cannbot_dsl-0.7.0-cp312-cp312-manylinux_2_28_aarch64.whl",
+      "sha256": "bea7e6a1f23e5ace930cf43e7e00a7736aa969e9b4ffb610fdf35f5403feb6bb"
+    },
+    {
+      "filename": "cannbot_dsl-0.7.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/a8/a5/642060b1282a1dd6e6802095cc0822b6f360392e1811f017e95a8ee722a1/cannbot_dsl-0.7.0-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "sha256": "5d22cae486da9612e38c470d2bed4eedcf5981b4f77cdf943a380d85c7f86292"
+    }
+  ]
+}
