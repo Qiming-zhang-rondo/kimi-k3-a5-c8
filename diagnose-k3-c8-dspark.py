@@ -6,6 +6,7 @@ DSpark model, graph capture, DCP collectives, or performance claims.
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import math
@@ -18,6 +19,51 @@ def numbers(value):
     if not result or min(result) <= 0:
         raise argparse.ArgumentTypeError("Use comma-separated positive integers")
     return result
+
+
+def load_installed_verify(path, torch, rows):
+    """Compile ONLY the installed method, without importing MLA/MoE modules.
+
+    A standalone import of mla_v1 can hit DeviceOperator/MoE import cycles
+    that normal worker initialization avoids. Do not change framework import
+    order, mock DeviceOperator, or substitute a handwritten verify algorithm.
+    Keep the method's AST and source line numbers unchanged; its two helper
+    bindings are the real installed C8 helpers used by the worker.
+    """
+    source_bytes = path.read_bytes()
+    source = source_bytes.decode("utf-8")
+    tree = ast.parse(source, filename=str(path))
+    candidates = [
+        method
+        for cls in tree.body
+        if isinstance(cls, ast.ClassDef) and cls.name == "AscendMLAImpl"
+        for method in cls.body
+        if isinstance(method, ast.FunctionDef)
+        and method.name == "_kimi_k3_c8_verify_attention"
+    ]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "Installed VA has no unique C8 speculative verification method; check the test patch version"
+        )
+    method = candidates[0]
+    if method.decorator_list:
+        raise RuntimeError(
+            "Installed verify method has decorators; this diagnostic needs updating"
+        )
+    namespace = {
+        "torch": torch,
+        "KimiK3C8DecodeState": rows.KimiK3C8DecodeState,
+        "kimi_k3_sfa_c8_decode": rows.kimi_k3_sfa_c8_decode,
+    }
+    isolated = ast.Module(body=[method], type_ignores=[])
+    # Intentionally execute this installed function, not the module's imports.
+    exec(compile(isolated, str(path), "exec"), namespace)  # noqa: S102
+    return namespace[method.name], {
+        "file": str(path),
+        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "load_mode": "isolated_installed_method_ast",
+        "method_line": method.lineno,
+    }
 
 
 def compare(torch, actual, expected):
@@ -78,7 +124,6 @@ def main():
     import torch_npu
     from vllm_ascend.attention import kimi_k3_sfa_c8 as ordinary
     from vllm_ascend.attention import kimi_k3_sfa_c8_graph as rows
-    from vllm_ascend.attention import mla_v1
     from vllm_ascend.device.device_config import check_ascend_device_type, is_950
 
     torch.set_num_threads(1)
@@ -89,13 +134,11 @@ def main():
     if not is_950():
         raise RuntimeError("This diagnostic requires the A5/950 build")
     ordinary.require_kimi_k3_sfa_c8_ops()
-    verify = getattr(mla_v1.AscendMLAImpl, "_kimi_k3_c8_verify_attention", None)
-    if verify is None:
-        raise RuntimeError(
-            "Installed VA has no C8 speculative verification wrapper; check the test patch version"
-        )
-    sources = {}
-    for module in (ordinary, rows, mla_v1):
+    verify, verify_source = load_installed_verify(
+        Path(ordinary.__file__).with_name("mla_v1.py"), torch, rows
+    )
+    sources = {"vllm_ascend.attention.mla_v1": verify_source}
+    for module in (ordinary, rows):
         path = Path(module.__file__)
         sources[module.__name__] = {
             "file": str(path),
