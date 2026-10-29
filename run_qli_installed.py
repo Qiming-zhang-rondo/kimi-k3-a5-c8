@@ -18,9 +18,9 @@ import tempfile
 import traceback
 import urllib.request
 
-HARNESS_URL = "https://raw.githubusercontent.com/Qiming-zhang-rondo/kimi-k3-a5-c8/e0d91f34023c5b1a52b75920ce2356b1d0a231bd/qli-a5/test_qli_a5.py"
-HARNESS_SHA256 = "3e547ccccba4432c2220febda8c8a616a7fc58de40db94f1c917d2b7b8a832a2"
-RUNNER_VERSION = "qli-native-first-v2"
+HARNESS_URL = "https://raw.githubusercontent.com/Qiming-zhang-rondo/kimi-k3-a5-c8/51d02efe90eb7ff93aada7bca3658117dbb55449/qli-a5/test_qli_a5.py"
+HARNESS_SHA256 = "84637c150efef40a5eb0c1e9dbd4bd7d22fe83fb6b027f7f7ead20da2429c822"
+RUNNER_VERSION = "qli-topk-override-v3"
 
 
 def identify(path):
@@ -64,10 +64,14 @@ def main():
                    help="Existing cannbot-dsl repo, samples directory or flat ops directory")
     p.add_argument("--work-dir", default="/mnt")
     p.add_argument("--suite", choices=("smoke", "standard", "full"), default="smoke")
+    p.add_argument("--case", help="Run just this case from the selected suite")
+    p.add_argument("--topk", type=int, help="Override TopK (1..8192), preserving the original input data")
     p.add_argument("--device", default="npu:0")
     p.add_argument("--profile", action="store_true")
     p.add_argument("--worker-dir", help=argparse.SUPPRESS)
     args = p.parse_args()
+    if args.topk is not None and not 1 <= args.topk <= 8192:
+        p.error("--topk must be between 1 and 8192")
     if not args.worker_dir:
         Path(args.work_dir).mkdir(parents=True, exist_ok=True)
         run = Path(tempfile.mkdtemp(prefix="qli-installed-", dir=args.work_dir)).resolve()
@@ -130,7 +134,8 @@ def main():
             meta = backends["dsl"][1](
                 cu_seqlens_q=cu, seqused_q=qlen, seqused_k=klen,
                 batch_size=1, max_seqlen_q=3, max_seqlen_k=257,
-                num_heads_q=32, num_heads_k=1, head_dim=128, topk=32,
+                num_heads_q=32, num_heads_k=1, head_dim=128,
+                topk=args.topk if args.topk is not None else 32,
                 mask_mode=0, cmp_ratio=1, layout_q="TND", layout_k="PA_BBND")
             torch.npu.synchronize()
         if meta.dtype != torch.int32 or tuple(meta.shape) != (1024,) or meta.device != cu.device:
@@ -144,6 +149,10 @@ def main():
                     "--device", args.device, "--output", str(run / "results")]
         if args.profile:
             sys.argv.append("--profile")
+        if args.case:
+            sys.argv.extend(["--case", args.case])
+        if args.topk is not None:
+            sys.argv.extend(["--topk", str(args.topk)])
         code = harness.main()
         report["status"] = "PASS" if code == 0 else "FAIL"
         save()
