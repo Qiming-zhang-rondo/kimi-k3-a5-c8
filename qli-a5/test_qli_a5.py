@@ -457,6 +457,7 @@ def main():
                                                 indices_only=ix_false, reference=scores, **{k:v for k,v in cpu.items() if v is not None})
                     except Exception:
                         result.update(status="ERROR", error=traceback.format_exc())
+                        print(result["error"], file=sys.stderr, flush=True)
                     print(f"  {name}: {result['status']}", flush=True)
                     save_report(out, report)
                 if len(outputs) == 2:
@@ -477,6 +478,7 @@ def main():
                         print(f"  {name}: eager event median {result['latency']['event_median_us']:.3f} us", flush=True)
                     except Exception:
                         result.update(status="ERROR", error=traceback.format_exc())
+                        print(result["error"], file=sys.stderr, flush=True)
                     save_report(out, report)
                 if len(calls) == 2 and all("latency" in entry["backends"][n] for n in calls):
                     a = entry["backends"]["native"]["latency"]["event_median_us"]
