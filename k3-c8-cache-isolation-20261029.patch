@@ -1,0 +1,258 @@
+diff --git a/vllm_ascend/patch/platform/patch_kv_cache_utils.py b/vllm_ascend/patch/platform/patch_kv_cache_utils.py
+index 8ea043d47..2bf2a2635 100644
+--- a/vllm_ascend/patch/platform/patch_kv_cache_utils.py
++++ b/vllm_ascend/patch/platform/patch_kv_cache_utils.py
+@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
+     get_kv_cache_spec_kind,
+ )
+ 
++from vllm_ascend.core.kimi_k3_cache_layout import get_kimi_k3_c8_cache_layout
+ from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+ from vllm_ascend.models.deepseek_v41.cache_config import (
+     get_deepseek_v41_kv_cache_config,
+@@ -536,6 +537,9 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
+     layout, so using the upstream value changes ``num_blocks`` during the
+     re-plan and leaves ranks inconsistent.
+     """
++    c8_layout = get_kimi_k3_c8_cache_layout(kv_cache_groups)
++    if c8_layout is not None:
++        return c8_layout[0]
+     if is_deepseek_v41_cache(kv_cache_groups):
+         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
+     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+@@ -597,7 +601,46 @@ def _ascend_get_kv_cache_config_from_groups(
+     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
+     dropped by worker pickle IPC, which never reads it.
+     """
+-    if is_deepseek_v41_cache(kv_cache_groups):
++    c8_layout = get_kimi_k3_c8_cache_layout(kv_cache_groups)
++    if c8_layout is not None:
++        bytes_per_block, layer_offsets = c8_layout
++        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
++        size = num_blocks * bytes_per_block
++        if size > available_memory:
++            raise ValueError(
++                f"C8 hybrid cache needs {size} bytes for {num_blocks} blocks, "
++                f"but the KV cache budget is {available_memory} bytes."
++            )
++        tensors = []
++        for group in kv_cache_groups:
++            for name in group.layer_names:
++                spec = (
++                    group.kv_cache_spec.kv_cache_specs[name]
++                    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
++                    else group.kv_cache_spec
++                )
++                tensors.append(
++                    KVCacheTensor(
++                        size=size,
++                        layers=[name],
++                        offset=num_blocks * layer_offsets[name],
++                        layer_stride=num_blocks * spec.page_size_bytes,
++                        block_stride=spec.page_size_bytes,
++                    )
++                )
++        kv_cache_config = KVCacheConfig(
++            num_blocks=num_blocks,
++            kv_cache_tensors=tensors,
++            kv_cache_groups=kv_cache_groups,
++            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
++        )
++        logger.info(
++            "C8 hybrid cache: isolated format regions, %d bytes per global block, %d blocks, %d bytes allocated.",
++            bytes_per_block,
++            num_blocks,
++            size,
++        )
++    elif is_deepseek_v41_cache(kv_cache_groups):
+         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+diff --git a/vllm_ascend/worker/v2/attn_utils.py b/vllm_ascend/worker/v2/attn_utils.py
+index 877a06d23..4f3e1ce19 100644
+--- a/vllm_ascend/worker/v2/attn_utils.py
++++ b/vllm_ascend/worker/v2/attn_utils.py
+@@ -52,6 +52,7 @@ from vllm_ascend.attention.utils import (
+     AscendCommonAttentionMetadata,
+     get_sfa_qsfa_packed_head_dim,
+ )
++from vllm_ascend.core.kimi_k3_cache_layout import get_kimi_k3_c8_cache_layout
+ from vllm_ascend.core.kv_cache_interface import (
+     AscendIndexerKPoolTailSpec,
+     AscendMLAAttentionSpec,
+@@ -649,6 +650,38 @@ def _allocate_kv_cache(
+     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
+     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+     use_hybrid_layout = has_mamba and has_attention
++    c8_layout = get_kimi_k3_c8_cache_layout(kv_cache_config.kv_cache_groups)
++    if c8_layout is not None:
++        # Fail before allocating if an old planner still overlays incompatible
++        # formats. Merely creating a correct C8 view cannot repair that alias.
++        bytes_per_block, layer_offsets = c8_layout
++        expected_size = kv_cache_config.num_blocks * bytes_per_block
++        seen_layers: set[str] = set()
++        region_dims: dict[int, tuple[int, int]] = {}
++        for descriptor in kv_cache_config.kv_cache_tensors:
++            for index, name in enumerate(get_kv_cache_tensor_layers(descriptor)):
++                spec = layer_kv_cache_spec[name]
++                start = descriptor.offset + index * descriptor.layer_stride
++                if (
++                    name in seen_layers
++                    or descriptor.size != expected_size
++                    or start != kv_cache_config.num_blocks * layer_offsets[name]
++                    or descriptor.block_stride != spec.page_size_bytes
++                    or descriptor.layer_stride != kv_cache_config.num_blocks * spec.page_size_bytes
++                ):
++                    raise ValueError(
++                        f"C8 hybrid cache region for {name} does not match the isolated-format plan; "
++                        "update the cache planner and worker together and restart."
++                    )
++                seen_layers.add(name)
++                if isinstance(spec, MLAAttentionSpec) and not getattr(spec, "cache_sparse_sfa_c8", False):
++                    # The MLA spec stores only total width. Equal specs may
++                    # share a region only if their actual K/V split agrees.
++                    dims = _get_attention_kv_cache_dims(name, spec)
++                    if region_dims.setdefault(start, dims) != dims:
++                        raise ValueError(f"MLA layers sharing C8 hybrid region {start} have different K/V splits.")
++        if seen_layers != set(layer_offsets):
++            raise ValueError("C8 hybrid cache descriptors do not cover every planned layer.")
+ 
+     # The restored DeepSeek-V4 planner on main computes capacity for one
+     # shared-tuple backing and emits every KVCacheTensor as a view into it.
+@@ -748,7 +781,7 @@ def _allocate_kv_cache(
+         # model's Attention/Mamba caches. Keep HiddenStateCacheSpec off the
+         # #51718 hybrid backing so float32 SSM writes cannot overlay bfloat16
+         # hidden states, and size each dump from its own page.
+-        if any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in shared_names):
++        if c8_layout is None and any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in shared_names):
+             for layer_idx, layer_name in enumerate(shared_names):
+                 layer_spec = layer_kv_cache_spec[layer_name]
+                 if is_hidden_state_cache_spec(layer_spec) or hybrid_backing is None:
+@@ -1250,7 +1283,7 @@ def build_attn_metadata_wrapper():
+ 
+ 
+ @contextmanager
+-def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_state=None):
++def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_state=None, exact_seq_lens=False):
+     """Wrap build_attn_metadata with Ascend draft-model context.
+ 
+     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
+@@ -1262,6 +1295,19 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_sta
+     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+ 
+     def build_attn_metadata(*args, **kwargs):
++        if exact_seq_lens:
++            # BF16 MLA/FIA consumes a host length list, unlike the C8 reader
++            # which uses device lengths and a host upper bound only for sizing.
++            # Snapshot after draft rejection/rewind, BEFORE the builder derives
++            # decode/CP metadata. This intentional small D2H synchronization
++            # stays outside captured forward/replay; do not replace with an
++            # upper bound. Nested draft factories reuse the exact CPU mirror.
++            if kwargs.get("seq_lens_np") is None:
++                lengths = kwargs["seq_lens"][: kwargs["num_reqs"]].to(device="cpu", copy=True)
++                kwargs["seq_lens_np"] = lengths.numpy()
++            else:
++                lengths = torch.from_numpy(kwargs["seq_lens_np"][: kwargs["num_reqs"]])
++            kwargs["seq_lens_cpu_upper_bound"] = lengths
+         kwargs["positions"] = positions[:pad]
+         kwargs["is_prefilling"] = is_prefilling
+         kwargs["attn_state"] = attn_state
+diff --git a/vllm_ascend/worker/v2/spec_decode/dspark/speculator.py b/vllm_ascend/worker/v2/spec_decode/dspark/speculator.py
+index d26c2f9b5..a246e90a4 100644
+--- a/vllm_ascend/worker/v2/spec_decode/dspark/speculator.py
++++ b/vllm_ascend/worker/v2/spec_decode/dspark/speculator.py
+@@ -124,6 +124,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
+                 num_tokens_padded,
+                 is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                 attn_state=AscendAttentionState.ChunkedPrefill,
++                exact_seq_lens=self.attn_architecture == "MLA",
+             ),
+         ):
+             attn_metadata = super()._build_draft_attn_metadata(
+@@ -158,6 +159,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
+                 num_tokens_padded,
+                 is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                 attn_state=AscendAttentionState.ChunkedPrefill,
++                exact_seq_lens=self.attn_architecture == "MLA",
+             ),
+         ):
+             attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+@@ -216,7 +218,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
+         with (
+             build_attn_metadata_wrapper(),
+             build_draft_attn_metadata_factory(
+-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
++                self.input_buffers.positions,
++                self.max_num_tokens,
++                torch.from_numpy(self.input_batch.is_prefilling_np),
++                exact_seq_lens=self.attn_architecture == "MLA",
+             ),
+         ):
+             return super().propose(
+diff --git a/vllm_ascend/core/kimi_k3_cache_layout.py b/vllm_ascend/core/kimi_k3_cache_layout.py
+new file mode 100644
+index 000000000..56fe9e531
+--- /dev/null
++++ b/vllm_ascend/core/kimi_k3_cache_layout.py
+@@ -0,0 +1,61 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
++
++from collections import Counter
++
++from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec, UniformTypeKVCacheSpecs
++
++
++def get_kimi_k3_c8_cache_layout(
++    groups: list[KVCacheGroupSpec],
++) -> tuple[int, dict[str, int]] | None:
++    """Budget disjoint storage regions for incompatible hybrid cache formats.
++
++    Packed C8 uses page-major storage; ordinary MLA uses whole-pool K/V
++    planes and Mamba uses whole-pool state planes. Different block IDs do
++    not isolate these layouts when they alias the same byte range. Keep
++    the existing native tensor layouts, but allow storage reuse only among
++    identical specs in different scheduler groups.
++
++    Return the total bytes per global block and each layer's region offset
++    *per block*. Multiply both by num_blocks when building descriptors.
++    Logical groups/block tables are unchanged. Non-C8 models are untouched.
++    """
++    layer_groups = [
++        [
++            (
++                name,
++                group.kv_cache_spec.kv_cache_specs[name]
++                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
++                else group.kv_cache_spec,
++            )
++            for name in group.layer_names
++        ]
++        for group in groups
++    ]
++    specs = [spec for layers in layer_groups for _, spec in layers]
++    if not any(getattr(spec, "cache_sparse_sfa_c8", False) for spec in specs) or not any(
++        isinstance(spec, MambaSpec) for spec in specs
++    ):
++        return None
++
++    pool_widths: dict[KVCacheSpec, int] = {}
++    for layers in layer_groups:
++        for spec, count in Counter(spec for _, spec in layers).items():
++            pool_widths[spec] = max(pool_widths.get(spec, 0), count)
++
++    pool_offsets: dict[KVCacheSpec, int] = {}
++    bytes_per_block = 0
++    for spec, width in pool_widths.items():
++        pool_offsets[spec] = bytes_per_block
++        bytes_per_block += width * spec.page_size_bytes
++
++    layer_offsets: dict[str, int] = {}
++    for layers in layer_groups:
++        indices: Counter[KVCacheSpec] = Counter()
++        for name, spec in layers:
++            if name in layer_offsets:
++                raise ValueError(f"Duplicate hybrid cache layer: {name}.")
++            layer_offsets[name] = pool_offsets[spec] + indices[spec] * spec.page_size_bytes
++            indices[spec] += 1
++    return bytes_per_block, layer_offsets
