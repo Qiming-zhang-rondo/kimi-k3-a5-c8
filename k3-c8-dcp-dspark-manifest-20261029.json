@@ -1,0 +1,230 @@
+{
+  "base_commit": "b3d3bb6805ffaf8fcc20086d5e59dbf2352083b4",
+  "old_tree": "1c250daa38c46f40d41a77bc6c682039dcd3ea12",
+  "new_tree": "bf41d8e923b2080035bf9bab1924c8f722ffc098",
+  "states": {
+    "complete_before": {
+      "docs/source/developer_guide/kimi_k3_sfa_c8.md": null,
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py": null,
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py": null,
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py": null,
+      "tests/ut/attention/test_kimi_k3_c8_config_alias.py": null,
+      "tests/ut/attention/test_kimi_k3_c8_spec_dcp.py": null,
+      "tests/ut/attention/test_kimi_k3_graph_capture_stream.py": null,
+      "tests/ut/attention/test_kimi_k3_sfa_c8.py": null,
+      "tests/ut/attention/test_kimi_k3_sfa_c8_graph.py": null,
+      "tests/ut/attention/test_kimi_k3_sfa_c8_integration.py": null,
+      "tests/ut/worker/test_attn_utils_v2.py": {
+        "mode": "100644",
+        "oid": "9dc0470497e6f53b0e3b161c67f40d344cd5f87f"
+      },
+      "tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py": null,
+      "tests/ut/worker/test_model_runner_v2_mamba.py": {
+        "mode": "100644",
+        "oid": "9659a9d0ab125ec03c9bb0b0100802663b9bd0d5"
+      },
+      "vllm_ascend/ascend_config.py": {
+        "mode": "100644",
+        "oid": "4b39b6811a9308e89ac59496595d7be81446a8cf"
+      },
+      "vllm_ascend/attention/context_parallel/mla_cp.py": {
+        "mode": "100644",
+        "oid": "2317b72703e3f7c2599562e8d5cc520f893c79d0"
+      },
+      "vllm_ascend/attention/kimi_k3_sfa_c8.py": null,
+      "vllm_ascend/attention/kimi_k3_sfa_c8_graph.py": null,
+      "vllm_ascend/attention/mla_v1.py": {
+        "mode": "100644",
+        "oid": "4ffc320b1f618d40719ffb999232056adcbf72b7"
+      },
+      "vllm_ascend/worker/v2/aclgraph_utils.py": {
+        "mode": "100644",
+        "oid": "9dd58410897df4d08b23f7f1984bcdd22692abf0"
+      },
+      "vllm_ascend/worker/v2/attn_utils.py": {
+        "mode": "100644",
+        "oid": "b050d8d518f1b04f1373317a39045b650cc6a9cc"
+      },
+      "vllm_ascend/worker/v2/model_states/mamba_hybrid.py": {
+        "mode": "100644",
+        "oid": "667001771b335928949a98e0380452758268d832"
+      }
+    },
+    "upgrade_before": {
+      "docs/source/developer_guide/kimi_k3_sfa_c8.md": {
+        "mode": "100644",
+        "oid": "2e1bee10b0addfbc5276215b040bf4c1c270b454"
+      },
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py": null,
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py": {
+        "mode": "100644",
+        "oid": "30e6fe17356a93618556628580437bb805964286"
+      },
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py": {
+        "mode": "100644",
+        "oid": "27cf2551f24f7e8c91b134daee344977846d6484"
+      },
+      "tests/ut/attention/test_kimi_k3_c8_config_alias.py": {
+        "mode": "100644",
+        "oid": "20c1d6a4de21f1a386e112c4aa6f2bdb00533d9e"
+      },
+      "tests/ut/attention/test_kimi_k3_c8_spec_dcp.py": null,
+      "tests/ut/attention/test_kimi_k3_graph_capture_stream.py": {
+        "mode": "100644",
+        "oid": "75b8c9cb4eff4a60cfe563d050234e801adbe162"
+      },
+      "tests/ut/attention/test_kimi_k3_sfa_c8.py": {
+        "mode": "100644",
+        "oid": "71bcbf899bcba7aa662648ccf8d10c66c2983bc2"
+      },
+      "tests/ut/attention/test_kimi_k3_sfa_c8_graph.py": {
+        "mode": "100644",
+        "oid": "fea2180579a7d802f6ccb586a8f1d63804fb59ce"
+      },
+      "tests/ut/attention/test_kimi_k3_sfa_c8_integration.py": {
+        "mode": "100644",
+        "oid": "59a436de0589b3c55d4c3e8a7316551f16bf0b40"
+      },
+      "tests/ut/worker/test_attn_utils_v2.py": {
+        "mode": "100644",
+        "oid": "181bc78f00c318af291ca81ad1a080bd640f1b84"
+      },
+      "tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py": {
+        "mode": "100644",
+        "oid": "f8a404183262c4a6aab44df839ce0cb574340179"
+      },
+      "tests/ut/worker/test_model_runner_v2_mamba.py": {
+        "mode": "100644",
+        "oid": "fe0e9017782d7e0a1f34aa90347822200f0423fd"
+      },
+      "vllm_ascend/ascend_config.py": {
+        "mode": "100644",
+        "oid": "ff1eeb1228ccbf32451b2d4c03bb1a7019319e4d"
+      },
+      "vllm_ascend/attention/context_parallel/mla_cp.py": {
+        "mode": "100644",
+        "oid": "2317b72703e3f7c2599562e8d5cc520f893c79d0"
+      },
+      "vllm_ascend/attention/kimi_k3_sfa_c8.py": {
+        "mode": "100644",
+        "oid": "15478d8e8cecfb7afae1b443c202b1f68d222467"
+      },
+      "vllm_ascend/attention/kimi_k3_sfa_c8_graph.py": {
+        "mode": "100644",
+        "oid": "42c9a6429283a60e8913c89cfd48b0d9d5064259"
+      },
+      "vllm_ascend/attention/mla_v1.py": {
+        "mode": "100644",
+        "oid": "d5d34ebb762f99caabe1ab2b732a118e40aec643"
+      },
+      "vllm_ascend/worker/v2/aclgraph_utils.py": {
+        "mode": "100644",
+        "oid": "04bef9d8708779edf3fbdb3c63b2e8492951e744"
+      },
+      "vllm_ascend/worker/v2/attn_utils.py": {
+        "mode": "100644",
+        "oid": "877a06d23a3fd8e0da70d401cb2c9a2fe4d21d56"
+      },
+      "vllm_ascend/worker/v2/model_states/mamba_hybrid.py": {
+        "mode": "100644",
+        "oid": "f4902613bb000be9d6c73f9d795076f8ed42778f"
+      }
+    },
+    "after": {
+      "docs/source/developer_guide/kimi_k3_sfa_c8.md": {
+        "mode": "100644",
+        "oid": "3cd3f34c1ef70a70e2a888a3e7e48cb71b239f6a"
+      },
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py": {
+        "mode": "100644",
+        "oid": "dad8dc87be866dacdcb8cea4fd012bacf36f9590"
+      },
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8.py": {
+        "mode": "100644",
+        "oid": "30e6fe17356a93618556628580437bb805964286"
+      },
+      "tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_sfa_c8_graph.py": {
+        "mode": "100644",
+        "oid": "27cf2551f24f7e8c91b134daee344977846d6484"
+      },
+      "tests/ut/attention/test_kimi_k3_c8_config_alias.py": {
+        "mode": "100644",
+        "oid": "20c1d6a4de21f1a386e112c4aa6f2bdb00533d9e"
+      },
+      "tests/ut/attention/test_kimi_k3_c8_spec_dcp.py": {
+        "mode": "100644",
+        "oid": "7532df18dc519980fed6221fa11d1a9f07b91ad7"
+      },
+      "tests/ut/attention/test_kimi_k3_graph_capture_stream.py": {
+        "mode": "100644",
+        "oid": "75b8c9cb4eff4a60cfe563d050234e801adbe162"
+      },
+      "tests/ut/attention/test_kimi_k3_sfa_c8.py": {
+        "mode": "100644",
+        "oid": "71bcbf899bcba7aa662648ccf8d10c66c2983bc2"
+      },
+      "tests/ut/attention/test_kimi_k3_sfa_c8_graph.py": {
+        "mode": "100644",
+        "oid": "d1493adf038e62d6d0383c074243cdc5aa050135"
+      },
+      "tests/ut/attention/test_kimi_k3_sfa_c8_integration.py": {
+        "mode": "100644",
+        "oid": "e7c9109141c21c5e08a5ebfcfe54464f89758365"
+      },
+      "tests/ut/worker/test_attn_utils_v2.py": {
+        "mode": "100644",
+        "oid": "181bc78f00c318af291ca81ad1a080bd640f1b84"
+      },
+      "tests/ut/worker/test_kimi_k3_c8_graph_replay_v2.py": {
+        "mode": "100644",
+        "oid": "f8a404183262c4a6aab44df839ce0cb574340179"
+      },
+      "tests/ut/worker/test_model_runner_v2_mamba.py": {
+        "mode": "100644",
+        "oid": "fe0e9017782d7e0a1f34aa90347822200f0423fd"
+      },
+      "vllm_ascend/ascend_config.py": {
+        "mode": "100644",
+        "oid": "ff1eeb1228ccbf32451b2d4c03bb1a7019319e4d"
+      },
+      "vllm_ascend/attention/context_parallel/mla_cp.py": {
+        "mode": "100644",
+        "oid": "da5b5a7363285c09a196d00cd360b44ea7bda1bb"
+      },
+      "vllm_ascend/attention/kimi_k3_sfa_c8.py": {
+        "mode": "100644",
+        "oid": "15478d8e8cecfb7afae1b443c202b1f68d222467"
+      },
+      "vllm_ascend/attention/kimi_k3_sfa_c8_graph.py": {
+        "mode": "100644",
+        "oid": "f03235fde821473b6c4df5b3ce748f4358927658"
+      },
+      "vllm_ascend/attention/mla_v1.py": {
+        "mode": "100644",
+        "oid": "b3411936689e64923e2c22b99af9442322d8bb50"
+      },
+      "vllm_ascend/worker/v2/aclgraph_utils.py": {
+        "mode": "100644",
+        "oid": "04bef9d8708779edf3fbdb3c63b2e8492951e744"
+      },
+      "vllm_ascend/worker/v2/attn_utils.py": {
+        "mode": "100644",
+        "oid": "877a06d23a3fd8e0da70d401cb2c9a2fe4d21d56"
+      },
+      "vllm_ascend/worker/v2/model_states/mamba_hybrid.py": {
+        "mode": "100644",
+        "oid": "f4902613bb000be9d6c73f9d795076f8ed42778f"
+      }
+    }
+  },
+  "patches": {
+    "complete": {
+      "file": "k3-c8-dcp-dspark-complete-20261029.patch",
+      "sha256": "8f8a27629dc636baa69baded524e9aa69b94125afe36452cb412beab881eef68"
+    },
+    "upgrade": {
+      "file": "k3-c8-dcp-dspark-upgrade-20261029.patch",
+      "sha256": "67d1ba4cc0fad2796e04dec16c8d16a038d1479e5e93b24983b8e080d43bf1c7"
+    }
+  }
+}
