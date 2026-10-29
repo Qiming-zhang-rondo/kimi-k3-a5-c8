@@ -18,8 +18,9 @@ import tempfile
 import traceback
 import urllib.request
 
-HARNESS_URL = "https://raw.githubusercontent.com/Qiming-zhang-rondo/kimi-k3-a5-c8/d8ecb7a5433c27c77bf5f1f2842183eb204075bf/qli-a5/test_qli_a5.py"
-HARNESS_SHA256 = "302b136fe1ce2b6293af94f2009651e5c3cbc5b2b0a84974cd94705c4c760e09"
+HARNESS_URL = "https://raw.githubusercontent.com/Qiming-zhang-rondo/kimi-k3-a5-c8/e0d91f34023c5b1a52b75920ce2356b1d0a231bd/qli-a5/test_qli_a5.py"
+HARNESS_SHA256 = "3e547ccccba4432c2220febda8c8a616a7fc58de40db94f1c917d2b7b8a832a2"
+RUNNER_VERSION = "qli-native-first-v2"
 
 
 def identify(path):
@@ -70,6 +71,7 @@ def main():
     if not args.worker_dir:
         Path(args.work_dir).mkdir(parents=True, exist_ok=True)
         run = Path(tempfile.mkdtemp(prefix="qli-installed-", dir=args.work_dir)).resolve()
+        print(f"Runner: {RUNNER_VERSION} ({Path(__file__).resolve()})", flush=True)
         print(f"Logs and results: {run}", flush=True)
         # Capture Python, compiler subprocess and native runtime output together.
         cmd = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--worker-dir", str(run)]
@@ -82,7 +84,9 @@ def main():
                 log.flush()
             return proc.wait()
     run = Path(args.worker_dir)
-    report = {"python": sys.executable, "stage": "installed-package-check"}
+    report = {"python": sys.executable, "stage": "installed-package-check",
+              "runner_version": RUNNER_VERSION, "runner": identify(Path(__file__).resolve()),
+              "harness_url": HARNESS_URL, "harness_sha256": HARNESS_SHA256}
 
     def save():
         (run / "diagnostics.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
