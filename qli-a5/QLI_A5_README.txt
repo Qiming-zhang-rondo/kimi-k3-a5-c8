@@ -72,6 +72,29 @@ run_qli_installed.py 是带日志的启动入口：下载固定 SHA256 的新版
 smoke 仍是 B=2、Q=3、K=257，因此 TopK=1024 时每行应有 257 个互异有效索引，
 其余 767 项为 indices=-1、values=-inf。这是 padding 场景，不代表长序列选出1024项的性能。
 
+具体错误输出（qli-detailed-errors-v4）
+- 每行打印 row/batch/query（均从0开始）、实际 TopK、可见 key 数、offset、
+  期望数量、实际非-1数量、越界数量、范围内去重数量、缺少的互异有效项数及 padding。
+- 错误分开列出 count_mismatch、out_of_range、duplicate_index、nonfinite_score、
+  score_mismatch、padding_score、below_topk、omitted_higher_score。
+  数量不对也继续检查该行，不再用一句 invalid count or out-of-range index 合并报错。
+- 示例包含输出位置、原始索引、扣除 offset 后的逻辑索引、实际/参考分数；
+  重复索引还列出重复位置。每类最多8个示例，并标明总数量，完整数组保存在失败 NPZ。
+- results.json 中 accuracy / indices_only_accuracy 的 row_details 保留每行的结构化详情；
+  error_types 统计出现该类错误的行数，不是错误元素数。errors 仅为前20条摘要。
+- 有限分数比较的数量和覆盖行数单独记录；无可比较项时 max_abs_finite_score_error=null，
+  不是0。索引集合覆盖率包括结构失败但有可见候选的行，不再跳过失败行。
+  return_value=False 不伪造分数，仍校验数量、边界、重复及 TopK 选择正确性。
+
+已保存的失败结果可以离线重新分析，无须运行 NPU、编译算子或加载 DSL：
+  python test_qli_a5.py --inspect-results /mnt/qli-installed-实际目录/results
+也可通过启动器下载校验过的新版脚本并将详细输出保存到新的 run.log：
+  python run_qli_installed.py --insecure --inspect-results /mnt/qli-installed-实际目录/results
+路径可为运行目录、results 子目录或 results.json。必须保留对应的 *_failure.npz。
+离线模式使用原报告保存的参数和参考数组，明确打印原 TopK；不重算 CPU reference，
+不修改原 results.json/NPZ。旧版仅记录 PASS 的后端没有失败 NPZ，离线时不会重新校验它。
+离线模式仍以退出码1表示发现失败；这不是下载/导入失败。要换 TopK 必须重新跑算子。
+
 精度规则
 - 独立 NumPy CPU 参考解码低 nibble 在前的 FP4 E2M1，每 32 个逻辑 D 元素
   应用一个 E8M0 scale；按随机物理页表访问 K，包含负权重。

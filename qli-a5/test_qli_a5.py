@@ -273,46 +273,210 @@ def reference(c, d, chunk=2048):
     return scores
 
 
-def validate(c, d, scores, indices, values, rtol, atol):
+def json_number(value):
+    """Represent nonfinite observed values explicitly, without invalid JSON NaN."""
+    value = float(value)
+    return value if math.isfinite(value) else ("NaN" if math.isnan(value) else "+Inf" if value > 0 else "-Inf")
+
+
+def validate(c, d, scores, indices, values, rtol, atol, detail_limit=8):
+    """Independent checks; a count failure must not hide duplicates or NaNs.
+
+    values=None checks the indices-only call, without inventing observed scores.
+    Output positions, query rows and logical indices are all zero-based.
+    """
     expected = (c.batch*c.query, 1, c.topk)
-    if indices.shape != expected or values.shape != expected:
-        raise AssertionError(f"Output shape mismatch: {indices.shape}, {values.shape}, expected {expected}")
-    errors, max_abs, recall = [], 0.0, []
+    if indices.shape != expected or (values is not None and values.shape != expected):
+        raise AssertionError(f"Output shape mismatch: indices={indices.shape}, "
+                             f"values={None if values is None else values.shape}, expected {expected}")
+    if detail_limit < 1:
+        raise ValueError("detail_limit must be positive")
+    errors, error_types, rows, recall = [], {}, [], []
+    max_abs, compared_scores, nonfinite_scores, compared_rows = None, 0, 0, 0
     for t in range(expected[0]):
-        ix, val = indices[t, 0].astype(np.int64), values[t, 0]
+        ix = indices[t, 0].astype(np.int64)
+        val = None if values is None else values[t, 0]
         n = visible_length(c, d, t//c.query, t % c.query)
         count = min(n, c.topk)
         valid = ix != -1
-        logical = ix[valid]-int(d["output_idx_offset"][t, 0])
-        if valid.sum() != count or np.any(logical < 0) or np.any(logical >= n):
-            errors.append(f"row {t}: invalid count or out-of-range index")
-            continue
-        if len(np.unique(logical)) != count:
-            errors.append(f"row {t}: duplicate indices")
-        if not np.all(np.isneginf(val[~valid])):
-            errors.append(f"row {t}: invalid slots must have -inf values")
-        if not count:
-            continue
-        truth = scores[t, logical]
-        diff = np.abs(val[valid]-truth)
-        finite_diff = diff[np.isfinite(diff)]
-        if finite_diff.size:
-            max_abs = max(max_abs, float(np.max(finite_diff)))
-        if not np.all(np.isfinite(val[valid])) or not np.allclose(val[valid], truth, rtol=rtol, atol=atol):
-            errors.append(f"row {t}: selected score mismatch")
-        threshold = np.partition(scores[t, :n], n-count)[n-count]
-        tol = atol+rtol*abs(float(threshold))
-        if np.any(truth < threshold-tol):
-            errors.append(f"row {t}: selected score below TopK boundary")
-        omitted = np.ones(n, dtype=bool)
-        omitted[logical] = False
-        # Check omissions too: accepting all near-threshold tokens alone can hide missing large scores.
-        if np.any(scores[t, :n][omitted] > float(np.min(truth))+tol):
-            errors.append(f"row {t}: omitted a higher scoring token")
-        canonical = np.argpartition(scores[t, :n], n-count)[n-count:]
-        recall.append(len(np.intersect1d(logical, canonical))/count)
+        offset = int(d["output_idx_offset"][t, 0])
+        logical = ix-offset
+        safe = valid & (logical >= 0) & (logical < n)
+        positions = np.flatnonzero(safe)
+        ids = logical[safe]
+        unique = np.unique(ids)
+        actual = int(np.count_nonzero(valid))
+        row = dict(row=t, batch=t//c.query, query=t % c.query, topk=c.topk,
+                   visible_keys=n, offset=offset, expected_count=count, actual_count=actual,
+                   in_range_count=len(ids), unique_count=len(unique),
+                   padding_count=int(np.count_nonzero(~valid)), expected_padding_count=c.topk-count,
+                   missing_unique_count=max(0, count-len(unique)), issues=[])
+        rows.append(row)
+
+        def issue(code, message, **detail):
+            errors.append(f"row {t} (batch={t//c.query}, query={t % c.query}): {message}")
+            error_types[code] = error_types.get(code, 0)+1
+            row["issues"].append(dict(code=code, message=message, **detail))
+
+        def examples(pos, with_reference=False):
+            result = []
+            for p in pos[:detail_limit]:
+                item = dict(position=int(p), index=int(ix[p]), logical_index=int(logical[p]))
+                if val is not None:
+                    item["value"] = json_number(val[p])
+                if with_reference and safe[p]:
+                    truth_value = scores[t, logical[p]]
+                    item["reference"] = json_number(truth_value)
+                    if val is not None and np.isfinite(val[p]) and np.isfinite(truth_value):
+                        item["abs_error"] = abs(float(val[p])-float(truth_value))
+                        item["tolerance"] = atol+rtol*abs(float(truth_value))
+                result.append(item)
+            return result
+
+        if actual != count:
+            issue("count_mismatch", f"有效数量不符: expected={count}, actual={actual}, "
+                  f"padding={c.topk-actual} (expected={c.topk-count})", expected=count, actual=actual)
+        bad = np.flatnonzero(valid & ~safe)
+        row["out_of_range_count"] = len(bad)
+        if len(bad):
+            issue("out_of_range", f"索引越界: count={len(bad)}, logical range=[0, {n}), offset={offset}",
+                  count=len(bad), logical_range=[0, n], examples=examples(bad))
+        raw_ids, occurrences = np.unique(ix[valid], return_counts=True)
+        duplicate_ids = raw_ids[occurrences > 1]
+        row["duplicate_extra_count"] = int(np.sum(occurrences-1))
+        if len(duplicate_ids):
+            duplicates = []
+            for index in duplicate_ids[:detail_limit]:
+                pos = np.flatnonzero(valid & (ix == index))
+                duplicates.append(dict(index=int(index), logical_index=int(index)-offset,
+                                       occurrences=len(pos), positions=pos[:detail_limit].tolist()))
+            issue("duplicate_index", f"重复索引: {len(duplicate_ids)} 个索引重复, "
+                  f"多占 {row['duplicate_extra_count']} 个输出位置", count=len(duplicate_ids), examples=duplicates)
+        if val is not None:
+            bad_padding = np.flatnonzero(~valid & ~np.isneginf(val))
+            if len(bad_padding):
+                issue("padding_score", f"padding 分数错误: {len(bad_padding)} 项 indices=-1 但 values 不是 -Inf",
+                      count=len(bad_padding), examples=examples(bad_padding))
+            bad_nonfinite = np.flatnonzero(valid & ~np.isfinite(val))
+            nonfinite_scores += len(bad_nonfinite)
+            if len(bad_nonfinite):
+                issue("nonfinite_score", f"有效位置出现 NaN/Inf: count={len(bad_nonfinite)}",
+                      count=len(bad_nonfinite), examples=examples(bad_nonfinite, with_reference=True))
+            # Compare only addressable, finite pairs; other checks still fail independently.
+            finite = positions[np.isfinite(val[safe]) & np.isfinite(scores[t, ids])]
+            row["finite_score_comparison_count"] = len(finite)
+            compared_scores += len(finite)
+            compared_rows += int(bool(len(finite)))
+            if len(finite):
+                diff = np.abs(val[finite].astype(np.float64)-scores[t, logical[finite]].astype(np.float64))
+                row_max = float(np.max(diff))
+                max_abs = row_max if max_abs is None else max(max_abs, row_max)
+                mismatched = finite[~np.isclose(val[finite], scores[t, logical[finite]], rtol=rtol, atol=atol)]
+                if len(mismatched):
+                    issue("score_mismatch", f"有限分数不符: count={len(mismatched)}, max_abs_error={row_max:g}",
+                          count=len(mismatched), examples=examples(mismatched, with_reference=True))
+        if count:
+            truth = scores[t, ids]
+            threshold = float(np.partition(scores[t, :n], n-count)[n-count])
+            tol = atol+rtol*abs(threshold)
+            row["topk_reference_threshold"] = json_number(threshold)
+            below = positions[truth < threshold-tol]
+            if len(below):
+                issue("below_topk", f"选中了低于 TopK 门槛的索引: count={len(below)}, "
+                      f"threshold={threshold:g}, tolerance={tol:g}", count=len(below),
+                      examples=examples(below, with_reference=True))
+            omitted = np.ones(n, dtype=bool)
+            omitted[ids] = False
+            # Keep the original tie-aware ranking check, even on incomplete rows.
+            if len(truth):
+                omitted_ids = np.flatnonzero(omitted & (scores[t, :n] > float(np.min(truth))+tol))
+                if len(omitted_ids):
+                    best = omitted_ids[np.argsort(scores[t, omitted_ids])[-detail_limit:][::-1]]
+                    issue("omitted_higher_score", f"漏选了更高分索引: count={len(omitted_ids)}",
+                          count=len(omitted_ids), examples=[dict(index=int(i)+offset, logical_index=int(i),
+                              reference=json_number(scores[t, i])) for i in best])
+            canonical = np.argpartition(scores[t, :n], n-count)[n-count:]
+            overlap = len(np.intersect1d(unique, canonical))/count
+            recall.append(overlap)
+        else:
+            overlap = None
+        row["canonical_set_overlap"] = overlap
     return dict(passed=not errors, errors=errors[:20], error_count=len(errors),
-                max_abs_finite_score_error=max_abs, canonical_set_overlap_mean=float(np.mean(recall)) if recall else 1.0)
+                errors_truncated=len(errors) > 20, error_types=error_types, row_details=rows,
+                failed_row_count=sum(bool(row["issues"]) for row in rows), checked_row_count=len(rows),
+                values_checked=values is not None, detail_limit=detail_limit,
+                finite_score_comparison_count=compared_scores, finite_score_comparison_row_count=compared_rows,
+                nonfinite_selected_score_count=nonfinite_scores,
+                max_abs_finite_score_error=max_abs,
+                canonical_set_overlap_mean=float(np.mean(recall)) if recall else None,
+                canonical_set_overlap_row_count=len(recall))
+
+
+def print_validation(label, result):
+    """Print every failed row, with bounded examples per issue (full arrays in NPZ)."""
+    print(f"  {label}: {'PASS' if result['passed'] else 'FAIL'}; "
+          f"failed_rows={result['failed_row_count']}/{result['checked_row_count']}", flush=True)
+    for row in result["row_details"]:
+        if not row["issues"]:
+            continue
+        print(f"    row={row['row']} batch={row['batch']} query={row['query']} (均从0开始), "
+              f"TopK={row['topk']}, 可见key={row['visible_keys']}, offset={row['offset']}\n"
+              f"      应有效={row['expected_count']}, 实际非-1={row['actual_count']}, "
+              f"越界={row['out_of_range_count']}, 范围内去重后={row['unique_count']}, "
+              f"缺少有效且不重复的项={row['missing_unique_count']}\n"
+              f"      padding={row['padding_count']} (应为{row['expected_padding_count']})", flush=True)
+        for issue in row["issues"]:
+            print(f"      [{issue['code']}] {issue['message']}", flush=True)
+            for sample in issue.get("examples", []):
+                print("        " + json.dumps(sample, ensure_ascii=False, allow_nan=False), flush=True)
+            if issue.get("count", 0) > len(issue.get("examples", [])) and "examples" in issue:
+                print(f"        (示例仅显示 {len(issue['examples'])}/{issue['count']} 项；完整输出保存在 NPZ)", flush=True)
+    if not result["passed"]:
+        print(f"    finite_score_comparisons={result['finite_score_comparison_count']}, "
+              f"max_abs_finite_score_error={result['max_abs_finite_score_error']}; "
+              "有限分数误差小不代表数量、索引或 NaN 检查通过。", flush=True)
+
+
+def inspect_results(path, detail_limit=8):
+    """Recheck saved failure arrays using saved parameters, without Torch/NPU or writes."""
+    source = Path(path).expanduser().resolve()
+    if source.is_dir():
+        source = source/"results.json" if (source/"results.json").is_file() else source/"results/results.json"
+    if not source.is_file():
+        raise FileNotFoundError(f"Saved results.json not found: {source}")
+    report = json.loads(source.read_text())
+    print(f"离线分析: {source}\n仅分析已保存的失败数组，不调用算子，不修改原始报告。", flush=True)
+    inspected, failed = 0, False
+    for entry in report["cases"]:
+        c = Case(**entry["case"])
+        print(f"[{c.name}] SAVED input={asdict(c)}, seed={entry.get('seed')}", flush=True)
+        for name, previous in entry.get("backends", {}).items():
+            filename = f"{c.name}_{name}_failure.npz"
+            if Path(filename).name != filename:
+                raise ValueError("Invalid saved case/backend filename")
+            archive = source.parent/filename
+            if not archive.is_file():
+                print(f"  {name}: 原记录={previous.get('status')}; 无失败 NPZ，未重新校验。", flush=True)
+                failed |= previous.get("status") != "PASS"
+                continue
+            with np.load(archive, allow_pickle=False) as saved:
+                d = {k: saved[k] for k in ("seqused_q", "seqused_k", "output_idx_offset")}
+                d["cmp_residual_k"] = saved["cmp_residual_k"] if "cmp_residual_k" in saved else None
+                scores = saved["reference"]
+                print(f"  失败数组: {archive}", flush=True)
+                for label, indices, values in (("return_value=True", saved["indices"], saved["values"]),
+                                               ("return_value=False", saved["indices_only"], None)):
+                    result = validate(c, d, scores, indices, values,
+                                      report.get("args", {}).get("rtol", 1/128),
+                                      report.get("args", {}).get("atol", 2.5e-5), detail_limit=detail_limit)
+                    print_validation(f"{name} {label}", result)
+                    failed |= not result["passed"]
+            inspected += 1
+    if not inspected:
+        print("没有找到可重新校验的失败 NPZ；未执行精度测试。", flush=True)
+        return 1
+    print(f"离线重检 {'FAIL' if failed else 'PASS'}: {inspected} 个失败数组文件；原报告保持不变。", flush=True)
+    return 1 if failed else 0
 
 
 def oracle_outputs(c, d, scores):
@@ -505,6 +669,7 @@ def save_report(out, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--inspect-results", help="Recheck saved results.json and failure NPZ files offline; no NPU or source imports")
     parser.add_argument("--suite", choices=["smoke", "standard", "full"], default="smoke")
     parser.add_argument("--case", help="Run one named case from the selected suite")
     parser.add_argument("--topk", type=int, help="Override TopK (1..8192) without changing case names, seeds or inputs")
@@ -524,6 +689,8 @@ def main():
     args = parser.parse_args()
     if args.self_test:
         self_test(); return 0
+    if args.inspect_results:
+        return inspect_results(args.inspect_results)
     if min(args.warmup, args.iterations, args.repeats) < 1 or min(args.rtol, args.atol) < 0:
         parser.error("Timing counts must be positive and tolerances nonnegative")
     try:
@@ -589,30 +756,26 @@ def main():
                             raise AssertionError("Candidate-disabled DSL must return two empty candidate tensors")
                         ix, val = raw[0].cpu().numpy(), raw[1].float().cpu().numpy()
                         result["accuracy"] = validate(c, cpu, scores, ix, val, args.rtol, args.atol)
+                        print_validation(f"{name} return_value=True", result["accuracy"])
                         outputs[name] = ix
                         no_value = call(False)
                         torch.npu.synchronize()
                         if no_value[1].numel() != 0 or no_value[0].dtype != torch.int32:
                             raise AssertionError("return_value=False contract mismatch")
                         ix_false = no_value[0].cpu().numpy()
-                        # Validate False path indices against reference with synthesized reference values.
-                        fake_values = np.full(ix_false.shape, -np.inf, np.float32)
                         if ix_false.shape != ix.shape:
                             raise AssertionError("return_value=False index shape mismatch")
-                        for t in range(ix_false.shape[0]):
-                            valid = ix_false[t, 0] != -1
-                            logical = ix_false[t, 0, valid].astype(np.int64)-c.offset
-                            safe = (logical >= 0) & (logical < c.key)
-                            positions = np.flatnonzero(valid)[safe]
-                            fake_values[t, 0, positions] = scores[t, logical[safe]]
-                        result["indices_only_accuracy"] = validate(c, cpu, scores, ix_false, fake_values, args.rtol, args.atol)
+                        result["indices_only_accuracy"] = validate(c, cpu, scores, ix_false, None, args.rtol, args.atol)
+                        print_validation(f"{name} return_value=False", result["indices_only_accuracy"])
                         passed = result["accuracy"]["passed"] and result["indices_only_accuracy"]["passed"]
                         result["status"] = "PASS" if passed else "FAIL"
                         if passed:
                             calls[name] = call
                         else:
-                            np.savez_compressed(out/f"{c.name}_{name}_failure.npz", indices=ix, values=val,
+                            failure_path = out/f"{c.name}_{name}_failure.npz"
+                            np.savez_compressed(failure_path, indices=ix, values=val,
                                                 indices_only=ix_false, reference=scores, **{k:v for k,v in cpu.items() if v is not None})
+                            print(f"  完整失败数组: {failure_path}", flush=True)
                     except Exception:
                         result.update(status="ERROR", error=traceback.format_exc())
                         print(result["error"], file=sys.stderr, flush=True)
