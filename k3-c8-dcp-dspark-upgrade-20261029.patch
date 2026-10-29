@@ -1,0 +1,946 @@
+diff --git a/docs/source/developer_guide/kimi_k3_sfa_c8.md b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+index 2e1bee10b..3cd3f34c1 100644
+--- a/docs/source/developer_guide/kimi_k3_sfa_c8.md
++++ b/docs/source/developer_guide/kimi_k3_sfa_c8.md
+@@ -29,9 +29,11 @@ K3 模型会将其路由到本页描述的 full-KV C8 路径，不启用 indexer
+   不改变 Prolog、投影权重、KV Cache、attention scale 或输出 gate。
+ - 原生算子缺失立即报错，没有静默 fallback。
+ 
+-当前仅接入单 token Decode 图捕获，Prefill/混合批次保持 eager。
+-不接入通用 FULL、PIECEWISE、PCP/DCP、MTP/投机解码、KV transfer、KV layer parallelism。
+-不支持的组合在启动时拒绝。
++单 token Decode 和均匀多 token 验证批次接入 `FULL_DECODE_ONLY`；Prefill/混合批次保持 eager。
++2026-10-29 工作树新增 DCP、DSpark 主模型 C8 接线，尚未完成 A5 原生与多卡模型验收，
++不能把 CPU 测试通过等同于产品支持。草稿模型保持原 Cache 和权重量化路径。
++通用 FULL、PIECEWISE、PCP、KV transfer、KV layer parallelism 仍不在本次适配范围，
++原有启动检查保留；不新增静默回退。
+ 
+ `enable_mlapo` 现在控制这条 C8 路径的前处理，Prefill、Decode 和混合批次均生效：
+ 
+@@ -186,7 +188,8 @@ K3 native QSFA C8 enabled: FP8 group128 with FP32 scales, BF16 raw64, full KV in
+ ```
+ 
+ `enable_mlapo=false/true` 均接入此路径，普通与融合使用同一个 batched SFA reader。
+-这里只捕获单 token Decode；Prefill 不捕获。不要同时打开 MTP 或切到通用 FULL。
++捕获单 token Decode 及均匀多 token 验证批次；Prefill 不捕获，不切到通用 FULL。
++DSpark 多 token、DCP 与两者组合仍需完成下述专项验收。
+ 
+ MRV2 在每次 replay 前更新固定地址的 device KV lengths、完整逻辑 indices、
+ block table 和 slots。每个 bucket 独立保存这些缓冲区；捕获时虽然 forward mode
+@@ -260,3 +263,38 @@ packed Cache 容量/页 stride/非零 offset/KDA dtype，以及原有 MLA/SFA 
+ `broadcast_draft_tokens`，源码已调用 `broadcast_drafts`，本补丁未修改该逻辑。
+ 仓库级 `format.sh ci` 因本机未安装 pre-commit 未执行完成，已执行改动文件的
+ Ruff、格式及 diff 检查。新增34项原生用例尚待 A5 执行，不能宣称已通过。
++
++## 2026-10-29：DCP / DSpark 适配工作树
++
++以下是新增接线，不是 A5 验收结论，未替换 GitHub 稳定安装包。
++
++- **作用域**：DSpark 加载器的 `dspark_head` 上下文用于识别草稿模型。
++  主模型 MLA 使用 C8；草稿模型不继承主模型的 C8/MLAPO 开关，保持原路径。
++  不更改草稿权重、候选生成、接受/拒绝采样和 KDA 状态恢复算法。
++- **多 token 验证**：对每个 query 建立独立的可见 KV 前缀。CPU query offsets
++  负责请求映射，设备 seq_lens 决定真实长度，避免异步接受修正后读取废弃候选。
++  图 bucket 按 token 数而非请求数建立，底层 QSFA 使用固定地址元数据。
++- **DCP**：沿用 MRV2 的分片 block table/slot mapping；Q 沿 heads all-gather，
++  根据 `cp_kv_cache_interleave_size` 把全局可见前缀映射为 rank-local 长度。
++  QSFA 读取本地 C8 Cache，返回 softmax max/sum，框架转换为 `max + log(sum)`，
++  复用 DCP all-to-all 和原生 `npu_attention_update` 合并。
++  空分片贡献零输出与负无穷 LSE；全 padding 行在合并后清零。
++- **普通/融合 writer**：继续复用已有 quant/scatter 或 Prolog 写入路径，
++  非本 rank 拥有的 token 由 slot=-1 排除。没有全量 KV gather 或外部 BF16 反量化。
++- **图任务更新**：DCP 的 FIA 更新器跳过 C8/KDA 元数据；C8 不注册 FIA task handle。
++
++一张 A5、无需权重的新增原生专项测试：
++
++```bash
++python -m pytest -sv --noconftest tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py
++```
++
++这6个用例检查多 query、Group128 Cache、负 slot 写入、空分片、原生 max/sum、
++原生 AttentionUpdate 及图 replay 后长度/活跃行变化。它们在**单卡模拟 DCP 分片**，
++不能验证真实 HCCL、草稿模型加载、调度器接受/拒绝或完整 KDA 状态恢复。
++
++模型验收须另外覆盖：固定相同主/草稿权重，DCP=1/2/4（与 TP 可整除）、
++DSpark 关闭/开启、MLAPO 关闭/开启、eager/FULL_DECODE_ONLY。
++检查跨页、多轮接受与拒绝、请求退出/补入、不同上下文长度；对齐逐步 logits、
++生成结果、Cache 用量和 profiling。验证应记录精确镜像、CANN、torch-npu、
++权重及提交版本。未完成这些检查前，不宣称“多卡/DSpark 已验收”或性能提升。
+diff --git a/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py
+new file mode 100644
+index 000000000..dad8dc87b
+--- /dev/null
++++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_c8_spec_dcp.py
+@@ -0,0 +1,95 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Native verification-prefix/LSE contracts on one A5, without model weights.
++
++Simulates DCP shards on one device; this does NOT validate HCCL collectives or
++the DSpark scheduler. Both still require the multi-card model acceptance test.
++"""
++
++import pytest
++import torch
++import torch_npu
++
++from vllm_ascend.attention.kimi_k3_sfa_c8 import pack_kimi_k3_sfa_c8, scatter_kimi_k3_sfa_c8
++from vllm_ascend.attention.kimi_k3_sfa_c8_graph import KimiK3C8DecodeState, kimi_k3_sfa_c8_decode
++
++from . import test_kimi_k3_sfa_c8 as native
++from .test_kimi_k3_sfa_c8_graph import require_a5_native_c8_graph  # noqa: F401
++
++
++@pytest.mark.parametrize("world,interleave", [(1, 1), (2, 1), (4, 128)])
++@pytest.mark.parametrize("capture", [False, True])
++def test_native_multiquery_shards_lse_and_replay(world, interleave, capture):
++    generator = torch.Generator().manual_seed(931)
++    capacity, heads, max_len = 4, 12, 256
++    latent = torch.randn(max_len, 1, 512, generator=generator).bfloat16()
++    raw = torch.randn(max_len, 1, 64, generator=generator).bfloat16()
++    q = (torch.randn(capacity, heads, 576, generator=generator) * 0.2).bfloat16().npu()
++    packed = pack_kimi_k3_sfa_c8(latent.npu(), raw.npu())
++    decoded, decoded_raw, _ = native._unpack_cpu(packed)
++    positions = torch.arange(max_len)
++    table = torch.tensor([[0, 1]], dtype=torch.int32, device="npu")
++    shards = []
++    for rank in range(world):
++        cache = torch.zeros(2, 128, 1, 656, dtype=torch.uint8, device="npu").view(torch.float8_e4m3fn)
++        selected = positions[(positions // interleave) % world == rank]
++        # Scatter includes ownership-negative slots, as the framework writer does.
++        slots = torch.full((max_len,), -1, dtype=torch.int64)
++        slots[selected] = torch.arange(len(selected))
++        scatter_kimi_k3_sfa_c8(packed, slots.npu(), cache)
++        state = KimiK3C8DecodeState(capacity, max_len, 2, q.device)
++        shards.append((cache, state))
++
++    def update(length, tokens):
++        # A larger CPU bound models async acceptance correction on device.
++        for rank, (_, state) in enumerate(shards):
++            state.update(
++                torch.tensor([length + 2]),
++                table,
++                torch.full((tokens,), -1, device="npu", dtype=torch.int64),
++                tokens,
++                seq_lens_device=torch.tensor([length], dtype=torch.int32, device="npu"),
++                query_start_loc_cpu=torch.tensor([0, tokens]),
++                dcp_size=world,
++                dcp_rank=rank,
++                interleave=interleave,
++            )
++
++    def run():
++        outputs, lses = [], []
++        for cache, state in shards:
++            out, lse = kimi_k3_sfa_c8_decode(
++                q[..., :512], q[..., 512:], cache, state, native.ATTENTION_SCALE, return_lse=True
++            )
++            outputs.append(out.float().flatten(0, 1))
++            lses.append(lse.flatten())
++        merged, _ = torch_npu.npu_attention_update(lses, outputs, 0)
++        merged = merged.view(capacity, heads, 512)
++        return merged.masked_fill(~shards[0][1].active[:, None, None], 0)
++
++    update(130, 4)
++    if capture:
++        stream = torch.npu.Stream()
++        stream.wait_stream(torch.npu.current_stream())
++        with torch.npu.stream(stream):
++            for _ in range(2):
++                run()
++        torch.npu.current_stream().wait_stream(stream)
++        captured = torch.npu.NPUGraph()
++        with torch.npu.graph(captured, stream=stream):
++            output = run()
++        torch.npu.current_stream().wait_stream(stream)
++    for length, tokens in [(130, 4), (7, 1), (129, 3), (17, 4)]:
++        update(length, tokens)
++        if capture:
++            captured.replay()
++        else:
++            output = run()
++        torch.npu.synchronize()
++        expected = native._dense_reference(
++            q[..., :512].cpu()[:tokens], q[..., 512:].cpu()[:tokens], [decoded], [decoded_raw], [tokens], [length]
++        )
++        actual = output.cpu().float()
++        torch.testing.assert_close(actual[:tokens], expected, atol=native.SAME_CACHE_ATOL, rtol=native.SAME_CACHE_RTOL)
++        assert torch.isfinite(actual).all()
++        assert actual[tokens:].count_nonzero() == 0
+diff --git a/tests/ut/attention/test_kimi_k3_c8_spec_dcp.py b/tests/ut/attention/test_kimi_k3_c8_spec_dcp.py
+new file mode 100644
+index 000000000..7532df18d
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_c8_spec_dcp.py
+@@ -0,0 +1,188 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""CPU mathematical/metadata contracts; not native or distributed NPU proof."""
++
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import pytest
++import torch
++
++from vllm_ascend.attention import kimi_k3_sfa_c8_graph as graph
++from vllm_ascend.attention import mla_v1
++
++from .test_kimi_k3_sfa_c8_graph import _cache, _dequantize, _native_reference
++from .test_kimi_k3_sfa_c8_integration import _group128_impl
++
++
++def test_dspark_role_uses_loader_scope_not_target_architecture():
++    config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
++    assert not mla_v1._is_mla_draft_model(config)
++    with mla_v1.compilation_backends.set_model_tag("dspark_head"):
++        assert mla_v1._is_mla_draft_model(config)
++    assert not mla_v1._is_mla_draft_model(config)
++    config.model_config.runner_type = "draft"
++    assert mla_v1._is_mla_draft_model(config)
++
++
++def test_speculative_config_is_not_a_blanket_c8_exclusion():
++    impl = _group128_impl()
++    impl.speculative_config = SimpleNamespace(method="dspark", num_speculative_tokens=3)
++    impl.vllm_config.parallel_config.decode_context_parallel_size = 2
++    impl._merge_dcp_attention_output = lambda *args: None
++    with (
++        patch.object(mla_v1, "get_ascend_config", return_value=SimpleNamespace(kvpp_config=SimpleNamespace(size=1))),
++        patch.object(mla_v1, "require_kimi_k3_sfa_c8_ops"),
++    ):
++        impl._validate_kimi_k3_sfa_c8()
++
++
++@pytest.mark.parametrize("world", [1, 2, 4])
++@pytest.mark.parametrize("interleave", [1, 4, 16])
++def test_multiquery_dcp_prefixes_and_lse_merge_match_dense(world, interleave):
++    torch.manual_seed(97)
++    cache = _cache()
++    query = torch.randn(8, 12, 576).bfloat16()
++    starts = torch.tensor([0, 3, 5, 8], dtype=torch.int32)
++    # CPU upper bounds deliberately differ from acceptance-corrected lengths.
++    bounds = torch.tensor([20, 10, 0], dtype=torch.int32)
++    lengths = torch.tensor([17, 7, 0], dtype=torch.int32)
++    table = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.int32)
++    visible = [15, 16, 17, 6, 7]
++    expected = torch.zeros(8, 12, 512)
++    for row, length in enumerate(visible):
++        req = 0 if row < 3 else 1
++        pos = torch.arange(length)
++        latent, raw = _dequantize(cache[table[req, pos // 16].long(), pos % 16, 0])
++        scores = query[row].float() @ torch.cat((latent, raw), -1).T * 0.05
++        expected[row] = scores.softmax(-1) @ latent
++    outputs, lses = [], []
++    for rank in range(world):
++        local = torch.zeros_like(cache.view(torch.uint8)).view(cache.dtype)
++        for req, length in enumerate([17, 7]):
++            pos = torch.arange(length)
++            selected = pos[(pos // interleave) % world == rank]
++            local_pos = torch.arange(len(selected))
++            local.view(torch.uint8)[table[req, local_pos // 16].long(), local_pos % 16] = cache.view(torch.uint8)[
++                table[req, selected // 16].long(), selected % 16
++            ]
++        state = graph.KimiK3C8DecodeState(8, 48, 3, torch.device("cpu"))
++        addresses = {k: v.data_ptr() for k, v in vars(state).items() if isinstance(v, torch.Tensor)}
++        state.update(
++            bounds,
++            table,
++            torch.arange(5),
++            5,
++            seq_lens_device=lengths,
++            query_start_loc_cpu=starts,
++            dcp_size=world,
++            dcp_rank=rank,
++            interleave=interleave,
++        )
++        for row, length in enumerate(visible):
++            assert state.seq_lens[row] == sum((p // interleave) % world == rank for p in range(length))
++        with patch.object(graph, "require_kimi_k3_sfa_c8_ops", return_value=_native_reference):
++            out, lse = graph.kimi_k3_sfa_c8_decode(
++                query[..., :512], query[..., 512:], local, state, 0.05, return_lse=True
++            )
++        assert torch.isfinite(out).all()
++        assert out[5:].count_nonzero() == 0
++        assert torch.isneginf(lse[5:]).all()
++        outputs.append(out.float())
++        lses.append(lse)
++        # Rejection/batch shrink must remove stale token rows without moving buffers.
++        state.update(torch.tensor([3]), table[:1], torch.tensor([0]), 1)
++        assert state.slots.tolist() == [0] + [-1] * 7
++        assert addresses == {k: v.data_ptr() for k, v in vars(state).items() if isinstance(v, torch.Tensor)}
++    weights = torch.stack(lses)[:, :5].softmax(0)
++    merged = (weights * torch.stack(outputs)[:, :5]).sum(0)
++    # Local outputs are BF16 before reduction. Bound their rounding error,
++    # rather than using relative tolerance near cancellation/zero outputs.
++    rounding_bound = 0.004 * (weights * torch.stack(outputs)[:, :5].abs()).sum(0) + 2e-5
++    assert ((merged - expected[:5]).abs() <= rounding_bound).all()
++    assert (merged - expected[:5]).norm() / expected[:5].norm() < 0.004
++
++
++def test_multiquery_builder_uses_token_bucket_and_device_lengths():
++    builder = mla_v1.AscendMLAMetadataBuilder.__new__(mla_v1.AscendMLAMetadataBuilder)
++    builder.enable_kimi_k3_sfa_c8 = True
++    builder.kimi_k3_c8_decode_states = {}
++    builder.metadata_cls = mla_v1.AscendMLAMetadata
++    builder.model_config = SimpleNamespace(max_model_len=48)
++    builder.device = torch.device("cpu")
++    builder.dcp_size, builder.dcp_rank, builder.cp_local_block_size = 2, 1, 4
++    common = SimpleNamespace(
++        num_reqs=2,
++        num_actual_tokens=6,
++        graph_pad_size=8,
++        query_start_loc_cpu=torch.tensor([0, 3, 6]),
++        query_start_loc=torch.tensor([0, 3, 6]),
++        _seq_lens_cpu=torch.tensor([19, 11]),
++        seq_lens=torch.tensor([17, 7]),
++        block_table_tensor=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
++        slot_mapping=torch.arange(6),
++        causal=True,
++    )
++    state = builder.build(0, common).kimi_k3_c8_decode_state
++    assert state.capacity == 8
++    assert state.seq_lens.tolist() == [7, 8, 8, 1, 2, 3, 0, 0]
++    assert state.block_table[:6].tolist() == [[0, 1]] * 3 + [[2, 3]] * 3
++
++
++@pytest.mark.parametrize("starts", [[1, 2], [0, 3, 2], [0], [0, 3]])
++def test_invalid_multiquery_offsets_fail_before_buffer_update(starts):
++    state = graph.KimiK3C8DecodeState(4, 48, 2, torch.device("cpu"))
++    with pytest.raises(ValueError, match="Query offsets"):
++        state.update(
++            torch.tensor([10]),
++            torch.zeros(1, 2, dtype=torch.int32),
++            torch.arange(2),
++            2,
++            query_start_loc_cpu=torch.tensor(starts),
++        )
++
++
++@pytest.mark.parametrize("rank", [0, 1])
++def test_eager_verification_uses_acceptance_corrected_lengths(rank):
++    impl = _group128_impl()
++    impl.dcp_size, impl.dcp_rank = 2, rank
++    impl.vllm_config.parallel_config.cp_kv_cache_interleave_size = 4
++    impl.scale = 0.05
++    cache = _cache()
++    query = torch.randn(5, 12, 576).bfloat16()
++    table = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.int32)
++    state = graph.KimiK3C8DecodeState(5, 48, 3, torch.device("cpu"))
++    state.update(
++        torch.tensor([20, 10]),
++        table,
++        torch.arange(5),
++        5,
++        seq_lens_device=torch.tensor([17, 7]),
++        query_start_loc_cpu=torch.tensor([0, 3, 5]),
++        dcp_size=2,
++        dcp_rank=rank,
++        interleave=4,
++    )
++    with patch.object(graph, "require_kimi_k3_sfa_c8_ops", return_value=_native_reference):
++        expected = graph.kimi_k3_sfa_c8_decode(query[..., :512], query[..., 512:], cache, state, 0.05, return_lse=True)
++        actual = impl._kimi_k3_c8_verify_attention(
++            query[..., :512], query[..., 512:], cache, table, [0, 3, 5], [20, 10], torch.tensor([17, 7])
++        )
++    for got, want in zip(actual, expected):
++        torch.testing.assert_close(got, want)
++
++
++def test_dcp_graph_update_skips_c8_and_kda_tasks():
++    from vllm_ascend.attention.context_parallel import mla_cp
++
++    context = SimpleNamespace(
++        attn_metadata={
++            "kda": SimpleNamespace(),
++            "mla": SimpleNamespace(decode=None, kimi_k3_c8_decode_state=object()),
++        }
++    )
++    with (
++        patch.object(mla_cp, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False)),
++        patch.object(mla_cp, "get_graph_params", return_value=None),
++    ):
++        mla_cp.AscendMlaDCPImpl.update_graph_params(None, context, 8)
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py b/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py
+index fea218057..d1493adf0 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8_graph.py
+@@ -57,13 +57,15 @@ def _native_reference(query, key, value, indices, scale, **kwargs):
+     assert kwargs["key_quant_mode"] == kwargs["value_quant_mode"] == kwargs["attention_mode"] == 2
+     assert kwargs["sparse_block_size"] == 1 and kwargs["sparse_mode"] == 3
+     assert kwargs["quant_scale_repo_mode"] == 1 and kwargs["tile_size"] == 128
+-    assert kwargs["rope_head_dim"] == 64 and kwargs["return_softmax_lse"] is False
++    assert kwargs["rope_head_dim"] == 64
+     assert kwargs["actual_seq_lengths_query"].dtype == torch.int32
+     assert kwargs["actual_seq_lengths_kv"].dtype == torch.int32
+     sinks = kwargs["sinks"]
+     assert sinks.dtype == torch.float32 and sinks.shape == (query.shape[1],)
+     assert torch.isneginf(sinks).all()
+     output = torch.full((*query.shape[:2], 512), float("nan"), dtype=query.dtype)
++    maxima = torch.full((1, *query.shape[:2]), float("nan"), dtype=torch.float32)
++    sums = torch.full_like(maxima, float("nan"))
+     start = 0
+     for batch, end in enumerate(kwargs["actual_seq_lengths_query"].tolist()):
+         length = int(kwargs["actual_seq_lengths_kv"][batch])
+@@ -76,10 +78,12 @@ def _native_reference(query, key, value, indices, scale, **kwargs):
+             pages = kwargs["block_table"][batch, selected // key.shape[1]].long()
+             latent, raw = _dequantize(key[pages, selected % key.shape[1], 0])
+             scores = query[row].float() @ torch.cat((latent, raw), dim=-1).T * scale
++            maxima[0, row] = scores.amax(dim=-1)
++            sums[0, row] = (scores - maxima[0, row, :, None]).exp().sum(dim=-1)
+             probabilities = torch.softmax(torch.cat((scores, sinks[:, None]), dim=-1), dim=-1)[:, :-1]
+             output[row] = probabilities @ latent
+         start = end
+-    return output, torch.empty(0), torch.empty(0)
++    return (output, maxima, sums) if kwargs["return_softmax_lse"] else (output, torch.empty(0), torch.empty(0))
+ 
+ 
+ def _expected(query, cache, table, lengths, capacity):
+diff --git a/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py b/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
+index 59a436de0..e7c910914 100644
+--- a/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
++++ b/tests/ut/attention/test_kimi_k3_sfa_c8_integration.py
+@@ -71,8 +71,8 @@ def test_group128_native_prerequisites_are_checked(heads):
+         ("config", "use_v2_model_runner", False, "MRV2"),
+         ("config", "kv_transfer_config", object(), "KV transfer"),
+         ("cache_config", "cache_dtype", "fp8", "cache-dtype auto"),
+-        ("parallel_config", "prefill_context_parallel_size", 2, "PCP/DCP"),
+-        ("parallel_config", "decode_context_parallel_size", 2, "PCP/DCP"),
++        ("parallel_config", "prefill_context_parallel_size", 2, "PCP"),
++        ("parallel_config", "decode_context_parallel_size", 2, "DCP MLA backend"),
+         ("impl", "support_fp8_attention", False, "A5"),
+         ("impl", "fa_quant_layer", True, "ModelSlim"),
+         ("impl", "use_mla_rope", True, "No-RoPE"),
+@@ -80,7 +80,6 @@ def test_group128_native_prerequisites_are_checked(heads):
+         ("impl", "num_heads", 0, "local query heads"),
+         ("impl", "num_heads", 129, "local query heads"),
+         ("impl", "enable_kv_nz", True, "enable_kv_nz=false"),
+-        ("impl", "speculative_config", object(), "MTP"),
+     ],
+ )
+ def test_group128_unsupported_modes_fail_before_native_dispatch(owner, field, value, error):
+@@ -372,6 +371,7 @@ def test_group128_metadata_keeps_all_requests_after_decode_metadata_narrows_view
+         query_start_loc_cpu=torch.tensor([0, 1, 5], dtype=torch.int32),
+         slot_mapping=torch.tensor([264, 3, 4, 5, 6]),
+         _seq_lens_cpu=torch.tensor([9, 7], dtype=torch.int32),
++        seq_lens=torch.tensor([9, 7], dtype=torch.int32),
+         graph_pad_size=0,
+         block_table_tensor=torch.tensor([[2], [0]], dtype=torch.int32),
+         attn_state=AscendAttentionState.ChunkedPrefill,
+@@ -439,11 +439,13 @@ def test_group128_mrv2_builder_preserves_capture_addresses_across_buckets():
+ 
+ @pytest.mark.parametrize("capturing", [False, True])
+ @pytest.mark.parametrize("prolog_mode", [None, 0, 3])
+-def test_group128_graph_forward_uses_bucket_rows_without_reading_host_lengths(capturing, prolog_mode):
++@pytest.mark.parametrize("dcp_size", [1, 2])
++def test_group128_graph_forward_uses_bucket_rows_without_reading_host_lengths(capturing, prolog_mode, dcp_size):
+     impl = _group128_impl()
+     impl.enable_kimi_k3_sfa_c8 = True
+     impl.enable_mlapo = prolog_mode is not None
+     impl.num_heads = 12
++    impl.dcp_size = dcp_size
+     impl.v_head_dim = 3
+     impl.q_lora_rank = 2
+     impl.scale = 0.125
+@@ -453,12 +455,16 @@ def test_group128_graph_forward_uses_bucket_rows_without_reading_host_lengths(ca
+     impl.kv_a_layernorm = lambda x: x
+     q = torch.ones(4, 12, 512, dtype=torch.bfloat16)
+     raw = torch.ones(4, 12, 64, dtype=torch.bfloat16)
++    impl._dcp_all_gather_fragments = MagicMock(
++        side_effect=lambda *args, **kw: tuple(t.repeat(1, dcp_size, 1) for t in args)
++    )
++    impl._merge_dcp_attention_output = MagicMock(side_effect=lambda out, lse, rank: out[:, :12])
+     impl._q_proj_and_k_up_proj = lambda x: (q, raw)
+     impl._v_up_proj_batch_major = lambda x: x[:, :, :3].reshape(4, 36)
+     impl.use_output_gate = False
+     impl.o_proj = MagicMock(side_effect=lambda x, **kw: (x,))
+     cache = torch.empty(4, 128, 1, 656, dtype=torch.float8_e4m3fn)
+-    state = SimpleNamespace(capacity=4)
++    state = SimpleNamespace(capacity=4, active=torch.tensor([True, True, False, False]))
+     metadata = SimpleNamespace(
+         kimi_k3_c8_decode_state=state,
+         num_actual_tokens=2,
+@@ -481,13 +487,23 @@ def test_group128_graph_forward_uses_bucket_rows_without_reading_host_lengths(ca
+         patch.object(mla_v1, "pack_kimi_k3_sfa_c8", return_value=object()),
+         patch.object(mla_v1, "scatter_kimi_k3_sfa_c8") as scatter,
+         patch.object(mla_v1, "kimi_k3_sfa_c8_prolog", return_value=(q, raw)) as prolog,
+-        patch.object(mla_v1, "kimi_k3_sfa_c8_decode", return_value=q) as decode,
++        patch.object(
++            mla_v1,
++            "kimi_k3_sfa_c8_decode",
++            return_value=(q.repeat(1, dcp_size, 1), torch.zeros(4, 12 * dcp_size, 1)) if dcp_size > 1 else q,
++        ) as decode,
+         patch.object(mla_v1, "kimi_k3_sfa_c8_attention", side_effect=AssertionError("eager reader in graph")),
+         patch.object(mla_v1, "record_attention_compute_start"),
+     ):
+         impl.forward("mla", hidden, (cache,), metadata, output)
+     assert decode.call_args.args[3] is state
+     assert decode.call_args.args[0].shape[0] == 4
++    assert decode.call_args.args[0].shape[1] == 12 * dcp_size
++    assert decode.call_args.kwargs["return_lse"] == (dcp_size > 1)
++    if dcp_size > 1:
++        impl._dcp_all_gather_fragments.assert_called_once()
++        impl._merge_dcp_attention_output.assert_called_once()
++        assert output[2:].count_nonzero() == 0
+     writer = prolog if impl.enable_mlapo else scatter
+     slots_arg = 2 if impl.enable_mlapo else 1
+     assert writer.call_args.args[slots_arg].tolist() == [3, 4, -1, -1]
+diff --git a/vllm_ascend/attention/context_parallel/mla_cp.py b/vllm_ascend/attention/context_parallel/mla_cp.py
+index 2317b7270..da5b5a736 100644
+--- a/vllm_ascend/attention/context_parallel/mla_cp.py
++++ b/vllm_ascend/attention/context_parallel/mla_cp.py
+@@ -252,11 +252,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
+             else:
+                 graph_params = get_draft_graph_params()
+             attn_metadata = draft_attn_metadatas
+-            attn_keys = list(attn_metadata[0].keys())
++            attn_keys = [k for k, m in attn_metadata[0].items() if getattr(m, "decode", None) is not None]
+         else:
+             graph_params = get_graph_params()
+             attn_metadata = forward_context.attn_metadata
+-            attn_keys = list(attn_metadata.keys())
++            attn_keys = [
++                k
++                for k, m in attn_metadata.items()
++                if getattr(m, "decode", None) is not None and getattr(m, "kimi_k3_c8_decode_state", None) is None
++            ]
+         # FIXME: Behold! We are using a temporary hack here to update the args
+         # for each layer's attention op in the graph.
+         num_layers = len(attn_keys)
+diff --git a/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py b/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py
+index 42c9a6429..f03235fde 100644
+--- a/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py
++++ b/vllm_ascend/attention/kimi_k3_sfa_c8_graph.py
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+-"""Fixed-address, single-token decode metadata for K3 C8 NPUGraph replay.
++"""Fixed-address query-row metadata for K3 C8 NPUGraph replay.
+ 
+ One state belongs to one metadata builder and graph bucket. Updates happen
+ before replay, never inside capture. No global state or historical KV copies.
+@@ -41,21 +41,45 @@ class KimiK3C8DecodeState:
+         num_actual_tokens: int,
+         *,
+         seq_lens_device: torch.Tensor | None = None,
++        query_start_loc_cpu: torch.Tensor | None = None,
++        dcp_size: int = 1,
++        dcp_rank: int = 0,
++        interleave: int = 1,
+     ) -> None:
+         """Refresh values in place, including every previously active tail row."""
+         n = num_actual_tokens
++        if dcp_size < 1 or not 0 <= dcp_rank < dcp_size or interleave < 1:
++            raise ValueError("Invalid C8 DCP partition parameters.")
+         if not 0 <= n <= self.capacity:
+             raise ValueError("Active decode rows exceed the captured bucket.")
+         if seq_lens_cpu.device.type != "cpu" or seq_lens_cpu.ndim != 1:
+             raise ValueError("C8 graph updates require scheduler CPU sequence lengths.")
+         if seq_lens_cpu.dtype not in (torch.int32, torch.int64):
+             raise ValueError("Decode sequence lengths must be integer tensors.")
+-        if seq_lens_cpu.numel() < n or slot_mapping.ndim != 1 or slot_mapping.numel() < n:
++        # Represent each query as a one-query request with its own visible
++        # prefix. This handles speculative verification without assuming
++        # token count == request count, and keeps native shapes fixed.
++        owners = torch.arange(n, dtype=torch.int64)
++        offsets = torch.zeros(n, dtype=torch.int32)
++        if query_start_loc_cpu is not None:
++            starts = query_start_loc_cpu
++            if starts.device.type != "cpu" or starts.ndim != 1 or starts.dtype not in (torch.int32, torch.int64):
++                raise ValueError("Query offsets must be a CPU integer vector.")
++            if starts.numel() < 1 or int(starts[0]) != 0 or bool((starts[1:] < starts[:-1]).any()):
++                raise ValueError("Query offsets must start at zero and be non-decreasing.")
++            if int(starts[-1]) < n:
++                raise ValueError("Query offsets do not cover the active tokens.")
++            if not bool((starts == n).any()):
++                raise ValueError("Query offsets must end the active batch at a request boundary.")
++            owners = torch.searchsorted(starts[1:].contiguous(), torch.arange(n), right=True)
++            offsets = (torch.arange(n) + 1 - starts[owners + 1]).to(torch.int32)
++        requests = int(owners[-1]) + 1 if n else 0
++        if seq_lens_cpu.numel() < requests or slot_mapping.ndim != 1 or slot_mapping.numel() < n:
+             raise ValueError("Missing active decode lengths or slots.")
+-        lengths = seq_lens_cpu[:n]
++        lengths = seq_lens_cpu[owners] + offsets
+         if n and (bool((lengths <= 0).any()) or bool((lengths > self.max_seq_len).any())):
+             raise ValueError("Active decode KV lengths must be in [1, max_model_len].")
+-        if block_table.ndim != 2 or block_table.shape[0] < n or block_table.shape[1] > self.block_table.shape[1]:
++        if block_table.ndim != 2 or block_table.shape[0] < requests or block_table.shape[1] > self.block_table.shape[1]:
+             raise ValueError("Decode block table does not fit its fixed graph buffer.")
+         if block_table.dtype != torch.int32 or slot_mapping.dtype not in (torch.int32, torch.int64):
+             raise ValueError("Decode tables/slots require int32 and int32/int64 respectively.")
+@@ -64,7 +88,7 @@ class KimiK3C8DecodeState:
+         if seq_lens_device is not None and (
+             seq_lens_device.device != self.seq_lens.device
+             or seq_lens_device.ndim != 1
+-            or seq_lens_device.numel() < n
++            or seq_lens_device.numel() < requests
+             or seq_lens_device.dtype not in (torch.int32, torch.int64)
+         ):
+             raise ValueError("Invalid device decode sequence lengths.")
+@@ -72,11 +96,26 @@ class KimiK3C8DecodeState:
+         # MRV2 already has device lengths: avoid both H2D and an async read
+         # from the scheduler's mutable CPU/NumPy buffer. The CPU-only test
+         # convenience path intentionally uses a blocking copy.
+-        self.seq_lens[:n].copy_(lengths if seq_lens_device is None else seq_lens_device[:n])
++        single_query = torch.equal(owners, torch.arange(n)) and not bool(offsets.any())
++        device_owners = None if single_query else owners.to(self.seq_lens.device)
++        if seq_lens_device is None:
++            visible = lengths.to(self.seq_lens.device)
++        elif single_query:
++            visible = seq_lens_device[:n]
++        else:
++            visible = seq_lens_device[device_owners] + offsets.to(self.seq_lens.device)
++        if dcp_size > 1:
++            period = dcp_size * interleave
++            visible = visible.div(period, rounding_mode="floor") * interleave + (
++                visible.remainder(period) - dcp_rank * interleave
++            ).clamp(0, interleave)
++        self.seq_lens[:n].copy_(visible)
+         self.slots.fill_(-1)
+         self.slots[:n].copy_(slot_mapping[:n])
+         self.block_table.zero_()
+-        self.block_table[:n, : block_table.shape[1]].copy_(block_table[:n])
++        self.block_table[:n, : block_table.shape[1]].copy_(
++            block_table[:n] if single_query else block_table[device_owners]
++        )
+         self.active.zero_()
+         self.active[:n].fill_(True)
+         self.indices.copy_(self.positions)
+@@ -90,7 +129,9 @@ def kimi_k3_sfa_c8_decode(
+     packed_cache: torch.Tensor,
+     state: KimiK3C8DecodeState,
+     scale: float,
+-) -> torch.Tensor:
++    *,
++    return_lse: bool = False,
++) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+     """One native batched SFA call; no host lengths or data-dependent loops.
+ 
+     The CANN tiler sees fixed shapes. Runtime KV lengths, indices and page-table
+@@ -135,7 +176,7 @@ def kimi_k3_sfa_c8_decode(
+         tile_size=GROUP_SIZE,
+         rope_head_dim=RAW_DIM,
+         sinks=sinks,
+-        return_softmax_lse=False,
++        return_softmax_lse=return_lse,
+     )
+     if not isinstance(result, (tuple, list)) or len(result) != 3:
+         raise RuntimeError("C8 graph decode requires the three-output native QSFA V2 interface.")
+@@ -147,4 +188,14 @@ def kimi_k3_sfa_c8_decode(
+         raise RuntimeError("Native C8 graph output has an incompatible shape, dtype or device.")
+     # Kernels may leave zero-length rows unwritten. Multiplication by zero
+     # cannot remove NaNs; mask them before the Value/output projections.
+-    return result[0][:, :heads].masked_fill(~state.active[:, None, None], 0).contiguous()
++    valid = state.active & (state.seq_lens > 0)
++    output = result[0][:, :heads].masked_fill(~valid[:, None, None], 0).contiguous()
++    if not return_lse:
++        return output
++    expected = (1, state.capacity, native_heads)
++    if any(t.shape != expected or t.dtype != torch.float32 for t in result[1:]):
++        raise RuntimeError("C8 DCP requires native FP32 softmax max/sum with shape [1,T,H].")
++    # QSFA returns max and exp-sum, NOT log-sum-exp. Empty local shards
++    # contribute zero output and -inf LSE to the distributed reduction.
++    lse = (result[1][0, :, :heads] + result[2][0, :, :heads].log()).unsqueeze(-1)
++    return output, lse.masked_fill(~valid[:, None, None], -float("inf"))
+diff --git a/vllm_ascend/attention/mla_v1.py b/vllm_ascend/attention/mla_v1.py
+index d5d34ebb7..b34119366 100644
+--- a/vllm_ascend/attention/mla_v1.py
++++ b/vllm_ascend/attention/mla_v1.py
+@@ -6,6 +6,7 @@ import numpy as np
+ import torch
+ import torch.nn.functional as F
+ import torch_npu
++from vllm.compilation import backends as compilation_backends
+ from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+ from vllm.distributed.parallel_state import get_pcp_group
+ from vllm.logger import logger
+@@ -292,11 +293,15 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+ 
+         self.speculative_config = vllm_config.speculative_config
++        static_forward_context = vllm_config.compilation_config.static_forward_context
++        self.enable_kimi_k3_sfa_c8 = bool(
++            layer_names and getattr(static_forward_context[layer_names[0]].impl, "enable_kimi_k3_sfa_c8", False) is True
++        )
+         self.decode_threshold = 1
+         if self.speculative_config:
+             spec_token_num = self.speculative_config.num_speculative_tokens
+             self.decode_threshold += spec_token_num
+-            assert self.decode_threshold <= 16, (
++            assert self.enable_kimi_k3_sfa_c8 or self.decode_threshold <= 16, (
+                 f"decode_threshold exceeded \
+                 npu_fused_infer_attention_score TND layout's limit of 16, \
+                 got {self.decode_threshold}"
+@@ -310,12 +315,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         # for the models that need them, shared by every MLA layer in this group,
+         # and freed with the model instead of living for the whole process.
+         self.nope_zero_rope_cache: dict[tuple, torch.Tensor] | None = {} if self.rope_dim == 0 else None
+-        static_forward_context = vllm_config.compilation_config.static_forward_context
+         # MLA layers are grouped by RoPE mode before metadata builders are created.
+         self.use_mla_rope = static_forward_context[layer_names[0]].impl.use_mla_rope if layer_names else True
+-        self.enable_kimi_k3_sfa_c8 = bool(
+-            layer_names and getattr(static_forward_context[layer_names[0]].impl, "enable_kimi_k3_sfa_c8", False) is True
+-        )
+         self.kimi_k3_c8_decode_states: dict[int, KimiK3C8DecodeState] = {}
+         self.cos_cache = None
+         self.sin_cache = None
+@@ -509,8 +510,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         # decode, over seq_lens_cpu, which is intentionally None in that mode.
+         if common_attn_metadata._seq_lens_cpu is not None:
+             self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
++        elif getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None) is not None:
++            self.seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
+         elif common_attn_metadata.seq_lens_cpu is not None:
+             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
++        elif getattr(self, "enable_kimi_k3_sfa_c8", False):
++            raise ValueError(
++                "C8 requires scheduler CPU lengths or upper bounds; device synchronization is not allowed."
++            )
+         else:
+             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+ 
+@@ -524,11 +531,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         dense_group128 = getattr(self, "enable_kimi_k3_sfa_c8", False)
+ 
+         prefill_metadata = None
+-        if self.num_prefills > 0:
++        if self.num_prefills > 0 and not dense_group128:
+             prefill_metadata = self.build_prefill_metadata(common_prefix_len, common_attn_metadata)
+ 
+         decode_metadata = None
+-        if self.num_decodes > 0:
++        if self.num_decodes > 0 and not dense_group128:
+             decode_metadata = self.build_decode_metadata(common_prefix_len, common_attn_metadata)
+         metadata = self.metadata_cls(  # type: ignore
+             num_input_tokens=common_attn_metadata.num_input_tokens,
+@@ -546,7 +553,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+             decode=decode_metadata,
+             query_start_loc=query_start_loc,
+             block_tables=all_block_tables if dense_group128 else self.block_table,
+-            seq_lens=self.seq_lens,
++            seq_lens=common_attn_metadata.seq_lens if dense_group128 else self.seq_lens,
+             seq_lens_cpu=all_seq_lens if dense_group128 else self.seq_lens,
+         )
+         if self.pcp_enabled:
+@@ -563,16 +570,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         capacity = common.graph_pad_size
+         n = common.num_actual_tokens
+         query_lens = common.query_start_loc_cpu[1:] - common.query_start_loc_cpu[:-1]
+-        if (
+-            capacity != common.num_reqs
+-            or not 0 <= n <= capacity
+-            or query_lens.numel() < capacity
+-            or not bool((query_lens[:capacity] == 1).all())
+-        ):
+-            raise ValueError("K3 C8 graphs require one query token per padded decode request.")
++        if not 0 <= n <= capacity or query_lens.numel() < common.num_reqs:
++            raise ValueError("K3 C8 graph query metadata does not fit the captured token bucket.")
+         if not common.causal:
+             raise ValueError("K3 C8 decode graphs require causal attention.")
+         seq_lens_cpu = common._seq_lens_cpu
++        if seq_lens_cpu is None:
++            seq_lens_cpu = getattr(common, "seq_lens_cpu_upper_bound", None)
+         if seq_lens_cpu is None:
+             seq_lens_cpu = common.seq_lens_cpu
+         if seq_lens_cpu is None:
+@@ -583,19 +587,36 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+                 capacity, self.model_config.max_model_len, common.block_table_tensor.shape[1], self.device
+             )
+             self.kimi_k3_c8_decode_states[capacity] = state
+-        state.update(seq_lens_cpu, common.block_table_tensor, common.slot_mapping, n, seq_lens_device=common.seq_lens)
++        state.update(
++            seq_lens_cpu,
++            common.block_table_tensor,
++            common.slot_mapping,
++            n,
++            seq_lens_device=common.seq_lens,
++            query_start_loc_cpu=common.query_start_loc_cpu,
++            dcp_size=getattr(self, "dcp_size", 1),
++            dcp_rank=getattr(self, "dcp_rank", 0),
++            interleave=getattr(self, "cp_local_block_size", 1),
++        )
++        active_query_lens = []
++        remaining = n
++        for length in query_lens.tolist():
++            if remaining == 0:
++                break
++            active_query_lens.append(min(length, remaining))
++            remaining -= active_query_lens[-1]
+         return self.metadata_cls(
+             num_input_tokens=capacity,
+             num_actual_tokens=n,
+             slot_mapping=state.slots,
+             query_start_loc=common.query_start_loc,
+-            seq_lens=state.seq_lens,
++            seq_lens=common.seq_lens,
+             seq_lens_cpu=seq_lens_cpu,
+-            block_tables=state.block_table,
+-            num_decodes=n,
++            block_tables=common.block_table_tensor,
++            num_decodes=len(active_query_lens),
+             num_decode_tokens=n,
+             num_prefills=0,
+-            query_lens=[1] * n,
++            query_lens=active_query_lens,
+             attn_state=AscendAttentionState.DecodeOnly,
+             causal=True,
+             kimi_k3_c8_decode_state=state,
+@@ -822,7 +843,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+     def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+         capture_metadata = copy(common_attn_metadata)
+         if getattr(self, "enable_kimi_k3_sfa_c8", False):
+-            capture_metadata.graph_pad_size = capture_metadata.num_reqs
++            if capture_metadata.graph_pad_size <= 0:
++                capture_metadata.graph_pad_size = getattr(
++                    capture_metadata, "num_input_tokens", capture_metadata.num_actual_tokens
++                )
+             return self._build_kimi_k3_c8_decode(capture_metadata)
+         if capture_metadata.attn_state is None:
+             capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+@@ -849,6 +873,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
+         return attn_metadata
+ 
+ 
++def _is_mla_draft_model(config: VllmConfig) -> bool:
++    # DSpark deliberately retains target model_config for hidden-state taps.
++    return config.model_config.runner_type == "draft" or compilation_backends.model_tag == "dspark_head"
++
++
+ class DecodeMLAPreprocessResult(NamedTuple):
+     ql_nope: torch.Tensor | None = None
+     q_pe: torch.Tensor | None = None
+@@ -925,7 +954,10 @@ class AscendMLAImpl(MLAAttentionImpl):
+         self.ring_mla_mask_size = 512
+ 
+         self.speculative_config = self.vllm_config.speculative_config
+-        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
++        # DSpark retains the target model_config while loading its draft.
++        # The loader's model tag, unlike architecture or layer-name guessing,
++        # identifies that construction scope before cache specs are created.
++        self.is_draft_model = _is_mla_draft_model(self.vllm_config)
+         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
+ 
+         self.layer_name = kwargs.get("layer_name")
+@@ -944,7 +976,9 @@ class AscendMLAImpl(MLAAttentionImpl):
+         self.mlapo_num_heads = self.num_heads
+         self.mlapo_weight_quant_mode = 3
+         self._mlapo_uses_native_weights = False
+-        self.enable_kimi_k3_sfa_c8 = getattr(ascend_config, "enable_kimi_k3_sfa_c8", False) is True
++        self.enable_kimi_k3_sfa_c8 = (
++            not self.is_draft_model and getattr(ascend_config, "enable_kimi_k3_sfa_c8", False) is True
++        )
+         if self.enable_kimi_k3_sfa_c8:
+             self._validate_kimi_k3_sfa_c8()
+             if self.enable_mlapo:
+@@ -991,10 +1025,13 @@ class AscendMLAImpl(MLAAttentionImpl):
+         if self.enable_kv_nz:
+             raise ValueError("K3 group128 SFA C8 requires enable_kv_nz=false (packed PA_BSND cache).")
+         parallel = config.parallel_config
+-        if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
+-            raise ValueError("K3 group128 SFA C8 does not yet support PCP/DCP.")
+-        if self.speculative_config is not None:
+-            raise ValueError("K3 group128 SFA C8 does not yet support speculative decoding/MTP.")
++        if parallel.prefill_context_parallel_size != 1:
++            raise ValueError("K3 group128 SFA C8 does not yet support PCP.")
++        if parallel.decode_context_parallel_size > 1 and not callable(
++            getattr(self, "_merge_dcp_attention_output", None)
++        ):
++            raise ValueError("K3 C8 DCP requires the DCP MLA backend.")
++        get_kimi_k3_sfa_c8_padded_heads(self.num_heads * parallel.decode_context_parallel_size)
+         if config.kv_transfer_config is not None or get_ascend_config().kvpp_config.size != 1:
+             raise ValueError("K3 group128 SFA C8 does not yet support KV transfer or KV layer parallelism.")
+         require_kimi_k3_sfa_c8_ops()
+@@ -2463,9 +2500,27 @@ class AscendMLAImpl(MLAAttentionImpl):
+             packed = pack_kimi_k3_sfa_c8(latent, raw)
+             scatter_kimi_k3_sfa_c8(packed, attn_metadata.slot_mapping[:num_tokens], cache)
+         record_attention_compute_start()
++        dcp_size = getattr(self, "dcp_size", 1)
++        if dcp_size > 1:
++            q_latent, q_raw = self._dcp_all_gather_fragments(q_latent, q_raw, dim=1)
+         if decode_state is not None:
+             latent_output = kimi_k3_sfa_c8_decode(
+-                q_latent[:num_tokens], q_raw[:num_tokens], cache, decode_state, self.scale
++                q_latent[:num_tokens],
++                q_raw[:num_tokens],
++                cache,
++                decode_state,
++                self.scale,
++                return_lse=dcp_size > 1,
++            )
++        elif dcp_size > 1 or self.speculative_config is not None:
++            latent_output = self._kimi_k3_c8_verify_attention(
++                q_latent[:num_tokens],
++                q_raw[:num_tokens],
++                cache,
++                attn_metadata.block_tables,
++                query_starts,
++                kv_lens,
++                attn_metadata.seq_lens,
+             )
+         else:
+             latent_output = kimi_k3_sfa_c8_attention(
+@@ -2478,6 +2533,11 @@ class AscendMLAImpl(MLAAttentionImpl):
+                 self.scale,
+                 causal=attn_metadata.causal,
+             )
++        if dcp_size > 1:
++            latent_output = self._merge_dcp_attention_output(*latent_output, self.kv_lora_rank)
++            latent_output = latent_output.to(q_latent.dtype)
++            if decode_state is not None:
++                latent_output.masked_fill_(~decode_state.active[:, None, None], 0)
+         projected = self._v_up_proj_batch_major(latent_output)
+         o_proj_input = hidden_states.new_zeros(hidden_states.shape[0], self.num_heads * self.v_head_dim)
+         o_proj_input[:num_tokens] = projected
+@@ -2486,6 +2546,51 @@ class AscendMLAImpl(MLAAttentionImpl):
+         output[...] = self.o_proj(o_proj_input, is_prefill=attn_metadata.num_prefills > 0)[0]
+         return output
+ 
++    def _kimi_k3_c8_verify_attention(self, q_latent, q_raw, cache, tables, starts, lengths, device_lengths):
++        """Native per-query prefixes for speculative verification and DCP.
++
++        CPU lengths bound workspace only. Device lengths determine visibility,
++        including asynchronous acceptance corrections. No historical KV is
++        gathered or dequantized outside QSFA. Graph replay uses persistent
++        builder-owned states instead of this eager chunking path.
++        """
++        dcp_size = getattr(self, "dcp_size", 1)
++        output = torch.empty_like(q_latent)
++        lse = torch.empty((*q_latent.shape[:2], 1), dtype=torch.float32, device=q_latent.device)
++        for request, length in enumerate(lengths):
++            start, end = starts[request : request + 2]
++            # Bound the explicit full-index workspace, as in the eager reader.
++            chunk_size = max(1, (1 << 20) // max(1, length))
++            for first in range(start, end, chunk_size):
++                last = min(first + chunk_size, end)
++                count = last - first
++                visible_bound = length - (end - last)
++                state = KimiK3C8DecodeState(count, max(1, length), tables.shape[1], q_latent.device)
++                state.update(
++                    torch.tensor([visible_bound], dtype=torch.int32),
++                    tables[request : request + 1],
++                    torch.full((count,), -1, dtype=torch.int64, device=q_latent.device),
++                    count,
++                    query_start_loc_cpu=torch.tensor([0, count], dtype=torch.int32),
++                    seq_lens_device=device_lengths[request : request + 1] - (end - last),
++                    dcp_size=dcp_size,
++                    dcp_rank=getattr(self, "dcp_rank", 0),
++                    interleave=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
++                )
++                result = kimi_k3_sfa_c8_decode(
++                    q_latent[first:last],
++                    q_raw[first:last],
++                    cache,
++                    state,
++                    self.scale,
++                    return_lse=dcp_size > 1,
++                )
++                if dcp_size > 1:
++                    output[first:last], lse[first:last] = result
++                else:
++                    output[first:last] = result
++        return (output, lse) if dcp_size > 1 else output
++
+ 
+ # mla_nope_zero_rope_cache: the paged key_rope operand is cache-sized
+ # (num_blocks x block_size x 64), so rebuilding it on every MLA layer of every
+
