@@ -18,9 +18,9 @@ import tempfile
 import traceback
 import urllib.request
 
-HARNESS_URL = "https://raw.githubusercontent.com/Qiming-zhang-rondo/kimi-k3-a5-c8/51d02efe90eb7ff93aada7bca3658117dbb55449/qli-a5/test_qli_a5.py"
-HARNESS_SHA256 = "84637c150efef40a5eb0c1e9dbd4bd7d22fe83fb6b027f7f7ead20da2429c822"
-RUNNER_VERSION = "qli-topk-override-v3"
+HARNESS_URL = "https://raw.githubusercontent.com/Qiming-zhang-rondo/kimi-k3-a5-c8/c3ad6448b31c9f536b76a0ca512652df43a9780d/qli-a5/test_qli_a5.py"
+HARNESS_SHA256 = "fdc0f5634f1e0caccdceae24339a0a038b6149656e00bb415f64034118f2167d"
+RUNNER_VERSION = "qli-detailed-errors-v4"
 
 
 def identify(path):
@@ -68,6 +68,8 @@ def main():
     p.add_argument("--topk", type=int, help="Override TopK (1..8192), preserving the original input data")
     p.add_argument("--device", default="npu:0")
     p.add_argument("--profile", action="store_true")
+    p.add_argument("--inspect-results", metavar="PATH",
+                   help="Explain saved results and failure arrays offline; do not load packages or run NPU operators")
     p.add_argument("--worker-dir", help=argparse.SUPPRESS)
     args = p.parse_args()
     if args.topk is not None and not 1 <= args.topk <= 8192:
@@ -96,6 +98,16 @@ def main():
         (run / "diagnostics.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
     try:
+        if args.inspect_results:
+            report["stage"] = "offline-error-inspection"
+            report["inspect_results"] = str(Path(args.inspect_results).resolve())
+            save()
+            harness = load_harness(run, args.insecure)
+            print("Offline error inspection: reading saved results only; no NPU execution", flush=True)
+            code = harness.inspect_results(args.inspect_results)
+            report["status"] = "PASS" if code == 0 else "FAIL"
+            save()
+            return code
         for package in ("cann-ops-transformer-dsl", "cannbot-dsl"):
             try:
                 dist = metadata.distribution(package)
