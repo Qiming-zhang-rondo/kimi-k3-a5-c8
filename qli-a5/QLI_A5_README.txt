@@ -64,6 +64,14 @@ run_qli_installed.py 是带日志的启动入口：下载固定 SHA256 的新版
 --iterations 100、--repeats 5。同名结果目录若已有 results.json 将被拒绝覆盖。
 同一 case 的随机种子不受 --case 筛选影响。完整 CPU golden 可能耗时较长，会校验所有 query。
 
+只改变 TopK 的对照测试：
+  python test_qli_a5.py --suite smoke --case smoke --topk 1024 --dsl-source ops --dsl-root /mnt/qli-a5-ready.I3M02Q/cannbot-source --fail-fast --profile
+启动器 run_qli_installed.py 同样支持 --case smoke --topk 1024。
+--topk 范围 1..8192；保持 case 名称、输入生成种子及 Q/K/scale/weights/页表不变，
+两后端均按新 TopK 重新生成 metadata。默认未指定时保留每个用例原有 TopK。
+smoke 仍是 B=2、Q=3、K=257，因此 TopK=1024 时每行应有 257 个互异有效索引，
+其余 767 项为 indices=-1、values=-inf。这是 padding 场景，不代表长序列选出1024项的性能。
+
 精度规则
 - 独立 NumPy CPU 参考解码低 nibble 在前的 FP4 E2M1，每 32 个逻辑 D 元素
   应用一个 E8M0 scale；按随机物理页表访问 K，包含负权重。

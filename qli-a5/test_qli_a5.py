@@ -23,7 +23,7 @@ import sys
 import time
 import traceback
 import types
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
@@ -178,6 +178,20 @@ def cases_for(suite):
     if suite == "full":
         cases += [Case("qli_128k", batch=12, query=6, key=131072,
                        topk=512, mask=3, ratio=2)]
+    return cases
+
+
+def select_cases(suite, case_name=None, topk=None):
+    """Select cases before overriding TopK; keep names/seeds/input bytes unchanged."""
+    if topk is not None and not 1 <= topk <= 8192:
+        raise ValueError("--topk must be between 1 and 8192")
+    cases = cases_for(suite)
+    if case_name:
+        cases = [c for c in cases if c.name == case_name]
+        if not cases:
+            raise ValueError("--case not found in selected suite")
+    if topk is not None:
+        cases = [replace(c, topk=topk) for c in cases]
     return cases
 
 
@@ -493,6 +507,7 @@ def main():
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--suite", choices=["smoke", "standard", "full"], default="smoke")
     parser.add_argument("--case", help="Run one named case from the selected suite")
+    parser.add_argument("--topk", type=int, help="Override TopK (1..8192) without changing case names, seeds or inputs")
     parser.add_argument("--backend", choices=["both", "native", "dsl"], default="both")
     parser.add_argument("--dsl-source", choices=["ops", "samples"], default="ops")
     parser.add_argument("--dsl-root", help="Existing cannbot-dsl repo, samples directory or flat ops directory; works with both sources")
@@ -511,11 +526,10 @@ def main():
         self_test(); return 0
     if min(args.warmup, args.iterations, args.repeats) < 1 or min(args.rtol, args.atol) < 0:
         parser.error("Timing counts must be positive and tolerances nonnegative")
-    cases = cases_for(args.suite)
-    if args.case:
-        cases = [c for c in cases if c.name == args.case]
-        if not cases:
-            parser.error("--case not found in selected suite")
+    try:
+        cases = select_cases(args.suite, args.case, args.topk)
+    except ValueError as exc:
+        parser.error(str(exc))
     out = Path(args.output).resolve()
     if (out/"results.json").exists():
         parser.error("Output already contains results.json; choose a fresh --output directory")
