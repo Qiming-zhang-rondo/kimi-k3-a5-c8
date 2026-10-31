@@ -1,9 +1,9 @@
 diff --git a/docs/source/developer_guide/kimi_k3_qfm_c8.md b/docs/source/developer_guide/kimi_k3_qfm_c8.md
 new file mode 100644
-index 000000000..27d39ca24
+index 000000000..a307c75de
 --- /dev/null
 +++ b/docs/source/developer_guide/kimi_k3_qfm_c8.md
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,85 @@
 +# Kimi K3 full576 FP8 QFM candidate
 +
 +Base: VA 0.30.0 commit `c09d3e20b9c45c80b34ae3781440d90904a44023`.
@@ -25,17 +25,23 @@ index 000000000..27d39ca24
 +{
 +  "enable_kimi_k3_qfm_c8": true,
 +  "enable_mlapo": false,
-+  "enable_kv_nz": false,
-+  "qfm_kv_scale": 0.03125
++  "enable_kv_nz": false
 +}
 +```
 +
-+**0.03125 is only the synthetic test scale, NOT a calibrated production value.**
-+An explicit scalar or exact MLA-layer-name-to-scale mapping is mandatory.
-+The scale is a dequantization multiplier, covers all 576 lanes, and remains
-+fixed across requests, chunks and APC hits. Do not reuse legacy latent-only
-+or Group128 scales as if they calibrated this representation. Full-model
-+accuracy and saturation must be assessed with the chosen scale.
++KV is unscaled FP8: internally the required FP32 descale tensor is `[1.0]`.
++This matches `prepare_prolog_weights()` in the
++[pinned official K3 recipe](https://gitcode.com/cann/cann-recipes-infer/blob/4447f2f0972cb9287e069e3994b1d46ffe244ebc/models/kimi_k3/models/modeling_kimi_k3.py#L2580).
++It is an identity scale, not a calibrated value from the checkpoint and not
++a model-accuracy guarantee. Writing still clips to E4M3's finite range before
++casting. Q retains its independent per-token/head dynamic scales.
++
++**Remove `qfm_kv_scale` from the launch configuration.** The previous synthetic
++`0.03125` example is withdrawn; the deleted config field now fails validation
++if accidentally retained. Restart all workers and discard old in-memory KV
++pages: pages written with the old scale must never be read with the new one.
++Do not change KV scale dynamically between chunks or APC hits. The native
++reader accepts one scalar for the entire cache, not per-token/group scales.
 +
 +Only main-model MLA is quantized. Draft model and KDA state caches retain
 +their existing representation. kv_b_proj must remain unquantized. Existing
@@ -85,7 +91,7 @@ index 000000000..27d39ca24
 +do not label this candidate a precision pass based solely on short outputs.
 diff --git a/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py b/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py
 new file mode 100644
-index 000000000..c501cd502
+index 000000000..e157bda0e
 --- /dev/null
 +++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py
 @@ -0,0 +1,80 @@
@@ -125,8 +131,8 @@ index 000000000..c501cd502
 +        rows_cpu = torch.randn(5, 576).bfloat16()
 +        rows = rows_cpu.to("npu")
 +        slots = torch.tensor([128, -1, 0, 383, 127], dtype=torch.int64, device="npu")
-+        scale = torch.tensor([0.03125], dtype=torch.float32, device="npu")
-+        quant = (rows_cpu.float() / 0.03125).clamp(-448, 448).to(torch.float8_e4m3fn).view(torch.uint8)
++        scale = torch.tensor([qfm.QFM_KV_DESCALE], dtype=torch.float32, device="npu")
++        quant = rows_cpu.float().clamp(-448, 448).to(torch.float8_e4m3fn).view(torch.uint8)
 +
 +        def update_expected(ids, expected=expected, quant=quant, offset=offset, stride=stride):
 +            for row, slot in enumerate(ids):
@@ -171,13 +177,14 @@ index 000000000..c501cd502
 +    main()
 diff --git a/tests/ut/attention/test_kimi_k3_qfm_cpu.py b/tests/ut/attention/test_kimi_k3_qfm_cpu.py
 new file mode 100644
-index 000000000..5ceebddb7
+index 000000000..b494d39a0
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_cpu.py
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,216 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""CPU contracts only. No claim of NPU or distributed acceptance."""
 +
++import ast
 +import importlib.util
 +import sys
 +from pathlib import Path
@@ -319,16 +326,35 @@ index 000000000..5ceebddb7
 +    assert result.table.shape[0] == 17
 +
 +
-+@pytest.mark.parametrize("value", [None, 0, -1, float("nan"), float("inf"), True, {}])
-+def test_scale_must_be_explicit(qfm, value):
-+    with pytest.raises(ValueError, match="explicit positive"):
-+        qfm.resolve_kv_scale(value, "layer.3")
-+
-+
-+def test_scalar_and_exact_layer_scale(qfm):
-+    assert qfm.resolve_kv_scale(0.1, "a") == 0.1
-+    assert qfm.resolve_kv_scale({"a": 0.2}, "a") == 0.2
++def test_official_unit_scale_is_internal_not_a_user_knob(qfm):
++    assert qfm.QFM_KV_DESCALE == 1.0
++    root = Path(__file__).resolve().parents[3]
++    config = ast.parse((root / "vllm_ascend/ascend_config.py").read_text())
++    fields = [
++        node.target.id
++        for node in ast.walk(config)
++        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
++    ]
++    assert "qfm_kv_scale" not in fields
++    impl = (root / "vllm_ascend/attention/mla_v1.py").read_text()
++    assert "value = QFM_KV_DESCALE" in impl
++    assert "resolve_kv_scale" not in impl
 +    assert not qfm.select_qfm(SimpleNamespace(is_draft_model=True), SimpleNamespace(enable_kimi_k3_qfm_c8=True))
++
++
++@pytest.mark.parametrize("value", [-500.0, -448.0, -16.0, -0.00001, 0.0, 0.00001, 16.0, 448.0, 500.0])
++def test_unit_scale_writer_matches_direct_fp8_and_retains_prior_pages(qfm, value):
++    cache = qfm.cache_view(torch.zeros(2 * 128 * 576, dtype=torch.uint8), 2, 128 * 576)
++    scale = torch.tensor([qfm.QFM_KV_DESCALE])
++    first = torch.full((1, 576), 32.0)
++    qfm.write_cache(first, torch.tensor([0]), cache, scale)
++    previous = cache[0].view(torch.uint8).clone()
++    rows = torch.full((1, 576), value)
++    qfm.write_cache(rows, torch.tensor([128]), cache, scale)
++    assert torch.equal(cache[0].view(torch.uint8), previous)
++    actual = cache[1, 0, :, 0].reshape(1, 576).float() * scale
++    expected = rows.clamp(-448, 448).to(torch.float8_e4m3fn).float()
++    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 +
 +
 +def test_forward_writes_before_reader_and_masks_padding(qfm, monkeypatch):
@@ -336,10 +362,12 @@ index 000000000..5ceebddb7
 +    batch = b.build(common([4], [4], capacity=8))
 +    cache = qfm.cache_view(torch.zeros(128 * 576, dtype=torch.uint8), 1, 128 * 576)
 +    hidden = torch.randn(8, 576)
-+    scale = torch.tensor([0.03125])
++    scale = torch.tensor([qfm.QFM_KV_DESCALE])
 +    observed = []
 +
 +    def attention(q, kv, q_scale, kv_scale, table, lengths, *args, **kwargs):
++        assert kv_scale.shape == (1,) and kv_scale.dtype == torch.float32
++        assert kv_scale.item() == 1.0
 +        # The reader must see the current write, not stale pages or a copy.
 +        stored = kv[0, 0].permute(1, 0, 2).reshape(128, 576).float()
 +        expected = (hidden[:4] / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
@@ -370,18 +398,15 @@ index 000000000..5ceebddb7
 +    torch.testing.assert_close(output[:4], torch.full_like(output[:4], 0.5))
 +    assert torch.count_nonzero(output[4:]) == 0
 diff --git a/vllm_ascend/ascend_config.py b/vllm_ascend/ascend_config.py
-index 4bb9e8a2d..6e5f43cf2 100644
+index 4bb9e8a2d..b1ee25008 100644
 --- a/vllm_ascend/ascend_config.py
 +++ b/vllm_ascend/ascend_config.py
-@@ -637,6 +637,11 @@ class AscendConfig:
+@@ -637,6 +637,8 @@ class AscendConfig:
      enable_sp_by_pass: bool = False
      enable_sparse_sfa_turboquant: bool = False
      enable_sparse_sfa_c8: bool = False
 +    # Experimental full576 FP8 QFM cache; distinct from packed656 QSFA C8.
 +    enable_kimi_k3_qfm_c8: bool = False
-+    # Explicit dequantization multiplier (scalar, or exact layer-name mapping).
-+    # No implicit calibration or reuse of legacy Group128 scales.
-+    qfm_kv_scale: float | dict[str, float] | None = None
      enable_sparse_li_c8: bool = False
      enable_sparse_li_c4: bool = False
      pd_tp_ratio: int = 1
@@ -400,21 +425,20 @@ index 356c266a9..60151c928 100644
          if self.dcp_enabled and (
 diff --git a/vllm_ascend/attention/kimi_k3_qfm.py b/vllm_ascend/attention/kimi_k3_qfm.py
 new file mode 100644
-index 000000000..cc43555b4
+index 000000000..bc0ab8915
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm.py
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,300 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Opt-in K3 full576 FP8 cache. No BF16 history and no Q-by-K token indices.
 +
-+The explicit static scale is a dequantization multiplier, not a reciprocal.
++KV uses unscaled FP8, matching the pinned CANN K3 recipe's unit descale.
 +Caller-owned cache pages and their padding/offset are preserved. Metadata is
 +shared across layers in an attention group; only captured capacities are kept.
 +"""
 +
 +import importlib
-+import math
 +from dataclasses import dataclass
 +
 +import torch
@@ -427,6 +451,10 @@ index 000000000..cc43555b4
 +QFM_MAX_Q = 16
 +QFM_MASK = 2048
 +QFM_FP8_MAX = 448.0
++# cann-recipes-infer 4447f2f0972cb9287e069e3994b1d46ffe244ebc:
++# KimiMLAAttention.prepare_prolog_weights registers mla_kv_scale=[1.0].
++# This is an identity conversion, not a calibrated model accuracy guarantee.
++QFM_KV_DESCALE = 1.0
 +QFM_HEADS = (1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 +
 +
@@ -462,16 +490,7 @@ index 000000000..cc43555b4
 +    size = vcfg.parallel_config.decode_context_parallel_size
 +    if impl.num_heads * size not in QFM_HEADS:
 +        raise ValueError("QFM does not support this DCP-gathered query head count")
-+    resolve_kv_scale(config.qfm_kv_scale, impl.layer_name)
 +    return True
-+
-+
-+def resolve_kv_scale(value, layer_name):
-+    if isinstance(value, dict):
-+        value = value.get(layer_name)
-+    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
-+        raise ValueError(f"QFM needs an explicit positive qfm_kv_scale for {layer_name}; no test-scale default")
-+    return float(value)
 +
 +
 +def cache_view(raw, blocks, page_bytes):
@@ -711,7 +730,7 @@ index 000000000..cc43555b4
 +    output.copy_(result)
 +    return output
 diff --git a/vllm_ascend/attention/mla_v1.py b/vllm_ascend/attention/mla_v1.py
-index 9f7e2de8f..b0a4c5de1 100644
+index 9f7e2de8f..d70c7ece3 100644
 --- a/vllm_ascend/attention/mla_v1.py
 +++ b/vllm_ascend/attention/mla_v1.py
 @@ -45,6 +45,14 @@ from vllm_ascend.attention.flashmla import (
@@ -719,11 +738,11 @@ index 9f7e2de8f..b0a4c5de1 100644
      split_flashmla_requests,
  )
 +from vllm_ascend.attention.kimi_k3_qfm import (
++    QFM_KV_DESCALE,
 +    QFMBatch,
 +    QFMMetadataBuilder,
 +    forward_qfm,
 +    load_ops,
-+    resolve_kv_scale,
 +    select_qfm,
 +)
  from vllm_ascend.attention.utils import (
@@ -813,14 +832,14 @@ index 9f7e2de8f..b0a4c5de1 100644
              prefer_copy=True,
          )
 +        if getattr(self, "use_qfm", False):
-+            value = resolve_kv_scale(get_ascend_config().qfm_kv_scale, self.layer_name)
++            value = QFM_KV_DESCALE
 +            if getattr(self, "qfm_scale", None) is None:
 +                self.qfm_scale = torch.tensor([value], dtype=torch.float32, device=self.W_UV.device)
 +            else:
 +                self.qfm_scale.fill_(value)
 +            self.qfm_ops = load_ops()
 +            logger.info(
-+                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=ordinary heads=%s",
++                "QFM C8 layer=%s cache=FP8-full576 scale=%s scale_source=cann-recipe-unit writer=ordinary heads=%s",
 +                self.layer_name,
 +                value,
 +                self.num_heads,

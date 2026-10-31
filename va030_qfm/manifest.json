@@ -1,6 +1,7 @@
 {
   "base": "c09d3e20b9c45c80b34ae3781440d90904a44023",
-  "patch_sha256": "0bbe06cd8f4e90cdba60e71b99e518c2a819cc435078ab593e5e09b80903ac96",
+  "patch_sha256": "0910b85270777b546f5b41a73fac41ba473f10046b1e74713f49c016098c7021",
+  "upgrade_sha256": "a8c5f5aac4df979662358fd601b257a181ed85233245f172625d2f4b1ec15c36",
   "before": {
     "docs/source/developer_guide/kimi_k3_qfm_c8.md": null,
     "tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": null,
@@ -13,7 +14,7 @@
     "vllm_ascend/worker/v2/attn_utils.py": "b1e7d441168a5c96f2364199f9092c8b0b95b297393c63dc31dbb19beae8e160",
     "vllm_ascend/worker/v2/model_runner.py": "533986687a50caa40afe7d3610d5fd9fb7d64d0ef167d95fe2c656bf0a3ccec5"
   },
-  "after": {
+  "legacy": {
     "docs/source/developer_guide/kimi_k3_qfm_c8.md": "254a67ece18276eb472c615579174889c32c98f0a28941b06c05f34a98fcf59c",
     "tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "fa6b28f5728dbae037cc5a2b419ed682ce8262de4e1bdae00848d562b8232892",
     "tests/ut/attention/test_kimi_k3_qfm_cpu.py": "df6e8aa6f5f69267b2f0d1f74b4433a0868043813ac57d4cca9bcd72e9f3353e",
@@ -21,6 +22,18 @@
     "vllm_ascend/attention/context_parallel/mla_cp.py": "7fc8a0f2ddc782f93dd21cfcb325cd181619ad501afa439dd7929b04e8361f01",
     "vllm_ascend/attention/kimi_k3_qfm.py": "faa1e4aff2ee4eccfd052d4b89494df6584ea0fd7049c1e2f3781c03e30cf240",
     "vllm_ascend/attention/mla_v1.py": "f0c45caf5d2bf70dea3fb0ba9e74c04f0482a477eff7f801b420bd02cc0f0f8e",
+    "vllm_ascend/core/kv_cache_interface.py": "5017fe57ce4f231ebb4153b75449b4b3e84171df9396345c711c9797ac924a9b",
+    "vllm_ascend/worker/v2/attn_utils.py": "826132dbce47b716dda317e45871541211f20d4b0b70deeedc4eb637446890df",
+    "vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3"
+  },
+  "after": {
+    "docs/source/developer_guide/kimi_k3_qfm_c8.md": "846c68ea1215a87ea2589614f0f57860bd1056e86e3d6b4060f7f8e773e4a554",
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "b119e5eb92600392239fc5669885cffd05d811c0462d8aceab3291c0c44e3b76",
+    "tests/ut/attention/test_kimi_k3_qfm_cpu.py": "b9a184b9f490c4f748d0fff85c1154275c8053bda7a51aac03958a8dcd0cab87",
+    "vllm_ascend/ascend_config.py": "acf481463dc3f504e2de0188b2ea56730569309274230123684738460011f1ae",
+    "vllm_ascend/attention/context_parallel/mla_cp.py": "7fc8a0f2ddc782f93dd21cfcb325cd181619ad501afa439dd7929b04e8361f01",
+    "vllm_ascend/attention/kimi_k3_qfm.py": "566c27288b5c7a8c0f67e651eddba5f33bb53ae5a7fe2360dcd088a3892cfdbb",
+    "vllm_ascend/attention/mla_v1.py": "305a5644e2d39e16fc393633102c2e4296a862e726ed95af27cf39004cacb689",
     "vllm_ascend/core/kv_cache_interface.py": "5017fe57ce4f231ebb4153b75449b4b3e84171df9396345c711c9797ac924a9b",
     "vllm_ascend/worker/v2/attn_utils.py": "826132dbce47b716dda317e45871541211f20d4b0b70deeedc4eb637446890df",
     "vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3"
