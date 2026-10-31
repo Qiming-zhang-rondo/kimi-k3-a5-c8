@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "scope": "Stage1 QFM+metadata only; no VA patch or fused Prolog claim",
+  "operator_commit": "8b6924e68ed27181141cde84fa5a942c0c060aac",
+  "files": {
+    "README.md": "2b1c8a8ae8e2bfa1406ee22603613dc467d9bc1ea06c96022b23f2c835493ff2",
+    "BUILD.md": "184f484f5d2fcd9c62b20bec3c90798cbd6718f928248e3303a37e6c7d144a02",
+    "setup_qfm.sh": "046cd13232bc14054004080a3ca7f3324bb96bbd048333618a6d0cd7fbee6c06",
+    "build_qfm.sh": "32e7f8786651a3e70969dc41e80e6bbc939eec95ddc403ea5ddbfea2b6a4905c",
+    "planner.py": "2ba6751e1207c7db2e8af10a08dcb4d0b34ab98f93ce5c083b139e66e91818eb",
+    "qfm_probe.py": "aabcbc49f718e3c4dd4373ef4f1767c4f12980f32aec434bc03f73e0042ca1a5",
+    "prolog_probe.py": "69c89d443db3ce089349edf9241d04275b909ffda8c65ddf79e3bb4580938e2b",
+    "run.py": "7ce93220589ec9a41ce03cd1d05b259b31bb7e920b3f7f75fb3be758492f6b82",
+    "test_planner.py": "ff87a8898d1219957dd33fe03628c4c2947bac438695aa5682a71cc0010196c5",
+    "test_probe.py": "6553f0baf526a1a1607507c531ac6348454cf262c5f312da91fbe9e52f88e474",
+    "test_run.py": "7b8c23576085ccc1660c56eb0e386d9c39b6caa008fe2622f6b36ad86aa8d089",
+    "test_setup.py": "3a8823ba9b95f58d3f858606cf6e3393aa44e1a467d66fef4999d7eef75a4b5f"
+  }
+}
