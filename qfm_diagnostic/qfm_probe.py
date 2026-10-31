@@ -527,6 +527,8 @@ def graph_suite(native):
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         captured_out, captured_lse = reader.run()
+    fp32_budget_failures = []
+    completed_replays = 0
     for step, (used, length) in enumerate(
         ((4, 127), (9, 129), (1, 1), (128, 256), (0, 0), (9, 129))
     ):
@@ -560,7 +562,21 @@ def graph_suite(native):
             expected, expected_lse = reference(
                 q_ref[:used], [logical_kv], [used], [length], reader.scaling
             )
-            require_check("graph_vs_reference", replay_out[:used], expected)
+            budget = compare(replay_out[:used], expected)
+            emit("graph_fp32_accuracy_budget", step=step, used=used,
+                 kv_length=length, **budget)
+            if not budget["finite"]:
+                raise AssertionError("Nonfinite graph output/reference")
+            if not budget["pass"]:
+                fp32_budget_failures.append(dict(step=step, used=used, kv_length=length, **budget))
+            output_diagnostics(replay_out[:used], expected, list(range(used)))
+            p_expected = p_fp8_single_tile_reference(
+                q_ref[:used], [logical_kv], [used], [length], reader.scaling, list(range(used))
+            )
+            if p_expected is not None:
+                emit("graph_p_fp8_diagnostic", step=step, acceptance_gate=False,
+                     native_vs_p_fp8=compare(replay_out[:used], p_expected),
+                     p_fp8_vs_fp32=compare(p_expected, expected))
             require_check(
                 "graph_lse",
                 replay_lse.T[:used],
@@ -578,17 +594,30 @@ def graph_suite(native):
             or not bool(torch.isneginf(neutral_lse[used:]).all())
         ):
             raise AssertionError("Inactive graph rows were not neutralized")
+        if not torch.equal(reader.state["storage"].cpu(), reader.state["expected"]):
+            raise AssertionError(f"Graph replay {step} modified cache")
+        completed_replays += 1
         emit(
             "graph_replay",
             **{"pass": True},
+            scope="graph replay consistency only; FP32 accuracy budget reported separately",
+            step=step,
             used=used,
             kv_length=length,
             page_table_reversed=bool(step % 2),
             invalid_rows_neutralized=True,
             inactive_raw_finite=bool(torch.isfinite(replay_out[used:]).all()),
         )
-    if not torch.equal(reader.state["storage"].cpu(), reader.state["expected"]):
-        raise AssertionError("Graph replay modified cache")
+    emit("graph_contract_summary", completed_replays=completed_replays,
+         replay_contract_passed=True,
+         fp32_accuracy_budget_passed=not fp32_budget_failures,
+         fp32_budget_failures=fp32_budget_failures,
+         scope="one-card synthetic replay checks only; not VA/HCCL or model accuracy acceptance")
+    if fp32_budget_failures:
+        raise AssertionError(
+            f"All {completed_replays} graph replays completed and consistency checks passed; "
+            f"{len(fp32_budget_failures)} FP32 accuracy budgets failed (original thresholds unchanged)"
+        )
     return {
         "replays": 6,
         "scope": "one-card QFM metadata capture/replay; not VA/HCCL graphs",

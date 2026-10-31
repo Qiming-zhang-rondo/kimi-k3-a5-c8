@@ -1,6 +1,7 @@
 """CPU contract tests for the standalone probe; these do not validate NPU ops."""
 
 from types import SimpleNamespace
+from contextlib import contextmanager, nullcontext
 
 import pytest
 import qfm_probe as probe
@@ -234,3 +235,51 @@ def test_large_query_plan_has_512_short_sequences_without_dense_indices():
     assert max(plan.seqused_q) == 16
     assert plan.cache_seqlens[0] == 131072 - 8192 + 16
     assert plan.cache_seqlens[-1] == 131072
+
+
+def test_graph_budget_failure_does_not_truncate_replays(cpu_runtime, monkeypatch):
+    events = []
+    monkeypatch.setattr(probe, "emit", lambda event, **fields: events.append((event, fields)))
+    active = [None]
+    original_run = probe.Reader.run
+
+    def tracked_run(reader):
+        result = original_run(reader)
+        if active[0] is not None:
+            active[0].reader, active[0].buffers = reader, result
+        return result
+
+    class Graph:
+        def replay(self):
+            result = original_run(self.reader)
+            for buffer, value in zip(self.buffers, result):
+                buffer.copy_(value)
+
+    @contextmanager
+    def capture(graph):
+        active[0] = graph
+        try:
+            yield
+        finally:
+            active[0] = None
+
+    stream = SimpleNamespace(wait_stream=lambda other: None)
+    monkeypatch.setattr(probe.torch, "npu", SimpleNamespace(
+        synchronize=lambda: None, Stream=lambda: stream, current_stream=lambda: stream,
+        stream=lambda value: nullcontext(), NPUGraph=Graph, graph=capture))
+    monkeypatch.setattr(probe.Reader, "run", tracked_run)
+    original_reference = probe.reference
+
+    def shifted_reference(*args, **kwargs):
+        output, lse = original_reference(*args, **kwargs)
+        return output + 1, lse
+
+    monkeypatch.setattr(probe, "reference", shifted_reference)
+    with pytest.raises(AssertionError, match="All 6 graph replays completed"):
+        probe.graph_suite(CpuNative())
+    replays = [fields for event, fields in events if event == "graph_replay"]
+    assert [item["used"] for item in replays] == [4, 9, 1, 128, 0, 9]
+    summary = next(fields for event, fields in events if event == "graph_contract_summary")
+    assert summary["replay_contract_passed"]
+    assert not summary["fp32_accuracy_budget_passed"]
+    assert len(summary["fp32_budget_failures"]) == 5
