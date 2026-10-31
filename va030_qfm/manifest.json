@@ -1,0 +1,28 @@
+{
+  "base": "c09d3e20b9c45c80b34ae3781440d90904a44023",
+  "patch_sha256": "0bbe06cd8f4e90cdba60e71b99e518c2a819cc435078ab593e5e09b80903ac96",
+  "before": {
+    "docs/source/developer_guide/kimi_k3_qfm_c8.md": null,
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": null,
+    "tests/ut/attention/test_kimi_k3_qfm_cpu.py": null,
+    "vllm_ascend/ascend_config.py": "8595413ba51a2545589d8900148e228293af73c38f4460e740d66fdf962f7d32",
+    "vllm_ascend/attention/context_parallel/mla_cp.py": "250d717e1549e5f5042f6aadcd24a795ed5698a5fd05471659b6e04cc690ccff",
+    "vllm_ascend/attention/kimi_k3_qfm.py": null,
+    "vllm_ascend/attention/mla_v1.py": "ccb3aa58d81a32e1468439dc4a9c28dd5d46e385488e7c701db2eb79c9513e5b",
+    "vllm_ascend/core/kv_cache_interface.py": "9eb012b6582654000185467b58221dd2628176dc6661d6af1e6d3070a2bc0d03",
+    "vllm_ascend/worker/v2/attn_utils.py": "b1e7d441168a5c96f2364199f9092c8b0b95b297393c63dc31dbb19beae8e160",
+    "vllm_ascend/worker/v2/model_runner.py": "533986687a50caa40afe7d3610d5fd9fb7d64d0ef167d95fe2c656bf0a3ccec5"
+  },
+  "after": {
+    "docs/source/developer_guide/kimi_k3_qfm_c8.md": "254a67ece18276eb472c615579174889c32c98f0a28941b06c05f34a98fcf59c",
+    "tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "fa6b28f5728dbae037cc5a2b419ed682ce8262de4e1bdae00848d562b8232892",
+    "tests/ut/attention/test_kimi_k3_qfm_cpu.py": "df6e8aa6f5f69267b2f0d1f74b4433a0868043813ac57d4cca9bcd72e9f3353e",
+    "vllm_ascend/ascend_config.py": "db3eb2122e36034696f54af47b6028e61347bad9f8e88d2baaede6b68a6d7056",
+    "vllm_ascend/attention/context_parallel/mla_cp.py": "7fc8a0f2ddc782f93dd21cfcb325cd181619ad501afa439dd7929b04e8361f01",
+    "vllm_ascend/attention/kimi_k3_qfm.py": "faa1e4aff2ee4eccfd052d4b89494df6584ea0fd7049c1e2f3781c03e30cf240",
+    "vllm_ascend/attention/mla_v1.py": "f0c45caf5d2bf70dea3fb0ba9e74c04f0482a477eff7f801b420bd02cc0f0f8e",
+    "vllm_ascend/core/kv_cache_interface.py": "5017fe57ce4f231ebb4153b75449b4b3e84171df9396345c711c9797ac924a9b",
+    "vllm_ascend/worker/v2/attn_utils.py": "826132dbce47b716dda317e45871541211f20d4b0b70deeedc4eb637446890df",
+    "vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3"
+  }
+}
