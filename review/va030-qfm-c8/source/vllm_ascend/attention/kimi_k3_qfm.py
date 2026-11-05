@@ -9,7 +9,7 @@ shared across layers in an attention group; only captured capacities are kept.
 
 import importlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch_npu
@@ -144,12 +144,32 @@ def cache_view(raw, blocks, page_bytes):
     )
 
 
-def write_cache(rows, slots, cache, scale):
+@dataclass
+class QFMScatterPlan:
+    slots: torch.Tensor
+    offsets: torch.Tensor
+    stride: int
+
+    def slice(self, begin, end):
+        return QFMScatterPlan(self.slots[begin:end], self.offsets[begin:end], self.stride)
+
+
+def build_scatter_offsets(slots, stride, tile=None):
+    """Pure slot arithmetic, shared by every MLA layer in a metadata group."""
+    ids = slots.to(torch.int64)
+    if tile is None:
+        tile = torch.arange(QFM_WIDTH // QFM_TILE, device=slots.device)
+    offsets = ids[:, None].div(QFM_BLOCK, rounding_mode="floor") * (stride // QFM_TILE)
+    offsets = offsets + tile[None, :] * QFM_BLOCK + ids[:, None].remainder(QFM_BLOCK)
+    return torch.where(ids[:, None] >= 0, offsets, -1)
+
+
+def write_cache(rows, slots, cache, scale, scatter_plan=None):
     values = (rows.float() / scale).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
-    scatter_fp8_cache(values, slots, cache)
+    scatter_fp8_cache(values, slots, cache, scatter_plan=scatter_plan)
 
 
-def scatter_fp8_cache(values, slots, cache):
+def scatter_fp8_cache(values, slots, cache, scatter_plan=None):
     """Scatter 32-byte NZ tiles; native ScatterPaCache skips slot -1.
 
     An offset-preserving contiguous alias avoids the old DSpark stride bug.
@@ -164,11 +184,20 @@ def scatter_fp8_cache(values, slots, cache):
         raise ValueError("Invalid QFM PA_NZ strides")
     span = (cache.shape[0] - 1) * stride + QFM_BLOCK * QFM_WIDTH
     alias = torch.as_strided(cache, (span // QFM_TILE, 1, 1, QFM_TILE), (32, 32, 32, 1))
-    ids = slots.to(torch.int64)
-    tile = torch.arange(QFM_WIDTH // QFM_TILE, device=values.device)
-    offsets = ids[:, None].div(QFM_BLOCK, rounding_mode="floor") * (stride // QFM_TILE)
-    offsets = offsets + tile[None, :] * QFM_BLOCK + ids[:, None].remainder(QFM_BLOCK)
-    offsets = torch.where(ids[:, None] >= 0, offsets, -1)
+    if scatter_plan is None:
+        offsets = build_scatter_offsets(slots, stride)
+    else:
+        offsets = scatter_plan.offsets
+        if (
+            scatter_plan.stride != stride
+            or scatter_plan.slots.data_ptr() != slots.data_ptr()
+            or scatter_plan.slots.shape != slots.shape
+            or offsets.shape != (slots.numel(), QFM_WIDTH // QFM_TILE)
+            or offsets.dtype != torch.int64
+            or offsets.device != cache.device
+            or not offsets.is_contiguous()
+        ):
+            raise ValueError("QFM Scatter plan must match the live slots and physical cache stride")
     torch_npu.npu_scatter_pa_cache(values.reshape(-1, 1, QFM_TILE).contiguous(), offsets.flatten(), key_cache=alias)
 
 
@@ -198,10 +227,15 @@ class QFMBatch:
     qfm_needed: bool = True
     # CPU scheduler stage ranges: (begin, end, is_prefill), including padding.
     preprocess_segments: tuple = ()
+    invalid: torch.Tensor | None = None
+    invisible: torch.Tensor | None = None
+    fia_mask: torch.Tensor | None = None
+    scatter_plan: QFMScatterPlan | None = None
+    prolog_kwargs: dict = field(default_factory=dict)
 
 
 class QFMMetadataBuilder:
-    def __init__(self, impl, device):
+    def __init__(self, impl, device, kv_cache_spec=None):
         self.device = device
         self.dcp_size = impl.vllm_config.parallel_config.decode_context_parallel_size
         self.dcp_rank = getattr(impl, "dcp_rank", 0)
@@ -213,6 +247,22 @@ class QFMMetadataBuilder:
         self.buffers = {}
         self.fia_prefill = getattr(impl, "qfm_fia_prefill", False)
         self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
+        self.fia_mask = self.mask.to(torch.bool) if self.fia_prefill else None
+        self.cache_stride = None
+        self.has_prolog = getattr(impl, "enable_mlapo", False)
+        self.scatter_possible = self.staging_required = False
+        self.scatter_tiles = None
+        if kv_cache_spec is not None:
+            ratio = kernel_pages_per_manager(kv_cache_spec.block_size)
+            physical_page = kv_cache_spec.page_size_padded or kv_cache_spec.page_size_bytes
+            if physical_page % ratio:
+                raise ValueError("QFM physical page does not split into equal kernel strides")
+            self.cache_stride = physical_page // ratio
+            gapped = self.cache_stride != QFM_BLOCK * QFM_WIDTH
+            self.scatter_possible = gapped or not self.has_prolog or not self.mlapo_prefill or self.fia_prefill
+            self.staging_required = self.has_prolog and (gapped or self.fia_prefill)
+            if self.scatter_possible:
+                self.scatter_tiles = torch.arange(QFM_WIDTH // QFM_TILE, device=device)
 
     def metadata(self, lengths, cu, used, max_q, mode):
         return self.metadata_op(
@@ -241,7 +291,7 @@ class QFMMetadataBuilder:
         # Eager prefill batches use <=16 rows per sequence, NOT small op calls.
         per_token = retain_for_graph or batch is not None or self.dcp_size > 1
         if per_token:
-            cu_cpu = list(range(tokens + 1))
+            rows = tokens
         else:
             bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
             cu_cpu = [0]
@@ -251,13 +301,13 @@ class QFMMetadataBuilder:
                     cu_cpu.append(begin)
             while cu_cpu[-1] < tokens:
                 cu_cpu.append(min(cu_cpu[-1] + QFM_MAX_Q, tokens))
-        rows = len(cu_cpu) - 1
+            rows = len(cu_cpu) - 1
         if not 0 < rows < 65536:
             raise ValueError("QFM virtual batch must contain 1..65535 rows")
         mode = 0 if per_token or not common.causal else 3
         ints = dict(dtype=torch.int32, device=self.device)
         if batch is None:
-            cu = torch.tensor(cu_cpu, **ints)
+            cu = torch.arange(rows + 1, **ints) if per_token else torch.tensor(cu_cpu, **ints)
             used, lengths = torch.zeros(rows, **ints), torch.zeros(rows, **ints)
             # Populate once after device lengths are ready. Do not invoke the
             # scheduling kernel twice or require a separate Meta registration.
@@ -276,22 +326,36 @@ class QFMMetadataBuilder:
                 1 if per_token else QFM_MAX_Q,
                 self.max_k,
                 False,
+                invalid=torch.empty(tokens, dtype=torch.bool, device=self.device),
+                invisible=torch.empty(tokens, dtype=torch.bool, device=self.device),
+                fia_mask=self.fia_mask,
             )
+            if self.scatter_possible:
+                batch.scatter_plan = QFMScatterPlan(
+                    batch.slots,
+                    torch.empty((tokens, QFM_WIDTH // QFM_TILE), dtype=torch.int64, device=self.device),
+                    self.cache_stride,
+                )
+                batch.prolog_kwargs["scatter_plan"] = batch.scatter_plan
+            if self.staging_required:
+                batch.prolog_kwargs["staging_indices"] = torch.arange(tokens, dtype=torch.int64, device=self.device)
             if retain_for_graph:
                 self.buffers[key] = batch
         # Only device lengths: DSpark rejection correction may not be mirrored
         # to CPU. Updates are on the caller's stream before graph replay.
         boundaries = common.query_start_loc[: common.num_reqs + 1].contiguous()
-        token_ids = torch.arange(tokens, device=self.device, dtype=torch.int32)
+        token_ids = batch.cu[:-1] if per_token else torch.arange(tokens, device=self.device, dtype=torch.int32)
         owners = torch.searchsorted(boundaries[1:], token_ids, right=True).clamp_max(common.num_reqs - 1).long()
         starts, ends = boundaries[owners], boundaries[owners + 1]
         seq = common.seq_lens[owners]
         live = (token_ids < common.num_actual_tokens) & (token_ids < ends) & (seq > 0)
         batch.live.copy_(live)
-        batch.slots.fill_(-1)
+        batch.invalid.copy_(~live)
         count = min(tokens, common.slot_mapping.numel())
+        if count < tokens:
+            batch.slots[count:].fill_(-1)
         batch.slots[:count].copy_(common.slot_mapping[:count])
-        batch.slots.masked_fill_(~live, -1)
+        batch.slots.masked_fill_(batch.invalid, -1)
         lengths_per_token = seq - (ends - starts) + token_ids - starts + 1 if common.causal else seq
         if self.dcp_size > 1:
             cycle = self.interleave * self.dcp_size
@@ -300,14 +364,23 @@ class QFMMetadataBuilder:
             ).clamp(0, self.interleave)
         lengths_per_token = torch.where(live, lengths_per_token.clamp_min(0), 0)
         batch.visible.copy_(live & (lengths_per_token > 0))
-        first = batch.cu[:-1].long()
-        row_owner = owners[first]
-        row_used = (ends[first] - batch.cu[:-1]).clamp_min(0)
-        row_used = torch.minimum(row_used, batch.cu[1:] - batch.cu[:-1])
-        row_used = torch.where(live[first], row_used, 0)
-        last = (batch.cu[:-1] + row_used - 1).clamp_min(0).long()
-        batch.used.copy_(row_used)
-        batch.lengths.copy_(torch.where(row_used > 0, lengths_per_token[last], 0))
+        batch.invisible.copy_(~batch.visible)
+        if per_token:
+            # Each virtual row contains exactly this token. The general
+            # first/last-token gathers reduce to identity, even for padding
+            # and DCP ranks with zero local history.
+            row_owner = owners
+            batch.used.copy_(live)
+            batch.lengths.copy_(lengths_per_token)
+        else:
+            first = batch.cu[:-1].long()
+            row_owner = owners[first]
+            row_used = (ends[first] - batch.cu[:-1]).clamp_min(0)
+            row_used = torch.minimum(row_used, batch.cu[1:] - batch.cu[:-1])
+            row_used = torch.where(live[first], row_used, 0)
+            last = (batch.cu[:-1] + row_used - 1).clamp_min(0).long()
+            batch.used.copy_(row_used)
+            batch.lengths.copy_(torch.where(row_used > 0, lengths_per_token[last], 0))
         batch.table.copy_(common.block_table_tensor[row_owner])
         flags = common.is_prefilling
         if flags is not None and flags.device.type != "cpu":
@@ -364,6 +437,10 @@ class QFMMetadataBuilder:
                 batch.used.masked_fill_(skip, 0)
                 batch.lengths.masked_fill_(skip, 0)
                 batch.qfm_needed = not bool(selected.all())
+        if batch.scatter_plan is not None and (
+            not self.has_prolog or self.cache_stride != QFM_BLOCK * QFM_WIDTH or batch.has_prefill
+        ):
+            batch.scatter_plan.offsets.copy_(build_scatter_offsets(batch.slots, self.cache_stride, self.scatter_tiles))
         schedule = self.metadata(batch.lengths, batch.cu, batch.used, batch.max_q, mode)
         if batch.schedule.numel() == 0:
             batch.schedule = schedule
@@ -430,7 +507,9 @@ def fill_fia_prefill(impl, q, kv, cache, batch, latent, lse):
     All ranks run the same final DCP merge. No per-query FIA loops, no dense
     Q-by-history index lists. Process one request at a time to bound workspace.
     """
-    mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.bool, device=q.device).triu_(1)
+    mask = getattr(batch, "fia_mask", None)
+    if mask is None:
+        mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.bool, device=q.device).triu_(1)
     for begin, end, history_length, table in batch.fia_requests:
         query = q[begin:end]
         history = read_fia_history(cache, table, history_length, impl.qfm_scale)
@@ -474,11 +553,11 @@ def forward_qfm(impl, hidden, cache, metadata, output):
         q, kv, q_scale, fia_q = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
     elif prolog is None:
         q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
-        write_cache(kv, batch.slots, cache, impl.qfm_scale)
+        write_cache(kv, batch.slots, cache, impl.qfm_scale, scatter_plan=batch.scatter_plan)
     elif batch.fia_requests:
-        q, kv = prolog.floating(hidden[:tokens].contiguous(), batch.slots, cache)
+        q, kv = prolog.floating(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
     else:
-        q, q_scale = prolog(hidden[:tokens].contiguous(), batch.slots, cache)
+        q, q_scale = prolog(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
     if impl.dcp_enabled:
         # HCCL byte gather preserves FP8 codes on implementations without
         # float8 collective dtype support. Gather the matching head scales.
@@ -501,7 +580,8 @@ def forward_qfm(impl, hidden, cache, metadata, output):
     if impl.dcp_enabled:
         latent = impl._merge_dcp_attention_output(latent, lse)
     projected = impl._v_up_proj_batch_major(latent)
-    projected = projected.masked_fill(~batch.live[:, None], 0)
+    invalid = batch.invalid if batch.invalid is not None else ~batch.live
+    projected = projected.masked_fill(invalid[:, None], 0)
     if impl.use_output_gate:
         projected = projected * torch.sigmoid(impl.g_proj(hidden.contiguous())[0][:tokens])
     result = impl.o_proj(projected, is_prefill=batch.has_prefill)[0]
@@ -522,7 +602,7 @@ def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
         raise ValueError("Missing scheduler stage ranges for Prefill MLAPO routing")
     if len(segments) == 1 and segments[0] == (0, tokens, True):
         q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
-        write_cache(kv, batch.slots, cache, impl.qfm_scale)
+        write_cache(kv, batch.slots, cache, impl.qfm_scale, scatter_plan=batch.scatter_plan)
         return q, kv, None, None
     # Byte views avoid relying on FP8 cat/indexing support on the installed PTA.
     q_bytes = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.uint8, device=hidden.device)
@@ -534,15 +614,21 @@ def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
     for begin, end, prefill in segments:
         chunk = hidden[begin:end].contiguous()
         slots = batch.slots[begin:end]
+        scatter_plan = batch.scatter_plan.slice(begin, end) if batch.scatter_plan is not None else None
         if prefill:
             chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
-            write_cache(chunk_kv, slots, cache, impl.qfm_scale)
+            write_cache(chunk_kv, slots, cache, impl.qfm_scale, scatter_plan=scatter_plan)
             if fia_q is not None:
                 fia_q[begin:end].copy_(chunk_q)
                 kv[begin:end].copy_(chunk_kv)
             chunk_q, chunk_scale = quantize_query(chunk_q)
         else:
-            chunk_q, chunk_scale = prolog(chunk, slots, cache)
+            kwargs = dict(batch.prolog_kwargs)
+            if scatter_plan is not None:
+                kwargs["scatter_plan"] = scatter_plan
+            if "staging_indices" in kwargs:
+                kwargs["staging_indices"] = kwargs["staging_indices"][: end - begin]
+            chunk_q, chunk_scale = prolog(chunk, slots, cache, **kwargs)
         q_bytes[begin:end].copy_(chunk_q.view(torch.uint8))
         q_scale[begin:end].copy_(chunk_scale)
     return q_bytes.view(torch.float8_e4m3fn), kv, q_scale, fia_q
@@ -583,9 +669,10 @@ def run_qfm_reader(impl, q, cache, batch, q_scale=None):
         layout_out="TND",
         return_softmax_lse=impl.dcp_enabled,
     )
-    latent = latent.masked_fill(~batch.visible[:, None, None], 0)
+    invisible = batch.invisible if batch.invisible is not None else ~batch.visible
+    latent = latent.masked_fill(invisible[:, None, None], 0)
     if impl.dcp_enabled:
-        lse = lse.T.masked_fill(~batch.visible[:, None], -float("inf")).unsqueeze(-1)
+        lse = lse.T.masked_fill(invisible[:, None], -float("inf")).unsqueeze(-1)
     elif batch.fia_requests:
         lse = torch.empty((*q.shape[:2], 1), device=q.device)
     return latent, lse

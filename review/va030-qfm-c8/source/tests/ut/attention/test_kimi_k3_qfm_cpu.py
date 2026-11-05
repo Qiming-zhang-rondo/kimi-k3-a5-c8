@@ -234,6 +234,84 @@ def test_dcp_per_query_prefix_not_naive_local_plus_one(qfm, monkeypatch, rank):
     assert result.table.shape[0] == 17
 
 
+def _per_token_reference(c, dcp_size, rank):
+    """Independent request/token ownership reference, including empty shards."""
+    bounds = c.query_start_loc_cpu.tolist()
+    lengths = c.seq_lens.tolist()
+    slots = c.slot_mapping.tolist()
+    owners, live, visible, used, local_lengths, mapped_slots = [], [], [], [], [], []
+    capacity = max(c.num_actual_tokens, c.num_input_tokens)
+    for token in range(capacity):
+        owner = next((i for i, end in enumerate(bounds[1:]) if token < end), c.num_reqs - 1)
+        active = token < c.num_actual_tokens and token < bounds[owner + 1] and lengths[owner] > 0
+        prefix = lengths[owner]
+        if c.causal:
+            prefix -= bounds[owner + 1] - token - 1
+        prefix = max(prefix, 0)
+        local = sum((position // 16) % dcp_size == rank for position in range(prefix))
+        local = local if active else 0
+        owners.append(owner)
+        live.append(active)
+        visible.append(active and local > 0)
+        used.append(int(active))
+        local_lengths.append(local)
+        mapped_slots.append(slots[token] if active and token < len(slots) else -1)
+    return dict(owners=owners, live=live, visible=visible, used=used, lengths=local_lengths, slots=mapped_slots)
+
+
+@pytest.mark.parametrize("dcp,rank,retained", [(1, 0, True), (2, 0, False), (2, 1, False), (4, 3, True)])
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize(
+    "queries,lengths,capacity",
+    [
+        ([1, 8], [127, 129], 16),
+        ([0, 4, 0, 2], [0, 129, 0, 17], 16),
+        ([1, 1], [1, 0], 8),
+        ([0], [0], 8),
+        ([17], [129], 32),
+    ],
+)
+def test_per_token_metadata_matches_request_reference(
+    qfm, monkeypatch, dcp, rank, retained, causal, queries, lengths, capacity
+):
+    b, _ = builder(qfm, monkeypatch, dcp=dcp, rank=rank)
+    c = common(queries, lengths, capacity)
+    c.causal = causal
+    # Distinct physical slots prevent confusing token IDs with cache addresses.
+    c.slot_mapping = torch.arange(c.num_actual_tokens, dtype=torch.int64).flip(0) + 128
+    expected = _per_token_reference(c, dcp, rank)
+    batch = b.build(c, retain_for_graph=retained)
+    assert batch.cu.tolist() == list(range(capacity + 1))
+    for name in ("live", "visible", "used", "lengths", "slots"):
+        assert getattr(batch, name).tolist() == expected[name], name
+    assert torch.equal(batch.table, c.block_table_tensor[expected["owners"]])
+    assert batch.mask_mode == 0 and batch.max_q == 1
+
+
+def test_per_token_refresh_clears_only_unprovided_slots_without_stale_values(qfm, monkeypatch):
+    b, _ = builder(qfm, monkeypatch)
+    first_input = common([8], [128], 8)
+    first = b.build(first_input, retain_for_graph=True)
+    pointers = {
+        name: getattr(first, name).data_ptr() for name in ("cu", "used", "lengths", "slots", "table", "schedule")
+    }
+    for queries, lengths, supplied_slots in [
+        ([4, 2], [129, 17], [100, 101, 102]),
+        ([1], [1], [300] * 8),
+        ([0], [0], []),
+        ([3, 5], [130, 200], list(reversed(range(8)))),
+    ]:
+        c = common(queries, lengths, 8)
+        c.slot_mapping = torch.tensor(supplied_slots, dtype=torch.int64)
+        expected = _per_token_reference(c, 1, 0)
+        result = b.build(c)
+        assert result is first
+        assert pointers == {name: getattr(result, name).data_ptr() for name in pointers}
+        for name in ("live", "visible", "used", "lengths", "slots"):
+            assert getattr(result, name).tolist() == expected[name], name
+        assert torch.equal(result.table, c.block_table_tensor[expected["owners"]])
+
+
 def test_official_unit_scale_is_internal_not_a_user_knob(qfm):
     assert qfm.QFM_KV_DESCALE == 1.0
     root = Path(__file__).resolve().parents[3]

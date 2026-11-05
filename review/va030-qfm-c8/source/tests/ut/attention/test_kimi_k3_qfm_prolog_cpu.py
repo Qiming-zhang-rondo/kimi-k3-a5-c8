@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.ut.attention.test_kimi_k3_qfm_blocks_cpu import prepared_metadata
 from tests.ut.attention.test_kimi_k3_qfm_cpu import builder, common
 from tests.ut.attention.test_kimi_k3_qfm_cpu import qfm as _qfm_fixture
 
@@ -99,6 +100,91 @@ def test_fused_writer_direct_or_staged_preserves_pages(prolog, qfm, monkeypatch,
     fused(hidden, torch.full_like(slots, -1), cache)
     assert torch.equal(before, backing)
     assert seen == ([0, 0] if gap else [1, 1])
+
+
+@pytest.mark.parametrize("mode", [0, 2])
+@pytest.mark.parametrize("gap", [0, 256])
+def test_precomputed_prolog_indices_and_scatter_plan_avoid_arange(prolog, qfm, monkeypatch, mode, gap):
+    tokens, offset, stride = 9, 256, 73728 + gap
+    backing = torch.full((offset + 3 * stride + 256,), 0x5A, dtype=torch.uint8)
+    cache = qfm.cache_view(backing[offset : offset + 3 * stride], 3, stride)
+    slots = torch.tensor([128, -1, 0, 383, 127, 7, 129, -1, -1])
+    staging = torch.arange(tokens, dtype=torch.int64)
+    plan = qfm.QFMScatterPlan(slots, qfm.build_scatter_offsets(slots, stride), stride)
+    saved_offsets = plan.offsets.clone()
+    hidden = torch.randn(tokens, 1024, dtype=torch.bfloat16)
+    rows = hidden[:, :576].float().clamp(-448, 448).to(torch.float8_e4m3fn)
+    expected = backing.clone()
+    qfm.write_cache(
+        hidden[:, :576], slots, qfm.cache_view(expected[offset : offset + 3 * stride], 3, stride), torch.ones(1)
+    )
+
+    def native(**kwargs):
+        indices, destination = kwargs["cache_index"], kwargs["kv_cache"]
+        assert kwargs["qkv_quant_mode"] == mode
+        if mode == 2 and gap == 0:
+            assert kwargs["cache_mode"] == 1
+            # Direct PA_NZ writes must keep the actual scheduler slots, not
+            # replace them with the immutable sequential staging indices.
+            assert indices is slots
+            qfm.scatter_fp8_cache(rows, indices, cache, scatter_plan=plan)
+        else:
+            assert kwargs["cache_mode"] == 0 and indices is staging
+            if mode == 0:
+                destination.view(-1, 576)[:tokens].copy_(hidden[:, :576])
+            else:
+                destination.view(torch.uint8).view(-1, 576)[:tokens].copy_(rows.view(torch.uint8))
+        return (
+            torch.zeros(tokens, 12, 576, dtype=torch.bfloat16 if mode == 0 else torch.float8_e4m3fn),
+            None if mode == 0 else torch.ones(tokens, 12, 1),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(prolog, "load_prolog", lambda: native)
+    fused = prolog.QFMProlog({}, torch.ones(1))
+
+    def forbidden_arange(*args, **kwargs):
+        raise AssertionError("Prepared Prolog paths must reuse indices and Scatter offsets")
+
+    monkeypatch.setattr(torch, "arange", forbidden_arange)
+    if mode == 0:
+        fused.floating(hidden, slots, cache, staging_indices=staging, scatter_plan=plan)
+    else:
+        fused(hidden, slots, cache, staging_indices=staging, scatter_plan=plan)
+    assert torch.equal(backing, expected)
+    assert torch.equal(plan.offsets, saved_offsets)
+
+
+@pytest.mark.parametrize("mode", [0, 2])
+@pytest.mark.parametrize("case", ["dtype", "length", "rank", "contiguous", "device"])
+def test_prolog_rejects_invalid_precomputed_indices_before_quantization(prolog, qfm, monkeypatch, mode, case):
+    hidden = torch.zeros(9, 1024, dtype=torch.bfloat16)
+    slots = torch.arange(9, dtype=torch.int64)
+    cache = qfm.cache_view(torch.zeros(73728, dtype=torch.uint8), 1, 73728)
+    staging = torch.arange(9, dtype=torch.int64)
+    if case == "dtype":
+        staging = staging.int()
+    elif case == "length":
+        staging = staging[:8]
+    elif case == "rank":
+        staging = staging.view(3, 3)
+    elif case == "contiguous":
+        staging = torch.arange(18, dtype=torch.int64)[::2]
+    elif case == "device":
+        staging = torch.empty(9, dtype=torch.int64, device="meta")
+    monkeypatch.setattr(prolog, "load_prolog", lambda: None)
+    fused = prolog.QFMProlog({}, torch.ones(1))
+
+    def forbidden_quant(*args, **kwargs):
+        raise AssertionError("Invalid metadata must fail before any device operation")
+
+    monkeypatch.setattr(sys.modules["torch_npu"], "npu_dynamic_mx_quant", forbidden_quant)
+    with pytest.raises(ValueError, match="staging_indices"):
+        if mode == 0:
+            fused.floating(hidden, slots, cache, staging_indices=staging)
+        else:
+            fused(hidden, slots, cache, staging_indices=staging)
 
 
 def test_weight_refresh_retains_addresses_and_validates_first(prolog, monkeypatch):
@@ -238,6 +324,82 @@ def test_stage_routing_preserves_scatter_slots_and_decode_mode2(qfm, monkeypatch
                     assert kv[begin:end].count_nonzero() == 0
         if not fia_prefill:
             assert kv is None and fia_q is None
+
+
+def test_mixed_stage_shared_plan_keeps_slot_slice_and_zero_based_staging(prolog, qfm, monkeypatch):
+    b = prepared_metadata(qfm, monkeypatch, manager=256, gap=256, mlapo=True, prefill_mlapo=False)
+    c = common([4, 9, 3], [132, 137, 131], capacity=20)
+    c.is_prefilling = torch.tensor([False, True, False])
+    c.slot_mapping = torch.tensor(
+        [128, -1, 0, 383, 127, 7, 129, 255, 4, 256, 257, 300, -1, 380, 2, 200, -1, -1, -1, -1]
+    )
+    batch = b.build(c)
+    assert batch.preprocess_segments == ((0, 4, False), (4, 13, True), (13, 20, False))
+    assert batch.scatter_plan is not None
+    staging = batch.prolog_kwargs["staging_indices"]
+    hidden = torch.randn(20, 1024, dtype=torch.bfloat16)
+    offset, stride = 256, 73728 + 256
+    raw = torch.full((offset + 4 * stride + 256,), 0x6B, dtype=torch.uint8)
+    cache = qfm.cache_view(raw[offset : offset + 4 * stride], 4, stride)
+    expected = raw.clone()
+    qfm.write_cache(
+        hidden[:, :576],
+        batch.slots,
+        qfm.cache_view(expected[offset : offset + 4 * stride], 4, stride),
+        torch.ones(1),
+    )
+    native_calls, observed_ranges = [], []
+    decode_ranges = [(0, 4), (13, 20)]
+
+    def native(**kw):
+        count = kw["x"].shape[0]
+        indices, destination = kw["cache_index"], kw["kv_cache"]
+        assert kw["qkv_quant_mode"] == 2 and kw["cache_mode"] == 0
+        # Every fresh temporary Cache starts at zero, including Decode at
+        # global row 13. A slice [begin:end] here would corrupt/skip its rows.
+        assert indices.data_ptr() == staging.data_ptr()
+        assert indices.storage_offset() == staging.storage_offset()
+        assert indices.tolist() == list(range(count))
+        assert destination.data_ptr() != cache.data_ptr()
+        rows = kw["x"].view(torch.uint8)[:, :576].contiguous()
+        destination.view(torch.uint8).view(-1, 576)[:count].copy_(rows)
+        native_calls.append(count)
+        return rows[:, None, :].repeat(1, 12, 1).view(torch.float8_e4m3fn), torch.full((count, 12, 1), 0.25), None, None
+
+    monkeypatch.setattr(prolog, "load_prolog", lambda: native)
+    fused = prolog.QFMProlog({}, torch.ones(1))
+
+    class ObservedProlog:
+        def __call__(self, chunk, slots, destination, *, staging_indices, scatter_plan):
+            begin, end = decode_ranges[len(observed_ranges)]
+            assert slots.data_ptr() == batch.slots[begin:end].data_ptr()
+            assert torch.equal(slots, batch.slots[begin:end])
+            assert scatter_plan.slots.data_ptr() == slots.data_ptr()
+            assert scatter_plan.offsets.data_ptr() == batch.scatter_plan.offsets[begin:end].data_ptr()
+            assert torch.equal(scatter_plan.offsets, batch.scatter_plan.offsets[begin:end])
+            assert scatter_plan.stride == stride
+            assert staging_indices.shape == (end - begin,)
+            assert staging_indices.data_ptr() == staging.data_ptr()
+            observed_ranges.append((begin, end))
+            return fused(chunk, slots, destination, staging_indices=staging_indices, scatter_plan=scatter_plan)
+
+        def floating(self, *args, **kwargs):
+            raise AssertionError("Decode must not downgrade to mode0")
+
+    def ordinary(impl, chunk, count):
+        assert count == 9
+        return chunk[:, None, :576].repeat(1, 12, 1), chunk[:, :576]
+
+    monkeypatch.setattr(qfm, "ordinary_qfm_inputs", ordinary)
+    impl = SimpleNamespace(qfm_scale=torch.ones(1), num_heads=12)
+    q, kv, scales, fia_q = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, ObservedProlog())
+    assert observed_ranges == decode_ranges and native_calls == [4, 7]
+    assert q.dtype == torch.float8_e4m3fn and scales.shape == (20, 12)
+    assert (scales[:4] == 0.25).all() and (scales[13:] == 0.25).all()
+    assert kv is None and fia_q is None
+    # Full backing equality includes offset guards, every per-page padding
+    # interval, invalid slots, unselected history and the trailing guard.
+    assert torch.equal(raw, expected)
 
 
 @pytest.mark.parametrize("prefill", [False, True])

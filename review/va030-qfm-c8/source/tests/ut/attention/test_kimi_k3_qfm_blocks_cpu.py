@@ -292,6 +292,117 @@ def test_select_qfm_rejects_non_kernel_multiples(qfm, manager_block):
         qfm.select_qfm(impl, config)
 
 
+def prepared_metadata(qfm, monkeypatch, manager=256, gap=256, mlapo=True, prefill_mlapo=False, fia=False):
+    impl, _ = selection_inputs(manager)
+    impl.enable_mlapo = mlapo
+    impl.qfm_mlapo_prefill = prefill_mlapo
+    impl.qfm_fia_prefill = fia
+    impl.vllm_config.model_config.max_model_len = 2048
+    impl.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
+    ratio = manager // KERNEL_BLOCK
+    page_bytes = ratio * (KERNEL_BLOCK * WIDTH + gap)
+    spec = SimpleNamespace(block_size=manager, page_size_bytes=page_bytes, page_size_padded=page_bytes)
+    monkeypatch.setattr(qfm, "load_ops", lambda: (None, lambda lengths, *args, **kwargs: lengths.clone()))
+    return qfm.QFMMetadataBuilder(impl, torch.device("cpu"), spec)
+
+
+@pytest.mark.parametrize("manager,gap", [(128, 0), (256, 256), (768, 1024)])
+def test_shared_scatter_plan_reused_across_layers_without_new_indices(qfm, monkeypatch, manager, gap):
+    b = prepared_metadata(qfm, monkeypatch, manager, gap, mlapo=False)
+    c = base.common([4, 5], [132, 133], capacity=12)
+    c.slot_mapping = torch.tensor([128, 3, 255, 0, 130, 127, 1, 129, 2])
+    batch = b.build(c, retain_for_graph=True)
+    stride = 73728 + gap
+    assert batch.scatter_plan.stride == stride
+    assert torch.equal(batch.scatter_plan.offsets, qfm.build_scatter_offsets(batch.slots, stride))
+    raw = torch.full((256 + 2 * stride + 256,), 0x6B, dtype=torch.uint8)
+    cache = qfm.cache_view(raw[256 : 256 + 2 * stride], 2, stride)
+    reference = raw.clone()
+    rows = torch.randn(12, WIDTH)
+    qfm.write_cache(rows, batch.slots, qfm.cache_view(reference[256 : 256 + 2 * stride], 2, stride), torch.ones(1))
+    offsets_ptr = batch.scatter_plan.offsets.data_ptr()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Layer writer must reuse group offsets")
+
+    monkeypatch.setattr(qfm, "build_scatter_offsets", forbidden)
+    monkeypatch.setattr(torch, "arange", forbidden)
+    for _ in range(3):
+        qfm.write_cache(rows, batch.slots, cache, torch.ones(1), scatter_plan=batch.scatter_plan)
+        assert torch.equal(raw, reference)
+        assert batch.scatter_plan.offsets.data_ptr() == offsets_ptr
+    qfm.write_cache(rows[4:], batch.slots[4:], cache, torch.ones(1), scatter_plan=batch.scatter_plan.slice(4, 12))
+    assert torch.equal(raw, reference)
+
+
+def test_retained_shared_buffers_refresh_without_rebinding(qfm, monkeypatch):
+    b = prepared_metadata(qfm, monkeypatch, fia=True)
+    c = base.common([4], [132], capacity=8)
+    batch = b.build(c, retain_for_graph=True)
+    ptrs = (
+        batch.scatter_plan.offsets.data_ptr(),
+        batch.invalid.data_ptr(),
+        batch.invisible.data_ptr(),
+        batch.prolog_kwargs["staging_indices"].data_ptr(),
+        batch.fia_mask.data_ptr(),
+    )
+    c.seq_lens[:] = 0
+    c.slot_mapping = torch.tensor([255, 128])
+    updated = b.build(c)
+    assert updated is batch
+    assert ptrs == (
+        batch.scatter_plan.offsets.data_ptr(),
+        batch.invalid.data_ptr(),
+        batch.invisible.data_ptr(),
+        batch.prolog_kwargs["staging_indices"].data_ptr(),
+        batch.fia_mask.data_ptr(),
+    )
+    assert batch.invalid.all() and batch.invisible.all()
+    assert (batch.scatter_plan.offsets == -1).all()
+    c.seq_lens[:] = 132
+    b.build(c)
+    assert torch.equal(batch.invalid, ~batch.live)
+    assert torch.equal(batch.invisible, ~batch.visible)
+    assert torch.equal(batch.scatter_plan.offsets, qfm.build_scatter_offsets(batch.slots, b.cache_stride))
+    assert torch.equal(batch.prolog_kwargs["staging_indices"], torch.arange(8))
+    assert batch.fia_mask.dtype == torch.bool
+    assert torch.equal(batch.fia_mask, b.mask.bool())
+
+
+@pytest.mark.parametrize("wrong", ["stride", "slots", "dtype", "shape"])
+def test_shared_scatter_plan_rejects_mismatched_geometry(qfm, wrong):
+    slots = torch.tensor([0, 129])
+    cache = qfm.cache_view(torch.zeros(2 * 73728, dtype=torch.uint8), 2, 73728)
+    offsets = qfm.build_scatter_offsets(slots, 73728)
+    plan = qfm.QFMScatterPlan(slots, offsets, 73728)
+    if wrong == "stride":
+        plan.stride += 32
+    elif wrong == "slots":
+        plan.slots = slots.clone()
+    elif wrong == "dtype":
+        plan.offsets = offsets.int()
+    else:
+        plan.offsets = offsets[:, :1]
+    before = cache.view(torch.uint8).clone()
+    with pytest.raises(ValueError, match="Scatter plan"):
+        qfm.scatter_fp8_cache(torch.zeros(2, WIDTH).to(torch.float8_e4m3fn), slots, cache, scatter_plan=plan)
+    assert torch.equal(cache.view(torch.uint8), before)
+
+
+def test_direct_mode2_decode_does_not_prepare_unused_scatter(qfm, monkeypatch):
+    b = prepared_metadata(qfm, monkeypatch, gap=0, mlapo=True, prefill_mlapo=False)
+    c = base.common([4], [132], capacity=8)
+    c.is_prefilling.fill_(False)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Direct mode2 Decode does not use Scatter offsets")
+
+    monkeypatch.setattr(qfm, "build_scatter_offsets", forbidden)
+    batch = b.build(c, retain_for_graph=True)
+    assert not batch.has_prefill
+    assert "staging_indices" not in batch.prolog_kwargs
+
+
 def expanded_table(manager_ids, ratio=4):
     """Stand in for MRV2's already-completed manager-to-kernel conversion."""
     return torch.tensor(

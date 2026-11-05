@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/docs/source/developer_guide/kimi_k3_qfm_c8.md
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,253 @@
 +# Kimi K3 full576 FP8 QFM candidate
 +
 +## Local experimental FIA Prefill variant (not the published bb79bb2 installer)
@@ -209,6 +209,26 @@
 +byte-exact Decode Q/scales and Capture→Prefill→Decode metadata refresh. These
 +do not validate real NPU graph replay, native numerical equivalence, DSpark
 +acceptance or an end-to-end performance recovery.
++
++### Shared batch preparation
++
++The attention metadata builder prepares ordinary-writer NZ Scatter addresses,
++invalid/empty-row masks and temporary-Cache staging indices once per batch.
++MLA layers reuse them instead of rebuilding the same integer tensors. The
++addresses include the actual physical page stride and preserve negative slots,
++page gaps and storage offsets. Mixed-stage slices share the corresponding
++address range; temporary-Cache indices always start at zero. Contiguous mode2
++Decode writes directly through Prolog and does not compute unused Scatter
++addresses. Retained graph metadata keeps the shared buffers at stable addresses
++and refreshes their values before replay.
++
++Single-query virtual rows also reuse the retained cumulative lengths and copy
++their live/visible lengths directly, without constructing CPU range lists or
++repeating per-layer mask inversions. FIA's fixed boolean causal mask is reused.
++These changes preserve quantization, stage selection and native operators;
++they do not establish that host preparation caused an observed Event Wait or
++that TPOT has recovered. NPU timing and end-to-end DSpark acceptance remain
++necessary. No native package rebuild is needed for these Python changes.
 +
 +Both P and D must install this revision and enable QFM C8. Use the built-in
 +`MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
@@ -515,7 +535,7 @@
 +    main()
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,485 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""CPU manager-block geometry contracts, not NPU/graph execution acceptance."""
 +
@@ -810,6 +830,117 @@
 +        qfm.select_qfm(impl, config)
 +
 +
++def prepared_metadata(qfm, monkeypatch, manager=256, gap=256, mlapo=True, prefill_mlapo=False, fia=False):
++    impl, _ = selection_inputs(manager)
++    impl.enable_mlapo = mlapo
++    impl.qfm_mlapo_prefill = prefill_mlapo
++    impl.qfm_fia_prefill = fia
++    impl.vllm_config.model_config.max_model_len = 2048
++    impl.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
++    ratio = manager // KERNEL_BLOCK
++    page_bytes = ratio * (KERNEL_BLOCK * WIDTH + gap)
++    spec = SimpleNamespace(block_size=manager, page_size_bytes=page_bytes, page_size_padded=page_bytes)
++    monkeypatch.setattr(qfm, "load_ops", lambda: (None, lambda lengths, *args, **kwargs: lengths.clone()))
++    return qfm.QFMMetadataBuilder(impl, torch.device("cpu"), spec)
++
++
++@pytest.mark.parametrize("manager,gap", [(128, 0), (256, 256), (768, 1024)])
++def test_shared_scatter_plan_reused_across_layers_without_new_indices(qfm, monkeypatch, manager, gap):
++    b = prepared_metadata(qfm, monkeypatch, manager, gap, mlapo=False)
++    c = base.common([4, 5], [132, 133], capacity=12)
++    c.slot_mapping = torch.tensor([128, 3, 255, 0, 130, 127, 1, 129, 2])
++    batch = b.build(c, retain_for_graph=True)
++    stride = 73728 + gap
++    assert batch.scatter_plan.stride == stride
++    assert torch.equal(batch.scatter_plan.offsets, qfm.build_scatter_offsets(batch.slots, stride))
++    raw = torch.full((256 + 2 * stride + 256,), 0x6B, dtype=torch.uint8)
++    cache = qfm.cache_view(raw[256 : 256 + 2 * stride], 2, stride)
++    reference = raw.clone()
++    rows = torch.randn(12, WIDTH)
++    qfm.write_cache(rows, batch.slots, qfm.cache_view(reference[256 : 256 + 2 * stride], 2, stride), torch.ones(1))
++    offsets_ptr = batch.scatter_plan.offsets.data_ptr()
++
++    def forbidden(*args, **kwargs):
++        raise AssertionError("Layer writer must reuse group offsets")
++
++    monkeypatch.setattr(qfm, "build_scatter_offsets", forbidden)
++    monkeypatch.setattr(torch, "arange", forbidden)
++    for _ in range(3):
++        qfm.write_cache(rows, batch.slots, cache, torch.ones(1), scatter_plan=batch.scatter_plan)
++        assert torch.equal(raw, reference)
++        assert batch.scatter_plan.offsets.data_ptr() == offsets_ptr
++    qfm.write_cache(rows[4:], batch.slots[4:], cache, torch.ones(1), scatter_plan=batch.scatter_plan.slice(4, 12))
++    assert torch.equal(raw, reference)
++
++
++def test_retained_shared_buffers_refresh_without_rebinding(qfm, monkeypatch):
++    b = prepared_metadata(qfm, monkeypatch, fia=True)
++    c = base.common([4], [132], capacity=8)
++    batch = b.build(c, retain_for_graph=True)
++    ptrs = (
++        batch.scatter_plan.offsets.data_ptr(),
++        batch.invalid.data_ptr(),
++        batch.invisible.data_ptr(),
++        batch.prolog_kwargs["staging_indices"].data_ptr(),
++        batch.fia_mask.data_ptr(),
++    )
++    c.seq_lens[:] = 0
++    c.slot_mapping = torch.tensor([255, 128])
++    updated = b.build(c)
++    assert updated is batch
++    assert ptrs == (
++        batch.scatter_plan.offsets.data_ptr(),
++        batch.invalid.data_ptr(),
++        batch.invisible.data_ptr(),
++        batch.prolog_kwargs["staging_indices"].data_ptr(),
++        batch.fia_mask.data_ptr(),
++    )
++    assert batch.invalid.all() and batch.invisible.all()
++    assert (batch.scatter_plan.offsets == -1).all()
++    c.seq_lens[:] = 132
++    b.build(c)
++    assert torch.equal(batch.invalid, ~batch.live)
++    assert torch.equal(batch.invisible, ~batch.visible)
++    assert torch.equal(batch.scatter_plan.offsets, qfm.build_scatter_offsets(batch.slots, b.cache_stride))
++    assert torch.equal(batch.prolog_kwargs["staging_indices"], torch.arange(8))
++    assert batch.fia_mask.dtype == torch.bool
++    assert torch.equal(batch.fia_mask, b.mask.bool())
++
++
++@pytest.mark.parametrize("wrong", ["stride", "slots", "dtype", "shape"])
++def test_shared_scatter_plan_rejects_mismatched_geometry(qfm, wrong):
++    slots = torch.tensor([0, 129])
++    cache = qfm.cache_view(torch.zeros(2 * 73728, dtype=torch.uint8), 2, 73728)
++    offsets = qfm.build_scatter_offsets(slots, 73728)
++    plan = qfm.QFMScatterPlan(slots, offsets, 73728)
++    if wrong == "stride":
++        plan.stride += 32
++    elif wrong == "slots":
++        plan.slots = slots.clone()
++    elif wrong == "dtype":
++        plan.offsets = offsets.int()
++    else:
++        plan.offsets = offsets[:, :1]
++    before = cache.view(torch.uint8).clone()
++    with pytest.raises(ValueError, match="Scatter plan"):
++        qfm.scatter_fp8_cache(torch.zeros(2, WIDTH).to(torch.float8_e4m3fn), slots, cache, scatter_plan=plan)
++    assert torch.equal(cache.view(torch.uint8), before)
++
++
++def test_direct_mode2_decode_does_not_prepare_unused_scatter(qfm, monkeypatch):
++    b = prepared_metadata(qfm, monkeypatch, gap=0, mlapo=True, prefill_mlapo=False)
++    c = base.common([4], [132], capacity=8)
++    c.is_prefilling.fill_(False)
++
++    def forbidden(*args, **kwargs):
++        raise AssertionError("Direct mode2 Decode does not use Scatter offsets")
++
++    monkeypatch.setattr(qfm, "build_scatter_offsets", forbidden)
++    batch = b.build(c, retain_for_graph=True)
++    assert not batch.has_prefill
++    assert "staging_indices" not in batch.prolog_kwargs
++
++
 +def expanded_table(manager_ids, ratio=4):
 +    """Stand in for MRV2's already-completed manager-to-kernel conversion."""
 +    return torch.tensor(
@@ -892,7 +1023,7 @@
 +    assert len(calls) == len(refreshes) + 1
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_cpu.py
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,385 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""CPU contracts only. No claim of NPU or distributed acceptance."""
 +
@@ -1127,6 +1258,84 @@
 +    assert result.lengths.tolist() == expected
 +    assert result.mask_mode == 0 and result.max_q == 1
 +    assert result.table.shape[0] == 17
++
++
++def _per_token_reference(c, dcp_size, rank):
++    """Independent request/token ownership reference, including empty shards."""
++    bounds = c.query_start_loc_cpu.tolist()
++    lengths = c.seq_lens.tolist()
++    slots = c.slot_mapping.tolist()
++    owners, live, visible, used, local_lengths, mapped_slots = [], [], [], [], [], []
++    capacity = max(c.num_actual_tokens, c.num_input_tokens)
++    for token in range(capacity):
++        owner = next((i for i, end in enumerate(bounds[1:]) if token < end), c.num_reqs - 1)
++        active = token < c.num_actual_tokens and token < bounds[owner + 1] and lengths[owner] > 0
++        prefix = lengths[owner]
++        if c.causal:
++            prefix -= bounds[owner + 1] - token - 1
++        prefix = max(prefix, 0)
++        local = sum((position // 16) % dcp_size == rank for position in range(prefix))
++        local = local if active else 0
++        owners.append(owner)
++        live.append(active)
++        visible.append(active and local > 0)
++        used.append(int(active))
++        local_lengths.append(local)
++        mapped_slots.append(slots[token] if active and token < len(slots) else -1)
++    return dict(owners=owners, live=live, visible=visible, used=used, lengths=local_lengths, slots=mapped_slots)
++
++
++@pytest.mark.parametrize("dcp,rank,retained", [(1, 0, True), (2, 0, False), (2, 1, False), (4, 3, True)])
++@pytest.mark.parametrize("causal", [True, False])
++@pytest.mark.parametrize(
++    "queries,lengths,capacity",
++    [
++        ([1, 8], [127, 129], 16),
++        ([0, 4, 0, 2], [0, 129, 0, 17], 16),
++        ([1, 1], [1, 0], 8),
++        ([0], [0], 8),
++        ([17], [129], 32),
++    ],
++)
++def test_per_token_metadata_matches_request_reference(
++    qfm, monkeypatch, dcp, rank, retained, causal, queries, lengths, capacity
++):
++    b, _ = builder(qfm, monkeypatch, dcp=dcp, rank=rank)
++    c = common(queries, lengths, capacity)
++    c.causal = causal
++    # Distinct physical slots prevent confusing token IDs with cache addresses.
++    c.slot_mapping = torch.arange(c.num_actual_tokens, dtype=torch.int64).flip(0) + 128
++    expected = _per_token_reference(c, dcp, rank)
++    batch = b.build(c, retain_for_graph=retained)
++    assert batch.cu.tolist() == list(range(capacity + 1))
++    for name in ("live", "visible", "used", "lengths", "slots"):
++        assert getattr(batch, name).tolist() == expected[name], name
++    assert torch.equal(batch.table, c.block_table_tensor[expected["owners"]])
++    assert batch.mask_mode == 0 and batch.max_q == 1
++
++
++def test_per_token_refresh_clears_only_unprovided_slots_without_stale_values(qfm, monkeypatch):
++    b, _ = builder(qfm, monkeypatch)
++    first_input = common([8], [128], 8)
++    first = b.build(first_input, retain_for_graph=True)
++    pointers = {
++        name: getattr(first, name).data_ptr() for name in ("cu", "used", "lengths", "slots", "table", "schedule")
++    }
++    for queries, lengths, supplied_slots in [
++        ([4, 2], [129, 17], [100, 101, 102]),
++        ([1], [1], [300] * 8),
++        ([0], [0], []),
++        ([3, 5], [130, 200], list(reversed(range(8)))),
++    ]:
++        c = common(queries, lengths, 8)
++        c.slot_mapping = torch.tensor(supplied_slots, dtype=torch.int64)
++        expected = _per_token_reference(c, 1, 0)
++        result = b.build(c)
++        assert result is first
++        assert pointers == {name: getattr(result, name).data_ptr() for name in pointers}
++        for name in ("live", "visible", "used", "lengths", "slots"):
++            assert getattr(result, name).tolist() == expected[name], name
++        assert torch.equal(result.table, c.block_table_tensor[expected["owners"]])
 +
 +
 +def test_official_unit_scale_is_internal_not_a_user_knob(qfm):
@@ -1450,7 +1659,7 @@
 +        assert len(seen) == total // local_dcp // 128
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,565 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Adapter contracts only; mocks are NOT native Prolog/HCCL acceptance."""
 +
@@ -1462,6 +1671,7 @@
 +import pytest
 +import torch
 +
++from tests.ut.attention.test_kimi_k3_qfm_blocks_cpu import prepared_metadata
 +from tests.ut.attention.test_kimi_k3_qfm_cpu import builder, common
 +from tests.ut.attention.test_kimi_k3_qfm_cpu import qfm as _qfm_fixture
 +
@@ -1552,6 +1762,91 @@
 +    fused(hidden, torch.full_like(slots, -1), cache)
 +    assert torch.equal(before, backing)
 +    assert seen == ([0, 0] if gap else [1, 1])
++
++
++@pytest.mark.parametrize("mode", [0, 2])
++@pytest.mark.parametrize("gap", [0, 256])
++def test_precomputed_prolog_indices_and_scatter_plan_avoid_arange(prolog, qfm, monkeypatch, mode, gap):
++    tokens, offset, stride = 9, 256, 73728 + gap
++    backing = torch.full((offset + 3 * stride + 256,), 0x5A, dtype=torch.uint8)
++    cache = qfm.cache_view(backing[offset : offset + 3 * stride], 3, stride)
++    slots = torch.tensor([128, -1, 0, 383, 127, 7, 129, -1, -1])
++    staging = torch.arange(tokens, dtype=torch.int64)
++    plan = qfm.QFMScatterPlan(slots, qfm.build_scatter_offsets(slots, stride), stride)
++    saved_offsets = plan.offsets.clone()
++    hidden = torch.randn(tokens, 1024, dtype=torch.bfloat16)
++    rows = hidden[:, :576].float().clamp(-448, 448).to(torch.float8_e4m3fn)
++    expected = backing.clone()
++    qfm.write_cache(
++        hidden[:, :576], slots, qfm.cache_view(expected[offset : offset + 3 * stride], 3, stride), torch.ones(1)
++    )
++
++    def native(**kwargs):
++        indices, destination = kwargs["cache_index"], kwargs["kv_cache"]
++        assert kwargs["qkv_quant_mode"] == mode
++        if mode == 2 and gap == 0:
++            assert kwargs["cache_mode"] == 1
++            # Direct PA_NZ writes must keep the actual scheduler slots, not
++            # replace them with the immutable sequential staging indices.
++            assert indices is slots
++            qfm.scatter_fp8_cache(rows, indices, cache, scatter_plan=plan)
++        else:
++            assert kwargs["cache_mode"] == 0 and indices is staging
++            if mode == 0:
++                destination.view(-1, 576)[:tokens].copy_(hidden[:, :576])
++            else:
++                destination.view(torch.uint8).view(-1, 576)[:tokens].copy_(rows.view(torch.uint8))
++        return (
++            torch.zeros(tokens, 12, 576, dtype=torch.bfloat16 if mode == 0 else torch.float8_e4m3fn),
++            None if mode == 0 else torch.ones(tokens, 12, 1),
++            None,
++            None,
++        )
++
++    monkeypatch.setattr(prolog, "load_prolog", lambda: native)
++    fused = prolog.QFMProlog({}, torch.ones(1))
++
++    def forbidden_arange(*args, **kwargs):
++        raise AssertionError("Prepared Prolog paths must reuse indices and Scatter offsets")
++
++    monkeypatch.setattr(torch, "arange", forbidden_arange)
++    if mode == 0:
++        fused.floating(hidden, slots, cache, staging_indices=staging, scatter_plan=plan)
++    else:
++        fused(hidden, slots, cache, staging_indices=staging, scatter_plan=plan)
++    assert torch.equal(backing, expected)
++    assert torch.equal(plan.offsets, saved_offsets)
++
++
++@pytest.mark.parametrize("mode", [0, 2])
++@pytest.mark.parametrize("case", ["dtype", "length", "rank", "contiguous", "device"])
++def test_prolog_rejects_invalid_precomputed_indices_before_quantization(prolog, qfm, monkeypatch, mode, case):
++    hidden = torch.zeros(9, 1024, dtype=torch.bfloat16)
++    slots = torch.arange(9, dtype=torch.int64)
++    cache = qfm.cache_view(torch.zeros(73728, dtype=torch.uint8), 1, 73728)
++    staging = torch.arange(9, dtype=torch.int64)
++    if case == "dtype":
++        staging = staging.int()
++    elif case == "length":
++        staging = staging[:8]
++    elif case == "rank":
++        staging = staging.view(3, 3)
++    elif case == "contiguous":
++        staging = torch.arange(18, dtype=torch.int64)[::2]
++    elif case == "device":
++        staging = torch.empty(9, dtype=torch.int64, device="meta")
++    monkeypatch.setattr(prolog, "load_prolog", lambda: None)
++    fused = prolog.QFMProlog({}, torch.ones(1))
++
++    def forbidden_quant(*args, **kwargs):
++        raise AssertionError("Invalid metadata must fail before any device operation")
++
++    monkeypatch.setattr(sys.modules["torch_npu"], "npu_dynamic_mx_quant", forbidden_quant)
++    with pytest.raises(ValueError, match="staging_indices"):
++        if mode == 0:
++            fused.floating(hidden, slots, cache, staging_indices=staging)
++        else:
++            fused(hidden, slots, cache, staging_indices=staging)
 +
 +
 +def test_weight_refresh_retains_addresses_and_validates_first(prolog, monkeypatch):
@@ -1691,6 +1986,82 @@
 +                    assert kv[begin:end].count_nonzero() == 0
 +        if not fia_prefill:
 +            assert kv is None and fia_q is None
++
++
++def test_mixed_stage_shared_plan_keeps_slot_slice_and_zero_based_staging(prolog, qfm, monkeypatch):
++    b = prepared_metadata(qfm, monkeypatch, manager=256, gap=256, mlapo=True, prefill_mlapo=False)
++    c = common([4, 9, 3], [132, 137, 131], capacity=20)
++    c.is_prefilling = torch.tensor([False, True, False])
++    c.slot_mapping = torch.tensor(
++        [128, -1, 0, 383, 127, 7, 129, 255, 4, 256, 257, 300, -1, 380, 2, 200, -1, -1, -1, -1]
++    )
++    batch = b.build(c)
++    assert batch.preprocess_segments == ((0, 4, False), (4, 13, True), (13, 20, False))
++    assert batch.scatter_plan is not None
++    staging = batch.prolog_kwargs["staging_indices"]
++    hidden = torch.randn(20, 1024, dtype=torch.bfloat16)
++    offset, stride = 256, 73728 + 256
++    raw = torch.full((offset + 4 * stride + 256,), 0x6B, dtype=torch.uint8)
++    cache = qfm.cache_view(raw[offset : offset + 4 * stride], 4, stride)
++    expected = raw.clone()
++    qfm.write_cache(
++        hidden[:, :576],
++        batch.slots,
++        qfm.cache_view(expected[offset : offset + 4 * stride], 4, stride),
++        torch.ones(1),
++    )
++    native_calls, observed_ranges = [], []
++    decode_ranges = [(0, 4), (13, 20)]
++
++    def native(**kw):
++        count = kw["x"].shape[0]
++        indices, destination = kw["cache_index"], kw["kv_cache"]
++        assert kw["qkv_quant_mode"] == 2 and kw["cache_mode"] == 0
++        # Every fresh temporary Cache starts at zero, including Decode at
++        # global row 13. A slice [begin:end] here would corrupt/skip its rows.
++        assert indices.data_ptr() == staging.data_ptr()
++        assert indices.storage_offset() == staging.storage_offset()
++        assert indices.tolist() == list(range(count))
++        assert destination.data_ptr() != cache.data_ptr()
++        rows = kw["x"].view(torch.uint8)[:, :576].contiguous()
++        destination.view(torch.uint8).view(-1, 576)[:count].copy_(rows)
++        native_calls.append(count)
++        return rows[:, None, :].repeat(1, 12, 1).view(torch.float8_e4m3fn), torch.full((count, 12, 1), 0.25), None, None
++
++    monkeypatch.setattr(prolog, "load_prolog", lambda: native)
++    fused = prolog.QFMProlog({}, torch.ones(1))
++
++    class ObservedProlog:
++        def __call__(self, chunk, slots, destination, *, staging_indices, scatter_plan):
++            begin, end = decode_ranges[len(observed_ranges)]
++            assert slots.data_ptr() == batch.slots[begin:end].data_ptr()
++            assert torch.equal(slots, batch.slots[begin:end])
++            assert scatter_plan.slots.data_ptr() == slots.data_ptr()
++            assert scatter_plan.offsets.data_ptr() == batch.scatter_plan.offsets[begin:end].data_ptr()
++            assert torch.equal(scatter_plan.offsets, batch.scatter_plan.offsets[begin:end])
++            assert scatter_plan.stride == stride
++            assert staging_indices.shape == (end - begin,)
++            assert staging_indices.data_ptr() == staging.data_ptr()
++            observed_ranges.append((begin, end))
++            return fused(chunk, slots, destination, staging_indices=staging_indices, scatter_plan=scatter_plan)
++
++        def floating(self, *args, **kwargs):
++            raise AssertionError("Decode must not downgrade to mode0")
++
++    def ordinary(impl, chunk, count):
++        assert count == 9
++        return chunk[:, None, :576].repeat(1, 12, 1), chunk[:, :576]
++
++    monkeypatch.setattr(qfm, "ordinary_qfm_inputs", ordinary)
++    impl = SimpleNamespace(qfm_scale=torch.ones(1), num_heads=12)
++    q, kv, scales, fia_q = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, ObservedProlog())
++    assert observed_ranges == decode_ranges and native_calls == [4, 7]
++    assert q.dtype == torch.float8_e4m3fn and scales.shape == (20, 12)
++    assert (scales[:4] == 0.25).all() and (scales[13:] == 0.25).all()
++    assert kv is None and fia_q is None
++    # Full backing equality includes offset guards, every per-page padding
++    # interval, invalid slots, unselected history and the trailing guard.
++    assert torch.equal(raw, expected)
 +
 +
 +@pytest.mark.parametrize("prefill", [False, True])
@@ -2315,7 +2686,7 @@
          if self.dcp_enabled and (
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm.py
-@@ -0,0 +1,591 @@
+@@ -0,0 +1,678 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Opt-in K3 full576 FP8 cache. No persistent BF16 history or Q-by-K indices.
@@ -2327,7 +2698,7 @@
 +
 +import importlib
 +import math
-+from dataclasses import dataclass
++from dataclasses import dataclass, field
 +
 +import torch
 +import torch_npu
@@ -2462,12 +2833,32 @@
 +    )
 +
 +
-+def write_cache(rows, slots, cache, scale):
++@dataclass
++class QFMScatterPlan:
++    slots: torch.Tensor
++    offsets: torch.Tensor
++    stride: int
++
++    def slice(self, begin, end):
++        return QFMScatterPlan(self.slots[begin:end], self.offsets[begin:end], self.stride)
++
++
++def build_scatter_offsets(slots, stride, tile=None):
++    """Pure slot arithmetic, shared by every MLA layer in a metadata group."""
++    ids = slots.to(torch.int64)
++    if tile is None:
++        tile = torch.arange(QFM_WIDTH // QFM_TILE, device=slots.device)
++    offsets = ids[:, None].div(QFM_BLOCK, rounding_mode="floor") * (stride // QFM_TILE)
++    offsets = offsets + tile[None, :] * QFM_BLOCK + ids[:, None].remainder(QFM_BLOCK)
++    return torch.where(ids[:, None] >= 0, offsets, -1)
++
++
++def write_cache(rows, slots, cache, scale, scatter_plan=None):
 +    values = (rows.float() / scale).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
-+    scatter_fp8_cache(values, slots, cache)
++    scatter_fp8_cache(values, slots, cache, scatter_plan=scatter_plan)
 +
 +
-+def scatter_fp8_cache(values, slots, cache):
++def scatter_fp8_cache(values, slots, cache, scatter_plan=None):
 +    """Scatter 32-byte NZ tiles; native ScatterPaCache skips slot -1.
 +
 +    An offset-preserving contiguous alias avoids the old DSpark stride bug.
@@ -2482,11 +2873,20 @@
 +        raise ValueError("Invalid QFM PA_NZ strides")
 +    span = (cache.shape[0] - 1) * stride + QFM_BLOCK * QFM_WIDTH
 +    alias = torch.as_strided(cache, (span // QFM_TILE, 1, 1, QFM_TILE), (32, 32, 32, 1))
-+    ids = slots.to(torch.int64)
-+    tile = torch.arange(QFM_WIDTH // QFM_TILE, device=values.device)
-+    offsets = ids[:, None].div(QFM_BLOCK, rounding_mode="floor") * (stride // QFM_TILE)
-+    offsets = offsets + tile[None, :] * QFM_BLOCK + ids[:, None].remainder(QFM_BLOCK)
-+    offsets = torch.where(ids[:, None] >= 0, offsets, -1)
++    if scatter_plan is None:
++        offsets = build_scatter_offsets(slots, stride)
++    else:
++        offsets = scatter_plan.offsets
++        if (
++            scatter_plan.stride != stride
++            or scatter_plan.slots.data_ptr() != slots.data_ptr()
++            or scatter_plan.slots.shape != slots.shape
++            or offsets.shape != (slots.numel(), QFM_WIDTH // QFM_TILE)
++            or offsets.dtype != torch.int64
++            or offsets.device != cache.device
++            or not offsets.is_contiguous()
++        ):
++            raise ValueError("QFM Scatter plan must match the live slots and physical cache stride")
 +    torch_npu.npu_scatter_pa_cache(values.reshape(-1, 1, QFM_TILE).contiguous(), offsets.flatten(), key_cache=alias)
 +
 +
@@ -2516,10 +2916,15 @@
 +    qfm_needed: bool = True
 +    # CPU scheduler stage ranges: (begin, end, is_prefill), including padding.
 +    preprocess_segments: tuple = ()
++    invalid: torch.Tensor | None = None
++    invisible: torch.Tensor | None = None
++    fia_mask: torch.Tensor | None = None
++    scatter_plan: QFMScatterPlan | None = None
++    prolog_kwargs: dict = field(default_factory=dict)
 +
 +
 +class QFMMetadataBuilder:
-+    def __init__(self, impl, device):
++    def __init__(self, impl, device, kv_cache_spec=None):
 +        self.device = device
 +        self.dcp_size = impl.vllm_config.parallel_config.decode_context_parallel_size
 +        self.dcp_rank = getattr(impl, "dcp_rank", 0)
@@ -2531,6 +2936,22 @@
 +        self.buffers = {}
 +        self.fia_prefill = getattr(impl, "qfm_fia_prefill", False)
 +        self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
++        self.fia_mask = self.mask.to(torch.bool) if self.fia_prefill else None
++        self.cache_stride = None
++        self.has_prolog = getattr(impl, "enable_mlapo", False)
++        self.scatter_possible = self.staging_required = False
++        self.scatter_tiles = None
++        if kv_cache_spec is not None:
++            ratio = kernel_pages_per_manager(kv_cache_spec.block_size)
++            physical_page = kv_cache_spec.page_size_padded or kv_cache_spec.page_size_bytes
++            if physical_page % ratio:
++                raise ValueError("QFM physical page does not split into equal kernel strides")
++            self.cache_stride = physical_page // ratio
++            gapped = self.cache_stride != QFM_BLOCK * QFM_WIDTH
++            self.scatter_possible = gapped or not self.has_prolog or not self.mlapo_prefill or self.fia_prefill
++            self.staging_required = self.has_prolog and (gapped or self.fia_prefill)
++            if self.scatter_possible:
++                self.scatter_tiles = torch.arange(QFM_WIDTH // QFM_TILE, device=device)
 +
 +    def metadata(self, lengths, cu, used, max_q, mode):
 +        return self.metadata_op(
@@ -2559,7 +2980,7 @@
 +        # Eager prefill batches use <=16 rows per sequence, NOT small op calls.
 +        per_token = retain_for_graph or batch is not None or self.dcp_size > 1
 +        if per_token:
-+            cu_cpu = list(range(tokens + 1))
++            rows = tokens
 +        else:
 +            bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
 +            cu_cpu = [0]
@@ -2569,13 +2990,13 @@
 +                    cu_cpu.append(begin)
 +            while cu_cpu[-1] < tokens:
 +                cu_cpu.append(min(cu_cpu[-1] + QFM_MAX_Q, tokens))
-+        rows = len(cu_cpu) - 1
++            rows = len(cu_cpu) - 1
 +        if not 0 < rows < 65536:
 +            raise ValueError("QFM virtual batch must contain 1..65535 rows")
 +        mode = 0 if per_token or not common.causal else 3
 +        ints = dict(dtype=torch.int32, device=self.device)
 +        if batch is None:
-+            cu = torch.tensor(cu_cpu, **ints)
++            cu = torch.arange(rows + 1, **ints) if per_token else torch.tensor(cu_cpu, **ints)
 +            used, lengths = torch.zeros(rows, **ints), torch.zeros(rows, **ints)
 +            # Populate once after device lengths are ready. Do not invoke the
 +            # scheduling kernel twice or require a separate Meta registration.
@@ -2594,22 +3015,36 @@
 +                1 if per_token else QFM_MAX_Q,
 +                self.max_k,
 +                False,
++                invalid=torch.empty(tokens, dtype=torch.bool, device=self.device),
++                invisible=torch.empty(tokens, dtype=torch.bool, device=self.device),
++                fia_mask=self.fia_mask,
 +            )
++            if self.scatter_possible:
++                batch.scatter_plan = QFMScatterPlan(
++                    batch.slots,
++                    torch.empty((tokens, QFM_WIDTH // QFM_TILE), dtype=torch.int64, device=self.device),
++                    self.cache_stride,
++                )
++                batch.prolog_kwargs["scatter_plan"] = batch.scatter_plan
++            if self.staging_required:
++                batch.prolog_kwargs["staging_indices"] = torch.arange(tokens, dtype=torch.int64, device=self.device)
 +            if retain_for_graph:
 +                self.buffers[key] = batch
 +        # Only device lengths: DSpark rejection correction may not be mirrored
 +        # to CPU. Updates are on the caller's stream before graph replay.
 +        boundaries = common.query_start_loc[: common.num_reqs + 1].contiguous()
-+        token_ids = torch.arange(tokens, device=self.device, dtype=torch.int32)
++        token_ids = batch.cu[:-1] if per_token else torch.arange(tokens, device=self.device, dtype=torch.int32)
 +        owners = torch.searchsorted(boundaries[1:], token_ids, right=True).clamp_max(common.num_reqs - 1).long()
 +        starts, ends = boundaries[owners], boundaries[owners + 1]
 +        seq = common.seq_lens[owners]
 +        live = (token_ids < common.num_actual_tokens) & (token_ids < ends) & (seq > 0)
 +        batch.live.copy_(live)
-+        batch.slots.fill_(-1)
++        batch.invalid.copy_(~live)
 +        count = min(tokens, common.slot_mapping.numel())
++        if count < tokens:
++            batch.slots[count:].fill_(-1)
 +        batch.slots[:count].copy_(common.slot_mapping[:count])
-+        batch.slots.masked_fill_(~live, -1)
++        batch.slots.masked_fill_(batch.invalid, -1)
 +        lengths_per_token = seq - (ends - starts) + token_ids - starts + 1 if common.causal else seq
 +        if self.dcp_size > 1:
 +            cycle = self.interleave * self.dcp_size
@@ -2618,14 +3053,23 @@
 +            ).clamp(0, self.interleave)
 +        lengths_per_token = torch.where(live, lengths_per_token.clamp_min(0), 0)
 +        batch.visible.copy_(live & (lengths_per_token > 0))
-+        first = batch.cu[:-1].long()
-+        row_owner = owners[first]
-+        row_used = (ends[first] - batch.cu[:-1]).clamp_min(0)
-+        row_used = torch.minimum(row_used, batch.cu[1:] - batch.cu[:-1])
-+        row_used = torch.where(live[first], row_used, 0)
-+        last = (batch.cu[:-1] + row_used - 1).clamp_min(0).long()
-+        batch.used.copy_(row_used)
-+        batch.lengths.copy_(torch.where(row_used > 0, lengths_per_token[last], 0))
++        batch.invisible.copy_(~batch.visible)
++        if per_token:
++            # Each virtual row contains exactly this token. The general
++            # first/last-token gathers reduce to identity, even for padding
++            # and DCP ranks with zero local history.
++            row_owner = owners
++            batch.used.copy_(live)
++            batch.lengths.copy_(lengths_per_token)
++        else:
++            first = batch.cu[:-1].long()
++            row_owner = owners[first]
++            row_used = (ends[first] - batch.cu[:-1]).clamp_min(0)
++            row_used = torch.minimum(row_used, batch.cu[1:] - batch.cu[:-1])
++            row_used = torch.where(live[first], row_used, 0)
++            last = (batch.cu[:-1] + row_used - 1).clamp_min(0).long()
++            batch.used.copy_(row_used)
++            batch.lengths.copy_(torch.where(row_used > 0, lengths_per_token[last], 0))
 +        batch.table.copy_(common.block_table_tensor[row_owner])
 +        flags = common.is_prefilling
 +        if flags is not None and flags.device.type != "cpu":
@@ -2682,6 +3126,10 @@
 +                batch.used.masked_fill_(skip, 0)
 +                batch.lengths.masked_fill_(skip, 0)
 +                batch.qfm_needed = not bool(selected.all())
++        if batch.scatter_plan is not None and (
++            not self.has_prolog or self.cache_stride != QFM_BLOCK * QFM_WIDTH or batch.has_prefill
++        ):
++            batch.scatter_plan.offsets.copy_(build_scatter_offsets(batch.slots, self.cache_stride, self.scatter_tiles))
 +        schedule = self.metadata(batch.lengths, batch.cu, batch.used, batch.max_q, mode)
 +        if batch.schedule.numel() == 0:
 +            batch.schedule = schedule
@@ -2748,7 +3196,9 @@
 +    All ranks run the same final DCP merge. No per-query FIA loops, no dense
 +    Q-by-history index lists. Process one request at a time to bound workspace.
 +    """
-+    mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.bool, device=q.device).triu_(1)
++    mask = getattr(batch, "fia_mask", None)
++    if mask is None:
++        mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.bool, device=q.device).triu_(1)
 +    for begin, end, history_length, table in batch.fia_requests:
 +        query = q[begin:end]
 +        history = read_fia_history(cache, table, history_length, impl.qfm_scale)
@@ -2792,11 +3242,11 @@
 +        q, kv, q_scale, fia_q = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
 +    elif prolog is None:
 +        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
-+        write_cache(kv, batch.slots, cache, impl.qfm_scale)
++        write_cache(kv, batch.slots, cache, impl.qfm_scale, scatter_plan=batch.scatter_plan)
 +    elif batch.fia_requests:
-+        q, kv = prolog.floating(hidden[:tokens].contiguous(), batch.slots, cache)
++        q, kv = prolog.floating(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
 +    else:
-+        q, q_scale = prolog(hidden[:tokens].contiguous(), batch.slots, cache)
++        q, q_scale = prolog(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
 +    if impl.dcp_enabled:
 +        # HCCL byte gather preserves FP8 codes on implementations without
 +        # float8 collective dtype support. Gather the matching head scales.
@@ -2819,7 +3269,8 @@
 +    if impl.dcp_enabled:
 +        latent = impl._merge_dcp_attention_output(latent, lse)
 +    projected = impl._v_up_proj_batch_major(latent)
-+    projected = projected.masked_fill(~batch.live[:, None], 0)
++    invalid = batch.invalid if batch.invalid is not None else ~batch.live
++    projected = projected.masked_fill(invalid[:, None], 0)
 +    if impl.use_output_gate:
 +        projected = projected * torch.sigmoid(impl.g_proj(hidden.contiguous())[0][:tokens])
 +    result = impl.o_proj(projected, is_prefill=batch.has_prefill)[0]
@@ -2840,7 +3291,7 @@
 +        raise ValueError("Missing scheduler stage ranges for Prefill MLAPO routing")
 +    if len(segments) == 1 and segments[0] == (0, tokens, True):
 +        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
-+        write_cache(kv, batch.slots, cache, impl.qfm_scale)
++        write_cache(kv, batch.slots, cache, impl.qfm_scale, scatter_plan=batch.scatter_plan)
 +        return q, kv, None, None
 +    # Byte views avoid relying on FP8 cat/indexing support on the installed PTA.
 +    q_bytes = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.uint8, device=hidden.device)
@@ -2852,15 +3303,21 @@
 +    for begin, end, prefill in segments:
 +        chunk = hidden[begin:end].contiguous()
 +        slots = batch.slots[begin:end]
++        scatter_plan = batch.scatter_plan.slice(begin, end) if batch.scatter_plan is not None else None
 +        if prefill:
 +            chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
-+            write_cache(chunk_kv, slots, cache, impl.qfm_scale)
++            write_cache(chunk_kv, slots, cache, impl.qfm_scale, scatter_plan=scatter_plan)
 +            if fia_q is not None:
 +                fia_q[begin:end].copy_(chunk_q)
 +                kv[begin:end].copy_(chunk_kv)
 +            chunk_q, chunk_scale = quantize_query(chunk_q)
 +        else:
-+            chunk_q, chunk_scale = prolog(chunk, slots, cache)
++            kwargs = dict(batch.prolog_kwargs)
++            if scatter_plan is not None:
++                kwargs["scatter_plan"] = scatter_plan
++            if "staging_indices" in kwargs:
++                kwargs["staging_indices"] = kwargs["staging_indices"][: end - begin]
++            chunk_q, chunk_scale = prolog(chunk, slots, cache, **kwargs)
 +        q_bytes[begin:end].copy_(chunk_q.view(torch.uint8))
 +        q_scale[begin:end].copy_(chunk_scale)
 +    return q_bytes.view(torch.float8_e4m3fn), kv, q_scale, fia_q
@@ -2901,15 +3358,16 @@
 +        layout_out="TND",
 +        return_softmax_lse=impl.dcp_enabled,
 +    )
-+    latent = latent.masked_fill(~batch.visible[:, None, None], 0)
++    invisible = batch.invisible if batch.invisible is not None else ~batch.visible
++    latent = latent.masked_fill(invisible[:, None, None], 0)
 +    if impl.dcp_enabled:
-+        lse = lse.T.masked_fill(~batch.visible[:, None], -float("inf")).unsqueeze(-1)
++        lse = lse.T.masked_fill(invisible[:, None], -float("inf")).unsqueeze(-1)
 +    elif batch.fia_requests:
 +        lse = torch.empty((*q.shape[:2], 1), device=q.device)
 +    return latent, lse
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm_prolog.py
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,161 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Experimental adapter for pinned CANN DSL Prolog, NOT MlaPrologV4.
@@ -2933,6 +3391,19 @@
 +PROLOG_SHA256 = "ab0876c2fc09b7cc2b0541063dc7bab16414b2046ea9030bc1fecce4020be1bc"
 +PROLOG_PA_BSND = 0
 +PROLOG_PA_NZ = 1
++
++
++def _validate_staging_indices(indices, tokens, device):
++    """Validate caller-owned immutable 0..T indices without reading device data."""
++    if (
++        not isinstance(indices, torch.Tensor)
++        or indices.dtype != torch.int64
++        or indices.ndim != 1
++        or indices.shape != (tokens,)
++        or not indices.is_contiguous()
++        or indices.device != device
++    ):
++        raise ValueError("Prolog staging_indices must be contiguous INT64 [physical_tokens] on the input device")
 +
 +
 +def load_prolog():
@@ -2975,7 +3446,7 @@
 +            if isinstance(value, torch.Tensor):
 +                self.weights[name].copy_(value)
 +
-+    def __call__(self, hidden, slots, cache):
++    def __call__(self, hidden, slots, cache, *, staging_indices=None, scatter_plan=None):
 +        tokens = slots.numel()
 +        if hidden.ndim != 2 or hidden.shape[0] != tokens or hidden.dtype != torch.bfloat16:
 +            raise ValueError("QFM DSL Prolog needs BF16 [physical_tokens, hidden_dim]")
@@ -2985,6 +3456,8 @@
 +            raise ValueError("QFM DSL Prolog requires full576 FP8 PA_NZ cache")
 +        if cache.stride()[2:] != (4096, 32, 1) or cache.stride(0) < QFM_BLOCK * QFM_WIDTH:
 +            raise ValueError("Invalid QFM cache page layout")
++        if staging_indices is not None:
++            _validate_staging_indices(staging_indices, tokens, hidden.device)
 +        x, descale_x = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn, scale_alg=0)
 +        descale_x = descale_x.view(torch.float8_e8m0fnu).reshape(tokens, hidden.shape[1] // 32).contiguous()
 +        direct = cache.stride(0) == QFM_BLOCK * QFM_WIDTH
@@ -2998,7 +3471,9 @@
 +            # this step's FP8 rows, then scatter bytes to the real strided pages.
 +            blocks = max(1, (tokens + QFM_BLOCK - 1) // QFM_BLOCK)
 +            destination = torch.empty((blocks, QFM_BLOCK, 1, QFM_WIDTH), dtype=cache.dtype, device=cache.device)
-+            indices = torch.arange(tokens, dtype=torch.int64, device=slots.device)
++            indices = staging_indices
++            if indices is None:
++                indices = torch.arange(tokens, dtype=torch.int64, device=slots.device)
 +            mode = PROLOG_PA_BSND
 +        q, q_scale, _, _ = self.op(
 +            x=x,
@@ -3017,23 +3492,27 @@
 +            # All scratch rows were written, even when real slots are -1.
 +            # The final writer alone applies live slots, preserving draft and
 +            # unrelated main-model pages, page padding and storage offsets.
-+            scatter_fp8_cache(destination.view(-1, QFM_WIDTH)[:tokens], slots, cache)
++            scatter_fp8_cache(destination.view(-1, QFM_WIDTH)[:tokens], slots, cache, scatter_plan=scatter_plan)
 +        return q, q_scale.squeeze(-1).contiguous()
 +
-+    def floating(self, hidden, slots, cache):
++    def floating(self, hidden, slots, cache, *, staging_indices=None, scatter_plan=None):
 +        """Mode0 current-token BF16 scratch; persistent history stays FP8.
 +
-+        For mixed Prefill/Decode batches use one mode0 projection for the
-+        whole batch, quantizing Decode queries at the reader boundary.
++        This is the floating-output path for FIA Prefill. Stage-specific
++        mixed batches keep Decode in mode2 and stage Prefill separately.
 +        """
 +        tokens = slots.numel()
 +        if hidden.dtype != torch.bfloat16 or hidden.ndim != 2 or hidden.shape[0] != tokens:
 +            raise ValueError("Mode0 Prolog needs BF16 [physical_tokens, hidden_dim]")
++        if staging_indices is not None:
++            _validate_staging_indices(staging_indices, tokens, hidden.device)
 +        x, scales = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn, scale_alg=0)
 +        scales = scales.view(torch.float8_e8m0fnu).reshape(tokens, hidden.shape[1] // 32).contiguous()
 +        blocks = max(1, (tokens + QFM_BLOCK - 1) // QFM_BLOCK)
 +        current = torch.empty((blocks, QFM_BLOCK, 1, QFM_WIDTH), dtype=hidden.dtype, device=hidden.device)
-+        indices = torch.arange(tokens, dtype=torch.int64, device=hidden.device)
++        indices = staging_indices
++        if indices is None:
++            indices = torch.arange(tokens, dtype=torch.int64, device=hidden.device)
 +        q, _, _, _ = self.op(
 +            x=x,
 +            descale_x=scales,
@@ -3048,7 +3527,7 @@
 +            **self.weights,
 +        )
 +        kv = current.view(-1, QFM_WIDTH)[:tokens]
-+        write_cache(kv, slots, cache, self.scale)
++        write_cache(kv, slots, cache, self.scale, scatter_plan=scatter_plan)
 +        return q, kv
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py
@@ -3216,7 +3695,7 @@
 +        if len(qfm_choices) > 1:
 +            raise ValueError("QFM and other MLA readers must use separate attention metadata groups")
 +        if True in qfm_choices:
-+            self.qfm_state = QFMMetadataBuilder(static_forward_context[layer_names[0]].impl, device)
++            self.qfm_state = QFMMetadataBuilder(static_forward_context[layer_names[0]].impl, device, kv_cache_spec)
 +            logger.info("MLA group %s uses full576 FP8 QFM for prefill and decode", layer_names[0])
          flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
          if len(flashmla_choices) > 1:

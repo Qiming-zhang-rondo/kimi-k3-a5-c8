@@ -373,7 +373,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if len(qfm_choices) > 1:
             raise ValueError("QFM and other MLA readers must use separate attention metadata groups")
         if True in qfm_choices:
-            self.qfm_state = QFMMetadataBuilder(static_forward_context[layer_names[0]].impl, device)
+            self.qfm_state = QFMMetadataBuilder(static_forward_context[layer_names[0]].impl, device, kv_cache_spec)
             logger.info("MLA group %s uses full576 FP8 QFM for prefill and decode", layer_names[0])
         flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
         if len(flashmla_choices) > 1:

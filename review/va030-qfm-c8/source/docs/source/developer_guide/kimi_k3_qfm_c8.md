@@ -207,6 +207,26 @@ byte-exact Decode Q/scales and Capture→Prefill→Decode metadata refresh. Thes
 do not validate real NPU graph replay, native numerical equivalence, DSpark
 acceptance or an end-to-end performance recovery.
 
+### Shared batch preparation
+
+The attention metadata builder prepares ordinary-writer NZ Scatter addresses,
+invalid/empty-row masks and temporary-Cache staging indices once per batch.
+MLA layers reuse them instead of rebuilding the same integer tensors. The
+addresses include the actual physical page stride and preserve negative slots,
+page gaps and storage offsets. Mixed-stage slices share the corresponding
+address range; temporary-Cache indices always start at zero. Contiguous mode2
+Decode writes directly through Prolog and does not compute unused Scatter
+addresses. Retained graph metadata keeps the shared buffers at stable addresses
+and refreshes their values before replay.
+
+Single-query virtual rows also reuse the retained cumulative lengths and copy
+their live/visible lengths directly, without constructing CPU range lists or
+repeating per-layer mask inversions. FIA's fixed boolean causal mask is reused.
+These changes preserve quantization, stage selection and native operators;
+they do not establish that host preparation caused an observed Event Wait or
+that TPOT has recovered. NPU timing and end-to-end DSpark acceptance remain
+necessary. No native package rebuild is needed for these Python changes.
+
 Both P and D must install this revision and enable QFM C8. Use the built-in
 `MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
 AscendStore or a custom connector module. Keep community K3 MRV2 hybrid cache,

@@ -23,6 +23,19 @@ PROLOG_PA_BSND = 0
 PROLOG_PA_NZ = 1
 
 
+def _validate_staging_indices(indices, tokens, device):
+    """Validate caller-owned immutable 0..T indices without reading device data."""
+    if (
+        not isinstance(indices, torch.Tensor)
+        or indices.dtype != torch.int64
+        or indices.ndim != 1
+        or indices.shape != (tokens,)
+        or not indices.is_contiguous()
+        or indices.device != device
+    ):
+        raise ValueError("Prolog staging_indices must be contiguous INT64 [physical_tokens] on the input device")
+
+
 def load_prolog():
     try:
         spec = importlib.util.find_spec(PROLOG_MODULE)
@@ -63,7 +76,7 @@ class QFMProlog:
             if isinstance(value, torch.Tensor):
                 self.weights[name].copy_(value)
 
-    def __call__(self, hidden, slots, cache):
+    def __call__(self, hidden, slots, cache, *, staging_indices=None, scatter_plan=None):
         tokens = slots.numel()
         if hidden.ndim != 2 or hidden.shape[0] != tokens or hidden.dtype != torch.bfloat16:
             raise ValueError("QFM DSL Prolog needs BF16 [physical_tokens, hidden_dim]")
@@ -73,6 +86,8 @@ class QFMProlog:
             raise ValueError("QFM DSL Prolog requires full576 FP8 PA_NZ cache")
         if cache.stride()[2:] != (4096, 32, 1) or cache.stride(0) < QFM_BLOCK * QFM_WIDTH:
             raise ValueError("Invalid QFM cache page layout")
+        if staging_indices is not None:
+            _validate_staging_indices(staging_indices, tokens, hidden.device)
         x, descale_x = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn, scale_alg=0)
         descale_x = descale_x.view(torch.float8_e8m0fnu).reshape(tokens, hidden.shape[1] // 32).contiguous()
         direct = cache.stride(0) == QFM_BLOCK * QFM_WIDTH
@@ -86,7 +101,9 @@ class QFMProlog:
             # this step's FP8 rows, then scatter bytes to the real strided pages.
             blocks = max(1, (tokens + QFM_BLOCK - 1) // QFM_BLOCK)
             destination = torch.empty((blocks, QFM_BLOCK, 1, QFM_WIDTH), dtype=cache.dtype, device=cache.device)
-            indices = torch.arange(tokens, dtype=torch.int64, device=slots.device)
+            indices = staging_indices
+            if indices is None:
+                indices = torch.arange(tokens, dtype=torch.int64, device=slots.device)
             mode = PROLOG_PA_BSND
         q, q_scale, _, _ = self.op(
             x=x,
@@ -105,23 +122,27 @@ class QFMProlog:
             # All scratch rows were written, even when real slots are -1.
             # The final writer alone applies live slots, preserving draft and
             # unrelated main-model pages, page padding and storage offsets.
-            scatter_fp8_cache(destination.view(-1, QFM_WIDTH)[:tokens], slots, cache)
+            scatter_fp8_cache(destination.view(-1, QFM_WIDTH)[:tokens], slots, cache, scatter_plan=scatter_plan)
         return q, q_scale.squeeze(-1).contiguous()
 
-    def floating(self, hidden, slots, cache):
+    def floating(self, hidden, slots, cache, *, staging_indices=None, scatter_plan=None):
         """Mode0 current-token BF16 scratch; persistent history stays FP8.
 
-        For mixed Prefill/Decode batches use one mode0 projection for the
-        whole batch, quantizing Decode queries at the reader boundary.
+        This is the floating-output path for FIA Prefill. Stage-specific
+        mixed batches keep Decode in mode2 and stage Prefill separately.
         """
         tokens = slots.numel()
         if hidden.dtype != torch.bfloat16 or hidden.ndim != 2 or hidden.shape[0] != tokens:
             raise ValueError("Mode0 Prolog needs BF16 [physical_tokens, hidden_dim]")
+        if staging_indices is not None:
+            _validate_staging_indices(staging_indices, tokens, hidden.device)
         x, scales = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn, scale_alg=0)
         scales = scales.view(torch.float8_e8m0fnu).reshape(tokens, hidden.shape[1] // 32).contiguous()
         blocks = max(1, (tokens + QFM_BLOCK - 1) // QFM_BLOCK)
         current = torch.empty((blocks, QFM_BLOCK, 1, QFM_WIDTH), dtype=hidden.dtype, device=hidden.device)
-        indices = torch.arange(tokens, dtype=torch.int64, device=hidden.device)
+        indices = staging_indices
+        if indices is None:
+            indices = torch.arange(tokens, dtype=torch.int64, device=hidden.device)
         q, _, _, _ = self.op(
             x=x,
             descale_x=scales,
@@ -136,5 +157,5 @@ class QFMProlog:
             **self.weights,
         )
         kv = current.view(-1, QFM_WIDTH)[:tokens]
-        write_cache(kv, slots, cache, self.scale)
+        write_cache(kv, slots, cache, self.scale, scatter_plan=scatter_plan)
         return q, kv
