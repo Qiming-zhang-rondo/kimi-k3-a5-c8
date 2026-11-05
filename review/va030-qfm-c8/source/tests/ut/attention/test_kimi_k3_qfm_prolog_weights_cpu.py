@@ -141,6 +141,53 @@ def test_new_dsl_supported_small_and_large_shapes(adapter, q_rank, nope):
     assert result["wqb"].shape == (6 * (nope + 64), q_rank)
 
 
+@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
+@pytest.mark.parametrize("bias_value", [0.25, float("nan")])
+def test_rejects_loaded_norm_bias_before_weight_conversion(adapter, norm_name, bias_value):
+    module, scheme, conversions = adapter
+    impl = make_impl(scheme, device="cpu")
+    norm = getattr(impl, norm_name)
+    # A loaded nonzero or NaN correction must not silently disappear from
+    # the bias-free native interface. This is checked at weight preparation.
+    norm.bias = torch.full_like(norm.weight, bias_value)
+    norm.bias_loaded = True
+    with pytest.raises(ValueError, match="bias") as error:
+        module.prepare_prolog_weights(impl)
+    message = str(error.value).lower()
+    assert "mlapo" in message and ("disable" in message or "false" in message)
+    assert not conversions
+
+
+@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
+def test_loaded_zero_norm_bias_is_accepted_without_mutation(adapter, norm_name):
+    module, scheme, _ = adapter
+    impl = make_impl(scheme, device="cpu")
+    norm = getattr(impl, norm_name)
+    allocated_bias = torch.zeros_like(norm.weight)
+    norm.bias = allocated_bias
+    norm.bias_loaded = True
+    result = module.prepare_prolog_weights(impl)
+    assert result["norm_weight_qa"].shape == impl.q_a_layernorm.weight.shape
+    assert result["norm_weight_kva"].shape == impl.kv_a_layernorm.weight.shape
+    assert norm.bias is allocated_bias and norm.bias_loaded
+    assert torch.count_nonzero(allocated_bias).item() == 0
+
+
+@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
+def test_allocated_but_unloaded_norm_bias_keeps_existing_contract(adapter, norm_name):
+    module, scheme, _ = adapter
+    impl = make_impl(scheme)
+    norm = getattr(impl, norm_name)
+    allocated_bias = torch.full_like(norm.weight, 0.25)
+    norm.bias = allocated_bias
+    norm.bias_loaded = False
+    result = module.prepare_prolog_weights(impl)
+    assert result["norm_weight_qa"].shape == impl.q_a_layernorm.weight.shape
+    assert result["norm_weight_kva"].shape == impl.kv_a_layernorm.weight.shape
+    assert norm.bias is allocated_bias
+    assert not norm.bias_loaded
+
+
 @pytest.mark.parametrize(
     "case,match",
     [

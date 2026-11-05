@@ -185,13 +185,27 @@ and explicit FP8 Cache writing for Prefill. The new flag defaults to true;
 
 Routing uses scheduler CPU stage flags, including short final Prefill chunks,
 not query length. Pure Decode and DSpark verification retain the existing
-FP8-output mode2 path and Decode graph behavior. Mixed batches split adjacent
-stage ranges: Prefill uses ordinary projections, Decode uses mode0 DSL
-floating outputs, then Q is quantized at the shared QFM reader. This preserves
-the floating-Q contract for FIA Prefill; mixed-batch preparation adds launches
-and temporary tensors and needs separate performance measurement. No permanent
-Cache format or scale changes. CPU tests cover stage routing, padding, slots,
-gapped Cache writes and Decode path selection; NPU/model validation is pending.
+FP8-output mode2 path and Decode graph behavior. Pure Decode does not build
+unused CPU stage segments. Mixed batches split adjacent stage ranges: Prefill
+uses ordinary projections and quantizes only its own Q; Decode keeps mode2
+FP8 Q and matching scales without re-quantization. Byte-view copies assemble
+the shared QFM input. The QFM Prefill backend needs no full-batch BF16 Q/KV
+scratch. FIA Prefill additionally keeps floating Q/current KV only in its
+Prefill slices (unused Decode slices are zero). With DCP, that FIA Q needs an
+additional BF16 head gather; this mixed FIA combination needs separate
+performance measurement. No permanent Cache format or scale changes.
+
+The pinned DSL schema has no RMSNorm bias argument. Weight preparation now
+rejects a loaded nonzero/NaN Q-a or KV-a norm bias rather than silently dropping
+ModelSlim correction. Loaded zero bias or an allocated but unloaded bias is
+accepted. The content check runs once at weight preparation, never in forward.
+Use ordinary preprocessing (`enable_mlapo=false`) for a checkpoint requiring
+nonzero norm bias until a bias-aware native Prolog is available.
+
+CPU regressions cover stage routing, padding, slots, gapped Cache writes,
+byte-exact Decode Q/scales and Capture→Prefill→Decode metadata refresh. These
+do not validate real NPU graph replay, native numerical equivalence, DSpark
+acceptance or an end-to-end performance recovery.
 
 Both P and D must install this revision and enable QFM C8. Use the built-in
 `MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,

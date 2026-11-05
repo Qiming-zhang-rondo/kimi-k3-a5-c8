@@ -76,6 +76,14 @@ def prepare_prolog_weights(impl):
     if not math.isfinite(eps) or eps <= 0 or eps != float(norm_kva.variance_epsilon):
         raise ValueError("QFM prolog requires equal positive finite Q/KV RMSNorm epsilon")
     for name, norm, size in (("q_a", norm_qa, q_rank), ("kv_a", norm_kva, KV_RANK)):
+        # Loading-time check only. The native schema has no norm-bias input;
+        # zero correction is harmless, nonzero/NaN correction must not vanish.
+        bias = getattr(norm, "bias", None)
+        if getattr(norm, "bias_loaded", False) and (bias is None or bool(torch.count_nonzero(bias).item())):
+            raise ValueError(
+                f"QFM DSL Prolog cannot apply loaded nonzero {name} RMSNorm bias; "
+                "disable enable_mlapo or use a bias-aware Prolog implementation"
+            )
         if norm.weight.dtype not in (torch.bfloat16, torch.float32) or tuple(norm.weight.shape) != (size,):
             raise ValueError(f"QFM prolog {name} RMSNorm weight must be BF16 or FP32 [{size}]")
 

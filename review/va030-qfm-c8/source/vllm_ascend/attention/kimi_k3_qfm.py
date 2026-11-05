@@ -312,10 +312,12 @@ class QFMMetadataBuilder:
         flags = common.is_prefilling
         if flags is not None and flags.device.type != "cpu":
             raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
+        batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
         batch.preprocess_segments = ()
         if not self.mlapo_prefill:
             if flags is None:
                 raise ValueError("Stage-specific MLAPO requires scheduler Prefill flags")
+        if not self.mlapo_prefill and batch.has_prefill:
             bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
             segments = []
             for begin, end, prefill in zip(bounds, bounds[1:], flags[: common.num_reqs].tolist()):
@@ -367,7 +369,6 @@ class QFMMetadataBuilder:
             batch.schedule = schedule
         else:
             batch.schedule.copy_(schedule)
-        batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
         return batch
 
 
@@ -468,8 +469,9 @@ def forward_qfm(impl, hidden, cache, metadata, output):
     prolog = getattr(impl, "qfm_prolog", None)
     q_scale = None
     kv = None
+    fia_q = None
     if prolog is not None and not getattr(impl, "qfm_mlapo_prefill", True) and batch.has_prefill:
-        q, kv = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
+        q, kv, q_scale, fia_q = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
     elif prolog is None:
         q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
         write_cache(kv, batch.slots, cache, impl.qfm_scale)
@@ -485,13 +487,17 @@ def forward_qfm(impl, hidden, cache, metadata, output):
             q_scale = impl._dcp_all_gather(q_scale, dim=1)
         else:
             q = impl._dcp_all_gather(q, dim=1)
+        if fia_q is not None:
+            # FIA needs the original floating Prefill Q, not a cast of Q8
+            # without descales. All ranks take this branch from CPU stage flags.
+            fia_q = impl._dcp_all_gather(fia_q, dim=1)
     if batch.qfm_needed:
         latent, lse = run_qfm_reader(impl, q, cache, batch, q_scale=q_scale)
     else:
         latent = torch.zeros((*q.shape[:2], QFM_VALUE), dtype=q.dtype, device=q.device)
         lse = torch.full((*q.shape[:2], 1), -float("inf"), device=q.device)
     if batch.fia_requests:
-        fill_fia_prefill(impl, q, kv, cache, batch, latent, lse)
+        fill_fia_prefill(impl, q if fia_q is None else fia_q, kv, cache, batch, latent, lse)
     if impl.dcp_enabled:
         latent = impl._merge_dcp_attention_output(latent, lse)
     projected = impl._v_up_proj_batch_major(latent)
@@ -504,11 +510,11 @@ def forward_qfm(impl, hidden, cache, metadata, output):
 
 
 def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
-    """Ordinary Prefill, DSL Decode; mixed batches share floating Q outputs.
+    """Keep mode2 Decode output/cache writes even in mixed-stage batches.
 
-    Pure Decode keeps the existing fused FP8 mode2 fast path. Mixed batches
-    use mode0 for Decode segments, matching the existing FIA mixed-batch
-    contract, then quantize Q together at the QFM reader boundary.
+    Only ordinary Prefill queries are quantized outside Prolog. Copy Decode
+    FP8 codes and descales unchanged. FIA Prefill optionally retains its own
+    floating Q/current KV; these step-local tensors never enter graph state.
     """
     tokens = batch.slots.numel()
     segments = batch.preprocess_segments
@@ -517,26 +523,41 @@ def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
     if len(segments) == 1 and segments[0] == (0, tokens, True):
         q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
         write_cache(kv, batch.slots, cache, impl.qfm_scale)
-        return q, kv
-    q = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
-    kv = torch.empty((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
+        return q, kv, None, None
+    # Byte views avoid relying on FP8 cat/indexing support on the installed PTA.
+    q_bytes = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.uint8, device=hidden.device)
+    q_scale = torch.empty((tokens, impl.num_heads), dtype=torch.float32, device=hidden.device)
+    kv = fia_q = None
+    if batch.fia_requests:
+        kv = torch.zeros((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
+        fia_q = torch.zeros((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
     for begin, end, prefill in segments:
         chunk = hidden[begin:end].contiguous()
         slots = batch.slots[begin:end]
         if prefill:
             chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
             write_cache(chunk_kv, slots, cache, impl.qfm_scale)
+            if fia_q is not None:
+                fia_q[begin:end].copy_(chunk_q)
+                kv[begin:end].copy_(chunk_kv)
+            chunk_q, chunk_scale = quantize_query(chunk_q)
         else:
-            chunk_q, chunk_kv = prolog.floating(chunk, slots, cache)
-        q[begin:end].copy_(chunk_q)
-        kv[begin:end].copy_(chunk_kv)
-    return q, kv
+            chunk_q, chunk_scale = prolog(chunk, slots, cache)
+        q_bytes[begin:end].copy_(chunk_q.view(torch.uint8))
+        q_scale[begin:end].copy_(chunk_scale)
+    return q_bytes.view(torch.float8_e4m3fn), kv, q_scale, fia_q
+
+
+def quantize_query(q):
+    floating = q.float()
+    scale = floating.abs().amax(-1).clamp_min(1e-12) / QFM_FP8_MAX
+    values = (floating / scale[..., None]).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
+    return values, scale
 
 
 def run_qfm_reader(impl, q, cache, batch, q_scale=None):
     if q_scale is None:
-        q_scale = q.float().abs().amax(-1).clamp_min(1e-12) / QFM_FP8_MAX
-        q8 = (q.float() / q_scale[..., None]).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
+        q8, q_scale = quantize_query(q)
     else:
         q8 = q
     attention, _ = impl.qfm_ops

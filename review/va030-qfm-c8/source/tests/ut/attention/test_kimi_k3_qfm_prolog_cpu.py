@@ -170,9 +170,11 @@ def test_scheduler_stage_segments_keep_short_prefill_and_padding(qfm, monkeypatc
 
 
 @pytest.mark.parametrize("queries,flags", [([1], [True]), ([4, 9, 1], [False, True, False])])
-def test_stage_routing_preserves_scatter_slots_and_bypasses_prefill_dsl(qfm, monkeypatch, queries, flags):
+@pytest.mark.parametrize("fia_prefill", [False, True])
+def test_stage_routing_preserves_scatter_slots_and_decode_mode2(qfm, monkeypatch, queries, flags, fia_prefill):
     b, _ = builder(qfm, monkeypatch)
     b.mlapo_prefill = False
+    b.fia_prefill = fia_prefill
     tokens = sum(queries)
     c = common(queries, [128 + q for q in queries], capacity=tokens + 2)
     c.is_prefilling = torch.tensor(flags)
@@ -190,19 +192,52 @@ def test_stage_routing_preserves_scatter_slots_and_bypasses_prefill_dsl(qfm, mon
         ordinary_calls.append(count)
         return chunk[:, :576, None].transpose(1, 2).repeat(1, 12, 1), chunk[:, :576]
 
-    def floating(chunk, slots, destination):
-        dsl_calls.append(chunk.shape[0])
-        qfm.write_cache(chunk[:, :576], slots, destination, torch.ones(1))
-        return chunk[:, None, :576].repeat(1, 12, 1), chunk[:, :576]
+    class NativeProlog:
+        def __call__(self, chunk, slots, destination):
+            count = chunk.shape[0]
+            qfm.write_cache(chunk[:, :576], slots, destination, torch.ones(1))
+            codes = (torch.arange(count * 12 * 576).reshape(count, 12, 576) % 31 - 15).to(torch.float8_e4m3fn)
+            scales = torch.arange(count * 12, dtype=torch.float32).reshape(count, 12) + 0.25
+            dsl_calls.append((count, codes.clone(), scales.clone()))
+            return codes, scales
+
+        def floating(self, *args):
+            raise AssertionError("Mixed-batch Decode must keep native FP8 mode2 outputs")
 
     monkeypatch.setattr(qfm, "ordinary_qfm_inputs", ordinary)
     impl = SimpleNamespace(qfm_scale=torch.ones(1), num_heads=12)
-    q, kv = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, SimpleNamespace(floating=floating))
-    torch.testing.assert_close(q, hidden[:, None, :576].repeat(1, 12, 1), rtol=0, atol=0)
-    torch.testing.assert_close(kv, hidden[:, :576], rtol=0, atol=0)
+    q, kv, q_scale, fia_q = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, NativeProlog())
     assert torch.equal(raw, expected)
     assert ordinary_calls == [end - begin for begin, end, p in batch.preprocess_segments if p]
-    assert dsl_calls == [end - begin for begin, end, p in batch.preprocess_segments if not p]
+    assert [entry[0] for entry in dsl_calls] == [end - begin for begin, end, p in batch.preprocess_segments if not p]
+    expected_q = hidden[:, None, :576].repeat(1, 12, 1)
+    if all(flags):
+        # Pure Prefill keeps the existing ordinary BF16 route, including its
+        # current floating KV for FIA; it never calls the DSL Prolog.
+        torch.testing.assert_close(q, expected_q, rtol=0, atol=0)
+        torch.testing.assert_close(kv, hidden[:, :576], rtol=0, atol=0)
+        assert q_scale is None and fia_q is None
+    else:
+        assert q.dtype == torch.float8_e4m3fn
+        assert q_scale.shape == (tokens + 2, 12)
+        decode_index = 0
+        for begin, end, prefill in batch.preprocess_segments:
+            if prefill:
+                expected_codes, expected_scale = qfm.quantize_query(expected_q[begin:end])
+            else:
+                _, expected_codes, expected_scale = dsl_calls[decode_index]
+                decode_index += 1
+            assert torch.equal(q[begin:end].view(torch.uint8), expected_codes.view(torch.uint8))
+            assert torch.equal(q_scale[begin:end], expected_scale)
+            if fia_prefill:
+                if prefill:
+                    torch.testing.assert_close(fia_q[begin:end], expected_q[begin:end], rtol=0, atol=0)
+                    torch.testing.assert_close(kv[begin:end], hidden[begin:end, :576], rtol=0, atol=0)
+                else:
+                    assert fia_q[begin:end].count_nonzero() == 0
+                    assert kv[begin:end].count_nonzero() == 0
+        if not fia_prefill:
+            assert kv is None and fia_q is None
 
 
 @pytest.mark.parametrize("prefill", [False, True])
@@ -220,7 +255,7 @@ def test_forward_decode_keeps_mode2_prefill_uses_ordinary(qfm, monkeypatch, pref
 
     def staged(*args):
         calls.append("ordinary_prefill")
-        return torch.zeros(8, 12, 576, dtype=torch.bfloat16), torch.zeros(8, 576, dtype=torch.bfloat16)
+        return torch.zeros(8, 12, 576, dtype=torch.bfloat16), torch.zeros(8, 576, dtype=torch.bfloat16), None, None
 
     def reader(impl, q, cache, batch, q_scale):
         assert (q_scale is None) == prefill
@@ -238,3 +273,131 @@ def test_forward_decode_keeps_mode2_prefill_uses_ordinary(qfm, monkeypatch, pref
     )
     qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), torch.empty(8, 12 * 512))
     assert calls == ["ordinary_prefill" if prefill else "decode_mode2"]
+
+
+@pytest.mark.parametrize("dcp,retain_for_graph", [(1, True), (2, False), (2, True)])
+def test_pure_decode_skips_host_stage_boundaries(qfm, monkeypatch, dcp, retain_for_graph):
+    b, _ = builder(qfm, monkeypatch, dcp=dcp)
+    b.mlapo_prefill = False
+    c = common([8], [1024], capacity=16)
+    c.is_prefilling.fill_(False)
+
+    class ForbiddenHostBoundaries:
+        def __getitem__(self, index):
+            raise AssertionError("Pure Decode must not read or reconstruct CPU stage boundaries")
+
+    c.query_start_loc_cpu = ForbiddenHostBoundaries()
+    batch = b.build(c, retain_for_graph=retain_for_graph)
+    assert not batch.has_prefill
+    assert batch.preprocess_segments == ()
+
+
+@pytest.mark.parametrize("same_capacity", [False, True])
+def test_decode_capture_then_prefill_then_decode_keeps_mode2(qfm, monkeypatch, same_capacity):
+    b, _ = builder(qfm, monkeypatch)
+    b.mlapo_prefill = False
+    c = common([4], [132], capacity=8)
+    c.is_prefilling.fill_(False)
+    captured = b.build(c, retain_for_graph=True)
+    original_pointers = {name: getattr(captured, name).data_ptr() for name in ("table", "slots", "lengths", "used")}
+    p = common([4 if same_capacity else 33], [1024], capacity=8 if same_capacity else 40)
+    p.is_prefilling.fill_(True)
+    prefill = b.build(p)
+    assert prefill.has_prefill
+    c.seq_lens.fill_(260)
+    c.slot_mapping.add_(128)
+    decoded = b.build(c)
+    assert decoded is captured
+    assert not decoded.has_prefill and not decoded.preprocess_segments
+    assert original_pointers == {name: getattr(decoded, name).data_ptr() for name in original_pointers}
+    assert torch.equal(decoded.slots[:4], c.slot_mapping)
+    assert decoded.lengths[:4].tolist() == [257, 258, 259, 260]
+    mode2 = []
+
+    class Prolog:
+        def __call__(self, hidden, slots, cache):
+            mode2.append(slots.clone())
+            return torch.zeros(8, 12, 576).to(torch.float8_e4m3fn), torch.full((8, 12), 0.25)
+
+        def floating(self, *args):
+            raise AssertionError("Decode graph path switched to mode0 after Prefill")
+
+    def reader(impl, q, cache, batch, q_scale):
+        assert q.dtype == torch.float8_e4m3fn
+        assert torch.equal(q_scale, torch.full((8, 12), 0.25))
+        return torch.zeros(8, 12, 512), None
+
+    monkeypatch.setattr(qfm, "run_qfm_reader", reader)
+    impl = SimpleNamespace(
+        qfm_prolog=Prolog(),
+        qfm_mlapo_prefill=False,
+        dcp_enabled=False,
+        _v_up_proj_batch_major=lambda x: x.flatten(1),
+        use_output_gate=False,
+        o_proj=lambda x, **kw: (x,),
+    )
+    qfm.forward_qfm(impl, torch.zeros(8, 1024), None, SimpleNamespace(qfm=decoded), torch.empty(8, 12 * 512))
+    assert len(mode2) == 1
+
+
+@pytest.mark.parametrize("fia_prefill", [False, True])
+def test_mixed_dcp_keeps_fp8_q_scales_and_separate_fia_q(qfm, monkeypatch, fia_prefill):
+    b, _ = builder(qfm, monkeypatch, dcp=2, rank=1)
+    b.mlapo_prefill = False
+    b.fia_prefill = fia_prefill
+    c = common([4, 9], [132, 1024], capacity=16)
+    c.is_prefilling = torch.tensor([False, True])
+    batch = b.build(c)
+    q8 = (torch.arange(16 * 12 * 576).reshape(16, 12, 576) % 31 - 15).to(torch.float8_e4m3fn)
+    scales = torch.arange(16 * 12, dtype=torch.float32).reshape(16, 12) + 0.25
+    floating_q = torch.zeros(16, 12, 576, dtype=torch.bfloat16)
+    floating_q[4:13].fill_(3.5)
+    kv = torch.zeros(16, 576, dtype=torch.bfloat16)
+    kv[4:13].fill_(2.5)
+    gathers, fia_calls = [], []
+
+    def staged(*args):
+        return q8, kv if fia_prefill else None, scales, floating_q if fia_prefill else None
+
+    def gather(x, dim):
+        assert dim == 1
+        gathers.append(x.dtype)
+        return torch.cat((x, x), dim=dim)
+
+    def attention(q, cache, q_scale, *args, **kwargs):
+        assert q.dtype == torch.float8_e4m3fn
+        assert torch.equal(q[:, :12].view(torch.uint8), q8.view(torch.uint8))
+        assert torch.equal(q[:, 12:].view(torch.uint8), q8.view(torch.uint8))
+        assert torch.equal(q_scale[:, :12], scales)
+        assert torch.equal(q_scale[:, 12:], scales)
+        return torch.ones(16, 24, 512), torch.zeros(24, 16)
+
+    def fill(impl, q, current_kv, cache, batch, latent, lse):
+        assert fia_prefill
+        assert q.dtype == torch.bfloat16
+        torch.testing.assert_close(q, torch.cat((floating_q, floating_q), dim=1), rtol=0, atol=0)
+        torch.testing.assert_close(current_kv, kv, rtol=0, atol=0)
+        fia_calls.append(True)
+
+    monkeypatch.setattr(qfm, "stage_specific_qfm_inputs", staged)
+    monkeypatch.setattr(qfm, "fill_fia_prefill", fill)
+    impl = SimpleNamespace(
+        qfm_prolog=object(),
+        qfm_mlapo_prefill=False,
+        dcp_enabled=True,
+        _dcp_all_gather=gather,
+        _merge_dcp_attention_output=lambda x, lse: x[:, :12],
+        qfm_ops=(attention, None),
+        qfm_scale=torch.ones(1),
+        scale=0.1,
+        _v_up_proj_batch_major=lambda x: x.flatten(1),
+        use_output_gate=False,
+        o_proj=lambda x, **kw: (x,),
+    )
+    output = torch.empty(16, 12 * 512)
+    qfm.forward_qfm(impl, torch.zeros(16, 1024), None, SimpleNamespace(qfm=batch), output)
+    assert gathers.count(torch.int8) == 1
+    assert gathers.count(torch.float32) == 1
+    assert gathers.count(torch.bfloat16) == int(fia_prefill)
+    assert len(fia_calls) == int(fia_prefill)
+    assert output[13:].count_nonzero() == 0

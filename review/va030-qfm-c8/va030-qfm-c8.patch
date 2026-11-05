@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/docs/source/developer_guide/kimi_k3_qfm_c8.md
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,233 @@
 +# Kimi K3 full576 FP8 QFM candidate
 +
 +## Local experimental FIA Prefill variant (not the published bb79bb2 installer)
@@ -188,13 +188,27 @@
 +
 +Routing uses scheduler CPU stage flags, including short final Prefill chunks,
 +not query length. Pure Decode and DSpark verification retain the existing
-+FP8-output mode2 path and Decode graph behavior. Mixed batches split adjacent
-+stage ranges: Prefill uses ordinary projections, Decode uses mode0 DSL
-+floating outputs, then Q is quantized at the shared QFM reader. This preserves
-+the floating-Q contract for FIA Prefill; mixed-batch preparation adds launches
-+and temporary tensors and needs separate performance measurement. No permanent
-+Cache format or scale changes. CPU tests cover stage routing, padding, slots,
-+gapped Cache writes and Decode path selection; NPU/model validation is pending.
++FP8-output mode2 path and Decode graph behavior. Pure Decode does not build
++unused CPU stage segments. Mixed batches split adjacent stage ranges: Prefill
++uses ordinary projections and quantizes only its own Q; Decode keeps mode2
++FP8 Q and matching scales without re-quantization. Byte-view copies assemble
++the shared QFM input. The QFM Prefill backend needs no full-batch BF16 Q/KV
++scratch. FIA Prefill additionally keeps floating Q/current KV only in its
++Prefill slices (unused Decode slices are zero). With DCP, that FIA Q needs an
++additional BF16 head gather; this mixed FIA combination needs separate
++performance measurement. No permanent Cache format or scale changes.
++
++The pinned DSL schema has no RMSNorm bias argument. Weight preparation now
++rejects a loaded nonzero/NaN Q-a or KV-a norm bias rather than silently dropping
++ModelSlim correction. Loaded zero bias or an allocated but unloaded bias is
++accepted. The content check runs once at weight preparation, never in forward.
++Use ordinary preprocessing (`enable_mlapo=false`) for a checkpoint requiring
++nonzero norm bias until a bias-aware native Prolog is available.
++
++CPU regressions cover stage routing, padding, slots, gapped Cache writes,
++byte-exact Decode Q/scales and Capture→Prefill→Decode metadata refresh. These
++do not validate real NPU graph replay, native numerical equivalence, DSpark
++acceptance or an end-to-end performance recovery.
 +
 +Both P and D must install this revision and enable QFM C8. Use the built-in
 +`MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
@@ -1436,7 +1450,7 @@
 +        assert len(seen) == total // local_dcp // 128
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,403 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Adapter contracts only; mocks are NOT native Prolog/HCCL acceptance."""
 +
@@ -1609,9 +1623,11 @@
 +
 +
 +@pytest.mark.parametrize("queries,flags", [([1], [True]), ([4, 9, 1], [False, True, False])])
-+def test_stage_routing_preserves_scatter_slots_and_bypasses_prefill_dsl(qfm, monkeypatch, queries, flags):
++@pytest.mark.parametrize("fia_prefill", [False, True])
++def test_stage_routing_preserves_scatter_slots_and_decode_mode2(qfm, monkeypatch, queries, flags, fia_prefill):
 +    b, _ = builder(qfm, monkeypatch)
 +    b.mlapo_prefill = False
++    b.fia_prefill = fia_prefill
 +    tokens = sum(queries)
 +    c = common(queries, [128 + q for q in queries], capacity=tokens + 2)
 +    c.is_prefilling = torch.tensor(flags)
@@ -1629,19 +1645,52 @@
 +        ordinary_calls.append(count)
 +        return chunk[:, :576, None].transpose(1, 2).repeat(1, 12, 1), chunk[:, :576]
 +
-+    def floating(chunk, slots, destination):
-+        dsl_calls.append(chunk.shape[0])
-+        qfm.write_cache(chunk[:, :576], slots, destination, torch.ones(1))
-+        return chunk[:, None, :576].repeat(1, 12, 1), chunk[:, :576]
++    class NativeProlog:
++        def __call__(self, chunk, slots, destination):
++            count = chunk.shape[0]
++            qfm.write_cache(chunk[:, :576], slots, destination, torch.ones(1))
++            codes = (torch.arange(count * 12 * 576).reshape(count, 12, 576) % 31 - 15).to(torch.float8_e4m3fn)
++            scales = torch.arange(count * 12, dtype=torch.float32).reshape(count, 12) + 0.25
++            dsl_calls.append((count, codes.clone(), scales.clone()))
++            return codes, scales
++
++        def floating(self, *args):
++            raise AssertionError("Mixed-batch Decode must keep native FP8 mode2 outputs")
 +
 +    monkeypatch.setattr(qfm, "ordinary_qfm_inputs", ordinary)
 +    impl = SimpleNamespace(qfm_scale=torch.ones(1), num_heads=12)
-+    q, kv = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, SimpleNamespace(floating=floating))
-+    torch.testing.assert_close(q, hidden[:, None, :576].repeat(1, 12, 1), rtol=0, atol=0)
-+    torch.testing.assert_close(kv, hidden[:, :576], rtol=0, atol=0)
++    q, kv, q_scale, fia_q = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, NativeProlog())
 +    assert torch.equal(raw, expected)
 +    assert ordinary_calls == [end - begin for begin, end, p in batch.preprocess_segments if p]
-+    assert dsl_calls == [end - begin for begin, end, p in batch.preprocess_segments if not p]
++    assert [entry[0] for entry in dsl_calls] == [end - begin for begin, end, p in batch.preprocess_segments if not p]
++    expected_q = hidden[:, None, :576].repeat(1, 12, 1)
++    if all(flags):
++        # Pure Prefill keeps the existing ordinary BF16 route, including its
++        # current floating KV for FIA; it never calls the DSL Prolog.
++        torch.testing.assert_close(q, expected_q, rtol=0, atol=0)
++        torch.testing.assert_close(kv, hidden[:, :576], rtol=0, atol=0)
++        assert q_scale is None and fia_q is None
++    else:
++        assert q.dtype == torch.float8_e4m3fn
++        assert q_scale.shape == (tokens + 2, 12)
++        decode_index = 0
++        for begin, end, prefill in batch.preprocess_segments:
++            if prefill:
++                expected_codes, expected_scale = qfm.quantize_query(expected_q[begin:end])
++            else:
++                _, expected_codes, expected_scale = dsl_calls[decode_index]
++                decode_index += 1
++            assert torch.equal(q[begin:end].view(torch.uint8), expected_codes.view(torch.uint8))
++            assert torch.equal(q_scale[begin:end], expected_scale)
++            if fia_prefill:
++                if prefill:
++                    torch.testing.assert_close(fia_q[begin:end], expected_q[begin:end], rtol=0, atol=0)
++                    torch.testing.assert_close(kv[begin:end], hidden[begin:end, :576], rtol=0, atol=0)
++                else:
++                    assert fia_q[begin:end].count_nonzero() == 0
++                    assert kv[begin:end].count_nonzero() == 0
++        if not fia_prefill:
++            assert kv is None and fia_q is None
 +
 +
 +@pytest.mark.parametrize("prefill", [False, True])
@@ -1659,7 +1708,7 @@
 +
 +    def staged(*args):
 +        calls.append("ordinary_prefill")
-+        return torch.zeros(8, 12, 576, dtype=torch.bfloat16), torch.zeros(8, 576, dtype=torch.bfloat16)
++        return torch.zeros(8, 12, 576, dtype=torch.bfloat16), torch.zeros(8, 576, dtype=torch.bfloat16), None, None
 +
 +    def reader(impl, q, cache, batch, q_scale):
 +        assert (q_scale is None) == prefill
@@ -1677,9 +1726,137 @@
 +    )
 +    qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), torch.empty(8, 12 * 512))
 +    assert calls == ["ordinary_prefill" if prefill else "decode_mode2"]
++
++
++@pytest.mark.parametrize("dcp,retain_for_graph", [(1, True), (2, False), (2, True)])
++def test_pure_decode_skips_host_stage_boundaries(qfm, monkeypatch, dcp, retain_for_graph):
++    b, _ = builder(qfm, monkeypatch, dcp=dcp)
++    b.mlapo_prefill = False
++    c = common([8], [1024], capacity=16)
++    c.is_prefilling.fill_(False)
++
++    class ForbiddenHostBoundaries:
++        def __getitem__(self, index):
++            raise AssertionError("Pure Decode must not read or reconstruct CPU stage boundaries")
++
++    c.query_start_loc_cpu = ForbiddenHostBoundaries()
++    batch = b.build(c, retain_for_graph=retain_for_graph)
++    assert not batch.has_prefill
++    assert batch.preprocess_segments == ()
++
++
++@pytest.mark.parametrize("same_capacity", [False, True])
++def test_decode_capture_then_prefill_then_decode_keeps_mode2(qfm, monkeypatch, same_capacity):
++    b, _ = builder(qfm, monkeypatch)
++    b.mlapo_prefill = False
++    c = common([4], [132], capacity=8)
++    c.is_prefilling.fill_(False)
++    captured = b.build(c, retain_for_graph=True)
++    original_pointers = {name: getattr(captured, name).data_ptr() for name in ("table", "slots", "lengths", "used")}
++    p = common([4 if same_capacity else 33], [1024], capacity=8 if same_capacity else 40)
++    p.is_prefilling.fill_(True)
++    prefill = b.build(p)
++    assert prefill.has_prefill
++    c.seq_lens.fill_(260)
++    c.slot_mapping.add_(128)
++    decoded = b.build(c)
++    assert decoded is captured
++    assert not decoded.has_prefill and not decoded.preprocess_segments
++    assert original_pointers == {name: getattr(decoded, name).data_ptr() for name in original_pointers}
++    assert torch.equal(decoded.slots[:4], c.slot_mapping)
++    assert decoded.lengths[:4].tolist() == [257, 258, 259, 260]
++    mode2 = []
++
++    class Prolog:
++        def __call__(self, hidden, slots, cache):
++            mode2.append(slots.clone())
++            return torch.zeros(8, 12, 576).to(torch.float8_e4m3fn), torch.full((8, 12), 0.25)
++
++        def floating(self, *args):
++            raise AssertionError("Decode graph path switched to mode0 after Prefill")
++
++    def reader(impl, q, cache, batch, q_scale):
++        assert q.dtype == torch.float8_e4m3fn
++        assert torch.equal(q_scale, torch.full((8, 12), 0.25))
++        return torch.zeros(8, 12, 512), None
++
++    monkeypatch.setattr(qfm, "run_qfm_reader", reader)
++    impl = SimpleNamespace(
++        qfm_prolog=Prolog(),
++        qfm_mlapo_prefill=False,
++        dcp_enabled=False,
++        _v_up_proj_batch_major=lambda x: x.flatten(1),
++        use_output_gate=False,
++        o_proj=lambda x, **kw: (x,),
++    )
++    qfm.forward_qfm(impl, torch.zeros(8, 1024), None, SimpleNamespace(qfm=decoded), torch.empty(8, 12 * 512))
++    assert len(mode2) == 1
++
++
++@pytest.mark.parametrize("fia_prefill", [False, True])
++def test_mixed_dcp_keeps_fp8_q_scales_and_separate_fia_q(qfm, monkeypatch, fia_prefill):
++    b, _ = builder(qfm, monkeypatch, dcp=2, rank=1)
++    b.mlapo_prefill = False
++    b.fia_prefill = fia_prefill
++    c = common([4, 9], [132, 1024], capacity=16)
++    c.is_prefilling = torch.tensor([False, True])
++    batch = b.build(c)
++    q8 = (torch.arange(16 * 12 * 576).reshape(16, 12, 576) % 31 - 15).to(torch.float8_e4m3fn)
++    scales = torch.arange(16 * 12, dtype=torch.float32).reshape(16, 12) + 0.25
++    floating_q = torch.zeros(16, 12, 576, dtype=torch.bfloat16)
++    floating_q[4:13].fill_(3.5)
++    kv = torch.zeros(16, 576, dtype=torch.bfloat16)
++    kv[4:13].fill_(2.5)
++    gathers, fia_calls = [], []
++
++    def staged(*args):
++        return q8, kv if fia_prefill else None, scales, floating_q if fia_prefill else None
++
++    def gather(x, dim):
++        assert dim == 1
++        gathers.append(x.dtype)
++        return torch.cat((x, x), dim=dim)
++
++    def attention(q, cache, q_scale, *args, **kwargs):
++        assert q.dtype == torch.float8_e4m3fn
++        assert torch.equal(q[:, :12].view(torch.uint8), q8.view(torch.uint8))
++        assert torch.equal(q[:, 12:].view(torch.uint8), q8.view(torch.uint8))
++        assert torch.equal(q_scale[:, :12], scales)
++        assert torch.equal(q_scale[:, 12:], scales)
++        return torch.ones(16, 24, 512), torch.zeros(24, 16)
++
++    def fill(impl, q, current_kv, cache, batch, latent, lse):
++        assert fia_prefill
++        assert q.dtype == torch.bfloat16
++        torch.testing.assert_close(q, torch.cat((floating_q, floating_q), dim=1), rtol=0, atol=0)
++        torch.testing.assert_close(current_kv, kv, rtol=0, atol=0)
++        fia_calls.append(True)
++
++    monkeypatch.setattr(qfm, "stage_specific_qfm_inputs", staged)
++    monkeypatch.setattr(qfm, "fill_fia_prefill", fill)
++    impl = SimpleNamespace(
++        qfm_prolog=object(),
++        qfm_mlapo_prefill=False,
++        dcp_enabled=True,
++        _dcp_all_gather=gather,
++        _merge_dcp_attention_output=lambda x, lse: x[:, :12],
++        qfm_ops=(attention, None),
++        qfm_scale=torch.ones(1),
++        scale=0.1,
++        _v_up_proj_batch_major=lambda x: x.flatten(1),
++        use_output_gate=False,
++        o_proj=lambda x, **kw: (x,),
++    )
++    output = torch.empty(16, 12 * 512)
++    qfm.forward_qfm(impl, torch.zeros(16, 1024), None, SimpleNamespace(qfm=batch), output)
++    assert gathers.count(torch.int8) == 1
++    assert gathers.count(torch.float32) == 1
++    assert gathers.count(torch.bfloat16) == int(fia_prefill)
++    assert len(fia_calls) == int(fia_prefill)
++    assert output[13:].count_nonzero() == 0
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_weights_cpu.py
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,261 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Post-load weight/layout contracts only; no native Prolog accuracy claim."""
 +
@@ -1821,6 +1998,53 @@
 +    module, scheme, _ = adapter
 +    result = module.prepare_prolog_weights(make_impl(scheme, q_rank=q_rank, nope=nope))
 +    assert result["wqb"].shape == (6 * (nope + 64), q_rank)
++
++
++@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
++@pytest.mark.parametrize("bias_value", [0.25, float("nan")])
++def test_rejects_loaded_norm_bias_before_weight_conversion(adapter, norm_name, bias_value):
++    module, scheme, conversions = adapter
++    impl = make_impl(scheme, device="cpu")
++    norm = getattr(impl, norm_name)
++    # A loaded nonzero or NaN correction must not silently disappear from
++    # the bias-free native interface. This is checked at weight preparation.
++    norm.bias = torch.full_like(norm.weight, bias_value)
++    norm.bias_loaded = True
++    with pytest.raises(ValueError, match="bias") as error:
++        module.prepare_prolog_weights(impl)
++    message = str(error.value).lower()
++    assert "mlapo" in message and ("disable" in message or "false" in message)
++    assert not conversions
++
++
++@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
++def test_loaded_zero_norm_bias_is_accepted_without_mutation(adapter, norm_name):
++    module, scheme, _ = adapter
++    impl = make_impl(scheme, device="cpu")
++    norm = getattr(impl, norm_name)
++    allocated_bias = torch.zeros_like(norm.weight)
++    norm.bias = allocated_bias
++    norm.bias_loaded = True
++    result = module.prepare_prolog_weights(impl)
++    assert result["norm_weight_qa"].shape == impl.q_a_layernorm.weight.shape
++    assert result["norm_weight_kva"].shape == impl.kv_a_layernorm.weight.shape
++    assert norm.bias is allocated_bias and norm.bias_loaded
++    assert torch.count_nonzero(allocated_bias).item() == 0
++
++
++@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
++def test_allocated_but_unloaded_norm_bias_keeps_existing_contract(adapter, norm_name):
++    module, scheme, _ = adapter
++    impl = make_impl(scheme)
++    norm = getattr(impl, norm_name)
++    allocated_bias = torch.full_like(norm.weight, 0.25)
++    norm.bias = allocated_bias
++    norm.bias_loaded = False
++    result = module.prepare_prolog_weights(impl)
++    assert result["norm_weight_qa"].shape == impl.q_a_layernorm.weight.shape
++    assert result["norm_weight_kva"].shape == impl.kv_a_layernorm.weight.shape
++    assert norm.bias is allocated_bias
++    assert not norm.bias_loaded
 +
 +
 +@pytest.mark.parametrize(
@@ -2091,7 +2315,7 @@
          if self.dcp_enabled and (
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm.py
-@@ -0,0 +1,570 @@
+@@ -0,0 +1,591 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Opt-in K3 full576 FP8 cache. No persistent BF16 history or Q-by-K indices.
@@ -2406,10 +2630,12 @@
 +        flags = common.is_prefilling
 +        if flags is not None and flags.device.type != "cpu":
 +            raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
++        batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
 +        batch.preprocess_segments = ()
 +        if not self.mlapo_prefill:
 +            if flags is None:
 +                raise ValueError("Stage-specific MLAPO requires scheduler Prefill flags")
++        if not self.mlapo_prefill and batch.has_prefill:
 +            bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
 +            segments = []
 +            for begin, end, prefill in zip(bounds, bounds[1:], flags[: common.num_reqs].tolist()):
@@ -2461,7 +2687,6 @@
 +            batch.schedule = schedule
 +        else:
 +            batch.schedule.copy_(schedule)
-+        batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
 +        return batch
 +
 +
@@ -2562,8 +2787,9 @@
 +    prolog = getattr(impl, "qfm_prolog", None)
 +    q_scale = None
 +    kv = None
++    fia_q = None
 +    if prolog is not None and not getattr(impl, "qfm_mlapo_prefill", True) and batch.has_prefill:
-+        q, kv = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
++        q, kv, q_scale, fia_q = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
 +    elif prolog is None:
 +        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
 +        write_cache(kv, batch.slots, cache, impl.qfm_scale)
@@ -2579,13 +2805,17 @@
 +            q_scale = impl._dcp_all_gather(q_scale, dim=1)
 +        else:
 +            q = impl._dcp_all_gather(q, dim=1)
++        if fia_q is not None:
++            # FIA needs the original floating Prefill Q, not a cast of Q8
++            # without descales. All ranks take this branch from CPU stage flags.
++            fia_q = impl._dcp_all_gather(fia_q, dim=1)
 +    if batch.qfm_needed:
 +        latent, lse = run_qfm_reader(impl, q, cache, batch, q_scale=q_scale)
 +    else:
 +        latent = torch.zeros((*q.shape[:2], QFM_VALUE), dtype=q.dtype, device=q.device)
 +        lse = torch.full((*q.shape[:2], 1), -float("inf"), device=q.device)
 +    if batch.fia_requests:
-+        fill_fia_prefill(impl, q, kv, cache, batch, latent, lse)
++        fill_fia_prefill(impl, q if fia_q is None else fia_q, kv, cache, batch, latent, lse)
 +    if impl.dcp_enabled:
 +        latent = impl._merge_dcp_attention_output(latent, lse)
 +    projected = impl._v_up_proj_batch_major(latent)
@@ -2598,11 +2828,11 @@
 +
 +
 +def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
-+    """Ordinary Prefill, DSL Decode; mixed batches share floating Q outputs.
++    """Keep mode2 Decode output/cache writes even in mixed-stage batches.
 +
-+    Pure Decode keeps the existing fused FP8 mode2 fast path. Mixed batches
-+    use mode0 for Decode segments, matching the existing FIA mixed-batch
-+    contract, then quantize Q together at the QFM reader boundary.
++    Only ordinary Prefill queries are quantized outside Prolog. Copy Decode
++    FP8 codes and descales unchanged. FIA Prefill optionally retains its own
++    floating Q/current KV; these step-local tensors never enter graph state.
 +    """
 +    tokens = batch.slots.numel()
 +    segments = batch.preprocess_segments
@@ -2611,26 +2841,41 @@
 +    if len(segments) == 1 and segments[0] == (0, tokens, True):
 +        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
 +        write_cache(kv, batch.slots, cache, impl.qfm_scale)
-+        return q, kv
-+    q = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
-+    kv = torch.empty((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
++        return q, kv, None, None
++    # Byte views avoid relying on FP8 cat/indexing support on the installed PTA.
++    q_bytes = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.uint8, device=hidden.device)
++    q_scale = torch.empty((tokens, impl.num_heads), dtype=torch.float32, device=hidden.device)
++    kv = fia_q = None
++    if batch.fia_requests:
++        kv = torch.zeros((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
++        fia_q = torch.zeros((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
 +    for begin, end, prefill in segments:
 +        chunk = hidden[begin:end].contiguous()
 +        slots = batch.slots[begin:end]
 +        if prefill:
 +            chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
 +            write_cache(chunk_kv, slots, cache, impl.qfm_scale)
++            if fia_q is not None:
++                fia_q[begin:end].copy_(chunk_q)
++                kv[begin:end].copy_(chunk_kv)
++            chunk_q, chunk_scale = quantize_query(chunk_q)
 +        else:
-+            chunk_q, chunk_kv = prolog.floating(chunk, slots, cache)
-+        q[begin:end].copy_(chunk_q)
-+        kv[begin:end].copy_(chunk_kv)
-+    return q, kv
++            chunk_q, chunk_scale = prolog(chunk, slots, cache)
++        q_bytes[begin:end].copy_(chunk_q.view(torch.uint8))
++        q_scale[begin:end].copy_(chunk_scale)
++    return q_bytes.view(torch.float8_e4m3fn), kv, q_scale, fia_q
++
++
++def quantize_query(q):
++    floating = q.float()
++    scale = floating.abs().amax(-1).clamp_min(1e-12) / QFM_FP8_MAX
++    values = (floating / scale[..., None]).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
++    return values, scale
 +
 +
 +def run_qfm_reader(impl, q, cache, batch, q_scale=None):
 +    if q_scale is None:
-+        q_scale = q.float().abs().amax(-1).clamp_min(1e-12) / QFM_FP8_MAX
-+        q8 = (q.float() / q_scale[..., None]).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
++        q8, q_scale = quantize_query(q)
 +    else:
 +        q8 = q
 +    attention, _ = impl.qfm_ops
@@ -2807,7 +3052,7 @@
 +        return q, kv
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,129 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Private ND projection weights for K3's full576 QFM DSL prolog.
 +
@@ -2886,6 +3131,14 @@
 +    if not math.isfinite(eps) or eps <= 0 or eps != float(norm_kva.variance_epsilon):
 +        raise ValueError("QFM prolog requires equal positive finite Q/KV RMSNorm epsilon")
 +    for name, norm, size in (("q_a", norm_qa, q_rank), ("kv_a", norm_kva, KV_RANK)):
++        # Loading-time check only. The native schema has no norm-bias input;
++        # zero correction is harmless, nonzero/NaN correction must not vanish.
++        bias = getattr(norm, "bias", None)
++        if getattr(norm, "bias_loaded", False) and (bias is None or bool(torch.count_nonzero(bias).item())):
++            raise ValueError(
++                f"QFM DSL Prolog cannot apply loaded nonzero {name} RMSNorm bias; "
++                "disable enable_mlapo or use a bias-aware Prolog implementation"
++            )
 +        if norm.weight.dtype not in (torch.bfloat16, torch.float32) or tuple(norm.weight.shape) != (size,):
 +            raise ValueError(f"QFM prolog {name} RMSNorm weight must be BF16 or FP32 [{size}]")
 +
