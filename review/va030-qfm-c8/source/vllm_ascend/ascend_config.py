@@ -642,6 +642,8 @@ class AscendConfig:
     # Experimental eager Prefill FIA reader; Decode/verification keep QFM.
     enable_kimi_k3_qfm_fia_prefill: bool = False
     kimi_k3_c8_prefill_backend: str = "qfm"
+    # Keep Decode MLAPO while optionally using ordinary Prefill projections.
+    enable_kimi_k3_mlapo_prefill: bool = True
     enable_sparse_li_c8: bool = False
     enable_sparse_li_c4: bool = False
     pd_tp_ratio: int = 1

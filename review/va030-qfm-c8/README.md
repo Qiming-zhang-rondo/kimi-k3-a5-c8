@@ -1,12 +1,12 @@
 # Kimi K3 A5 C8：当前源码与性能分析入口
 
 本目录提供可直接浏览的源码快照、相对 VA 基线的统一补丁，以及实际使用的 DSL Prolog 源码。
-用于代码评审和性能分析；这里没有修改算法，也没有更新部署安装脚本。
+用于代码评审和性能分析。本次增加按阶段控制 Prolog 的开关；默认行为保持不变。
 
 ## 版本与范围
 
 - VA 基线：`c09d3e20b9c45c80b34ae3781440d90904a44023`（0.30）。
-- 对应已发布安装补丁：[`00dcf114/va030_qfm/install-va030-qfm-pd.py`](../../va030_qfm/install-va030-qfm-pd.py)。
+- 对应已发布安装补丁：[`install-va030-qfm-stage-mlapo.py`](../../va030_qfm/install-va030-qfm-stage-mlapo.py)。
 - `source/` 中的 23 个文件逐个 SHA256 校验，与该安装脚本的 AFTER 状态完全一致。
 - QFM / QFM metadata：CANN ops-transformer `8b6924e68ed27181141cde84fa5a942c0c060aac`。
 - DSL Prolog：cannbot-dsl `9e01355ab8f809050579271c0eadcc5858ed20bc`，源码 SHA256 见 manifest。
@@ -18,13 +18,13 @@
 
 | 入口 | 作用 |
 |---|---|
-| [MLA forward](source/vllm_ascend/attention/mla_v1.py#L3504) | 主模型进入 QFM 路径；connector hooks |
-| [forward_qfm](source/vllm_ascend/attention/kimi_k3_qfm.py#L443) | 前处理、写 Cache、DCP、Attention、输出投影 |
+| [MLA forward](source/vllm_ascend/attention/mla_v1.py#L3505) | 主模型进入 QFM 路径；connector hooks |
+| [forward_qfm](source/vllm_ascend/attention/kimi_k3_qfm.py#L463) | 前处理、写 Cache、DCP、Attention、输出投影 |
 | [QFMProlog.__call__](source/vllm_ascend/attention/kimi_k3_qfm_prolog.py#L66) | 外层 BF16 hidden 动态量化、mode2、直接写或临时 Cache 后 Scatter |
 | [QFMProlog.floating](source/vllm_ascend/attention/kimi_k3_qfm_prolog.py#L111) | FIA Prefill 的 mode0 路径 |
 | [Prolog 权重适配](source/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py#L25) | 三个 W8A8 MXFP8 Group32 投影；私有 ND 权重；kv_b 派生矩阵 BF16 |
-| [QFMMetadataBuilder](source/vllm_ascend/attention/kimi_k3_qfm.py#L200) | 虚拟序列、页表、长度和 scheduling metadata |
-| [run_qfm_reader](source/vllm_ascend/attention/kimi_k3_qfm.py#L484) | QFM 的实际输入和参数 |
+| [QFMMetadataBuilder](source/vllm_ascend/attention/kimi_k3_qfm.py#L203) | 虚拟序列、页表、长度和 scheduling metadata |
+| [run_qfm_reader](source/vllm_ascend/attention/kimi_k3_qfm.py#L536) | QFM 的实际输入和参数 |
 | [DSL _execute_async](native/quant_mla_prolog.py#L8499) | 参数检查、可用核数查询、中间张量申请、程序查找及下发 |
 | [DSL PyTorch 注册](native/quant_mla_prolog.py#L8810) | profiling 名称 cannbotdsl_quant_mla_prolog::quant_mla_prolog |
 | [现有设计说明](source/docs/source/developer_guide/kimi_k3_qfm_c8.md) | Cache/TP/DSpark/DCP/PD 范围和限制 |
@@ -65,7 +65,27 @@ NPU 时间线上观察到 Event Wait，尚未配对 Record，不能据此认定�
 
 ## 验证记录
 
-- 198 项 CPU 回归、2 项安装/升级检查通过（发布 PD 候选时）。
+- 204 项 CPU 回归、3 项安装/升级检查通过（发布分阶段 Prolog 候选时）。
 - 先前单卡合成 Prolog/QFM/FIA 正确性测试已通过；不代表所有整模组合验收通过。
 - PD 网络传输、真实 HCCL、DSpark 接受率及各图模式组合仍需设备端验收。
-- 本次发布仅把既有代码展开，未运行新的 NPU 性能测试，也未宣称 TTFT 回退已修复。
+- 分阶段 Prolog 开关尚未运行新的 NPU 精度/性能测试，也未宣称 TTFT 回退已修复。
+
+
+## Prefill 关闭 Prolog，Decode 保留
+
+```json
+{
+  "enable_kimi_k3_qfm_c8": true,
+  "enable_mlapo": true,
+  "enable_kimi_k3_mlapo_prefill": false,
+  "kimi_k3_c8_prefill_backend": "qfm",
+  "enable_kv_nz": false
+}
+```
+
+`enable_kimi_k3_mlapo_prefill` 默认 true。它只控制前处理，和 FIA/QFM
+Attention backend 的选择独立。Prefill 用普通 W8A8 MXFP8 投影和显式 FP8
+写入；纯 Decode/DSpark 验证保留 FP8-output mode2。混合批次按 scheduler
+阶段标记分段，Decode 段使用 DSL mode0，合并浮点 Q 后在 QFM 入口统一量化。
+混合批次会多一些下发和临时张量，需单独测性能；主模型/草稿和 Cache 格式不变。
+启动日志 `prefill_mlapo=False` 表示该策略已配置。

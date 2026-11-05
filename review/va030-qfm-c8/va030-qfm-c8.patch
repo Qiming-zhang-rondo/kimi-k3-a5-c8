@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/docs/source/developer_guide/kimi_k3_qfm_c8.md
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,219 @@
 +# Kimi K3 full576 FP8 QFM candidate
 +
 +## Local experimental FIA Prefill variant (not the published bb79bb2 installer)
@@ -177,6 +177,24 @@
 +the existing target/draft construction-tag isolation and cache format checks.
 +
 +## Mooncake V2 PD candidate
++
++### Stage-specific Prolog
++
++Set `enable_mlapo=true` and `enable_kimi_k3_mlapo_prefill=false` to keep
++DSL Prolog for Decode while using ordinary W8A8 MXFP8 projections, RMSNorm
++and explicit FP8 Cache writing for Prefill. The new flag defaults to true;
++`enable_mlapo=false` still disables DSL Prolog for both stages. Attention's
++`kimi_k3_c8_prefill_backend` (qfm/fia) is independent of this writer policy.
++
++Routing uses scheduler CPU stage flags, including short final Prefill chunks,
++not query length. Pure Decode and DSpark verification retain the existing
++FP8-output mode2 path and Decode graph behavior. Mixed batches split adjacent
++stage ranges: Prefill uses ordinary projections, Decode uses mode0 DSL
++floating outputs, then Q is quantized at the shared QFM reader. This preserves
++the floating-Q contract for FIA Prefill; mixed-batch preparation adds launches
++and temporary tensors and needs separate performance measurement. No permanent
++Cache format or scale changes. CPU tests cover stage routing, padding, slots,
++gapped Cache writes and Decode path selection; NPU/model validation is pending.
 +
 +Both P and D must install this revision and enable QFM C8. Use the built-in
 +`MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
@@ -1418,7 +1436,7 @@
 +        assert len(seen) == total // local_dcp // 128
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,240 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Adapter contracts only; mocks are NOT native Prolog/HCCL acceptance."""
 +
@@ -1574,6 +1592,91 @@
 +    qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), output)
 +    assert gather_calls == [torch.int8, torch.float32]
 +    assert output[4:].count_nonzero() == 0
++
++
++@pytest.mark.parametrize("dcp", [1, 2])
++def test_scheduler_stage_segments_keep_short_prefill_and_padding(qfm, monkeypatch, dcp):
++    b, _ = builder(qfm, monkeypatch, dcp=dcp)
++    b.mlapo_prefill = False
++    c = common([4, 1, 9, 2], [132, 129, 200, 300], capacity=20)
++    c.is_prefilling = torch.tensor([False, True, True, False])
++    batch = b.build(c)
++    assert batch.preprocess_segments == ((0, 4, False), (4, 14, True), (14, 20, False))
++    assert batch.has_prefill
++    c.is_prefilling = None
++    with pytest.raises(ValueError, match="stage|Stage"):
++        b.build(c)
++
++
++@pytest.mark.parametrize("queries,flags", [([1], [True]), ([4, 9, 1], [False, True, False])])
++def test_stage_routing_preserves_scatter_slots_and_bypasses_prefill_dsl(qfm, monkeypatch, queries, flags):
++    b, _ = builder(qfm, monkeypatch)
++    b.mlapo_prefill = False
++    tokens = sum(queries)
++    c = common(queries, [128 + q for q in queries], capacity=tokens + 2)
++    c.is_prefilling = torch.tensor(flags)
++    # Distinct, non-monotonic cache slots and invalid padding detect slicing errors.
++    c.slot_mapping = torch.tensor(list(reversed(range(tokens))) + [-1, -1])
++    batch = b.build(c)
++    hidden = torch.randn(tokens + 2, 1024, dtype=torch.bfloat16)
++    raw = torch.full((256 + 2 * (73728 + 256),), 91, dtype=torch.uint8)
++    cache = qfm.cache_view(raw[256:], 2, 73728 + 256)
++    expected = raw.clone()
++    qfm.write_cache(hidden[:, :576], batch.slots, qfm.cache_view(expected[256:], 2, 73728 + 256), torch.ones(1))
++    ordinary_calls, dsl_calls = [], []
++
++    def ordinary(impl, chunk, count):
++        ordinary_calls.append(count)
++        return chunk[:, :576, None].transpose(1, 2).repeat(1, 12, 1), chunk[:, :576]
++
++    def floating(chunk, slots, destination):
++        dsl_calls.append(chunk.shape[0])
++        qfm.write_cache(chunk[:, :576], slots, destination, torch.ones(1))
++        return chunk[:, None, :576].repeat(1, 12, 1), chunk[:, :576]
++
++    monkeypatch.setattr(qfm, "ordinary_qfm_inputs", ordinary)
++    impl = SimpleNamespace(qfm_scale=torch.ones(1), num_heads=12)
++    q, kv = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, SimpleNamespace(floating=floating))
++    torch.testing.assert_close(q, hidden[:, None, :576].repeat(1, 12, 1), rtol=0, atol=0)
++    torch.testing.assert_close(kv, hidden[:, :576], rtol=0, atol=0)
++    assert torch.equal(raw, expected)
++    assert ordinary_calls == [end - begin for begin, end, p in batch.preprocess_segments if p]
++    assert dsl_calls == [end - begin for begin, end, p in batch.preprocess_segments if not p]
++
++
++@pytest.mark.parametrize("prefill", [False, True])
++def test_forward_decode_keeps_mode2_prefill_uses_ordinary(qfm, monkeypatch, prefill):
++    b, _ = builder(qfm, monkeypatch)
++    b.mlapo_prefill = False
++    c = common([4], [132], capacity=8)
++    c.is_prefilling = torch.tensor([prefill])
++    batch = b.build(c, retain_for_graph=not prefill)
++    calls = []
++
++    def prolog(hidden, slots, cache):
++        calls.append("decode_mode2")
++        return torch.zeros(8, 12, 576).to(torch.float8_e4m3fn), torch.ones(8, 12)
++
++    def staged(*args):
++        calls.append("ordinary_prefill")
++        return torch.zeros(8, 12, 576, dtype=torch.bfloat16), torch.zeros(8, 576, dtype=torch.bfloat16)
++
++    def reader(impl, q, cache, batch, q_scale):
++        assert (q_scale is None) == prefill
++        return torch.ones(8, 12, 512), None
++
++    monkeypatch.setattr(qfm, "stage_specific_qfm_inputs", staged)
++    monkeypatch.setattr(qfm, "run_qfm_reader", reader)
++    impl = SimpleNamespace(
++        qfm_prolog=prolog,
++        qfm_mlapo_prefill=False,
++        dcp_enabled=False,
++        _v_up_proj_batch_major=lambda x: x.flatten(1),
++        use_output_gate=False,
++        o_proj=lambda x, **kw: (x,),
++    )
++    qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), torch.empty(8, 12 * 512))
++    assert calls == ["ordinary_prefill" if prefill else "decode_mode2"]
 --- /dev/null
 +++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_weights_cpu.py
 @@ -0,0 +1,214 @@
@@ -1961,7 +2064,7 @@
 +    assert aligned["mamba"].page_size_padded is None
 --- a/vllm_ascend/ascend_config.py
 +++ b/vllm_ascend/ascend_config.py
-@@ -637,6 +637,11 @@
+@@ -637,6 +637,13 @@
      enable_sp_by_pass: bool = False
      enable_sparse_sfa_turboquant: bool = False
      enable_sparse_sfa_c8: bool = False
@@ -1970,6 +2073,8 @@
 +    # Experimental eager Prefill FIA reader; Decode/verification keep QFM.
 +    enable_kimi_k3_qfm_fia_prefill: bool = False
 +    kimi_k3_c8_prefill_backend: str = "qfm"
++    # Keep Decode MLAPO while optionally using ordinary Prefill projections.
++    enable_kimi_k3_mlapo_prefill: bool = True
      enable_sparse_li_c8: bool = False
      enable_sparse_li_c4: bool = False
      pd_tp_ratio: int = 1
@@ -1986,7 +2091,7 @@
          if self.dcp_enabled and (
 --- /dev/null
 +++ b/vllm_ascend/attention/kimi_k3_qfm.py
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,570 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Opt-in K3 full576 FP8 cache. No persistent BF16 history or Q-by-K indices.
@@ -2071,6 +2176,7 @@
 +    if backend not in ("fia", "qfm"):
 +        raise ValueError("kimi_k3_c8_prefill_backend must be fia or qfm")
 +    impl.qfm_fia_prefill = backend == "fia" or getattr(config, "enable_kimi_k3_qfm_fia_prefill", False)
++    impl.qfm_mlapo_prefill = getattr(config, "enable_kimi_k3_mlapo_prefill", True)
 +    return True
 +
 +
@@ -2184,6 +2290,8 @@
 +    # (query begin, query end, local history length, original request page table).
 +    fia_requests: tuple = ()
 +    qfm_needed: bool = True
++    # CPU scheduler stage ranges: (begin, end, is_prefill), including padding.
++    preprocess_segments: tuple = ()
 +
 +
 +class QFMMetadataBuilder:
@@ -2198,6 +2306,7 @@
 +        self.mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.int8, device=device).triu_(1)
 +        self.buffers = {}
 +        self.fia_prefill = getattr(impl, "qfm_fia_prefill", False)
++        self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
 +
 +    def metadata(self, lengths, cu, used, max_q, mode):
 +        return self.metadata_op(
@@ -2297,6 +2406,22 @@
 +        flags = common.is_prefilling
 +        if flags is not None and flags.device.type != "cpu":
 +            raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
++        batch.preprocess_segments = ()
++        if not self.mlapo_prefill:
++            if flags is None:
++                raise ValueError("Stage-specific MLAPO requires scheduler Prefill flags")
++            bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
++            segments = []
++            for begin, end, prefill in zip(bounds, bounds[1:], flags[: common.num_reqs].tolist()):
++                if begin == end:
++                    continue
++                if segments and segments[-1][2] == prefill:
++                    segments[-1] = (segments[-1][0], end, prefill)
++                else:
++                    segments.append((begin, end, prefill))
++            if segments:
++                segments[-1] = (segments[-1][0], tokens, segments[-1][2])
++            batch.preprocess_segments = tuple(segments)
 +        batch.fia_requests = ()
 +        batch.qfm_needed = True
 +        if self.fia_prefill:
@@ -2437,7 +2562,9 @@
 +    prolog = getattr(impl, "qfm_prolog", None)
 +    q_scale = None
 +    kv = None
-+    if prolog is None:
++    if prolog is not None and not getattr(impl, "qfm_mlapo_prefill", True) and batch.has_prefill:
++        q, kv = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
++    elif prolog is None:
 +        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
 +        write_cache(kv, batch.slots, cache, impl.qfm_scale)
 +    elif batch.fia_requests:
@@ -2468,6 +2595,36 @@
 +    result = impl.o_proj(projected, is_prefill=batch.has_prefill)[0]
 +    output.copy_(result)
 +    return output
++
++
++def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
++    """Ordinary Prefill, DSL Decode; mixed batches share floating Q outputs.
++
++    Pure Decode keeps the existing fused FP8 mode2 fast path. Mixed batches
++    use mode0 for Decode segments, matching the existing FIA mixed-batch
++    contract, then quantize Q together at the QFM reader boundary.
++    """
++    tokens = batch.slots.numel()
++    segments = batch.preprocess_segments
++    if not segments:
++        raise ValueError("Missing scheduler stage ranges for Prefill MLAPO routing")
++    if len(segments) == 1 and segments[0] == (0, tokens, True):
++        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
++        write_cache(kv, batch.slots, cache, impl.qfm_scale)
++        return q, kv
++    q = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
++    kv = torch.empty((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
++    for begin, end, prefill in segments:
++        chunk = hidden[begin:end].contiguous()
++        slots = batch.slots[begin:end]
++        if prefill:
++            chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
++            write_cache(chunk_kv, slots, cache, impl.qfm_scale)
++        else:
++            chunk_q, chunk_kv = prolog.floating(chunk, slots, cache)
++        q[begin:end].copy_(chunk_q)
++        kv[begin:end].copy_(chunk_kv)
++    return q, kv
 +
 +
 +def run_qfm_reader(impl, q, cache, batch, q_scale=None):
@@ -2868,7 +3025,7 @@
          config = self.vllm_config
          if not getattr(config, "use_v2_model_runner", False):
              return False
-@@ -1312,6 +1353,30 @@
+@@ -1312,6 +1353,31 @@
              W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
              prefer_copy=True,
          )
@@ -2889,17 +3046,18 @@
 +                else:
 +                    self.qfm_prolog.update_weights(weights)
 +            logger.info(
-+                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=%s heads=%s",
++                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=%s heads=%s prefill_mlapo=%s",
 +                self.layer_name,
 +                value,
 +                "dsl-prolog" if self.enable_mlapo else "ordinary",
 +                self.num_heads,
++                self.enable_mlapo and self.qfm_mlapo_prefill,
 +            )
 +            return
          if self.enable_mlapo:
              layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
              if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
-@@ -3436,6 +3501,15 @@
+@@ -3436,6 +3502,15 @@
              # Profiling run.
              return output.fill_(0)
  

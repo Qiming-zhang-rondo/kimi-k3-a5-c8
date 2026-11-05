@@ -1,23 +1,22 @@
 {
   "base_commit": "c09d3e20b9c45c80b34ae3781440d90904a44023",
-  "installer_commit": "00dcf114b4d7b63490fa4be751947a768b32d965",
   "prolog_commit": "9e01355ab8f809050579271c0eadcc5858ed20bc",
   "files_sha256": {
-    "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "a90d1784c00f39723ee1846dc021e124cd341fc8fb8001149e999b52a6fb169c",
+    "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "cec9ee373f599d5411f89c6528a768fc834555960b7601d74c3c0cbf9317527c",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_fia_prefill.py": "25508531362c2e5119a1a1f6cf981bc858b90009af0949851a4730e627dcbb49",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "05a5e2f9184b5f5ad6c809753ac8946e9ca4f51fee7f3b8b40fa7314c597b210",
     "source/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py": "10dbf3318528c8baa3064fa1d433d1a966d22b6fcf421d802a2d0c649af3ab6c",
     "source/tests/ut/attention/test_kimi_k3_qfm_cpu.py": "a70713112781e7245b65f95698a190badda2273fa34f0382ace15d67aea56153",
     "source/tests/ut/attention/test_kimi_k3_qfm_pd_cpu.py": "51dbae2e5038e47ada614235a9c869a13e08f8d0cf1cfefae140576fbe163d1e",
-    "source/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py": "50d39a6519cbbbf4185dfa9bf3ce6463f7668b862aeae9f9677ee4151faee9bc",
+    "source/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py": "af5bd333448f53d7347038ab0ca3d822f41e6e50ec61c3ca7c67ce363b931312",
     "source/tests/ut/attention/test_kimi_k3_qfm_prolog_weights_cpu.py": "08e900cd75954a33dcc90a4b37e75f70d9db2d8378813522fda66cd406c23c86",
     "source/tests/ut/attention/test_kimi_k3_qfm_worker_blocks_cpu.py": "1c2e70d55f6c57b9caff188b4cfb248ac2cff3ceed689863200b06a8ea799c80",
-    "source/vllm_ascend/ascend_config.py": "6cb1277468e107a434c949d0e3710ee8cefec02cd64f8482fde9c4a9d8195010",
+    "source/vllm_ascend/ascend_config.py": "3962e20f7cf01c434552ec951a6969d759f36e6311b1fa6c4c0e7e36abbff548",
     "source/vllm_ascend/attention/context_parallel/mla_cp.py": "7fc8a0f2ddc782f93dd21cfcb325cd181619ad501afa439dd7929b04e8361f01",
-    "source/vllm_ascend/attention/kimi_k3_qfm.py": "24f4e5cf127f65dec21889d73de4d18a8e9d74853fb84851d6c1c716cc7b1667",
+    "source/vllm_ascend/attention/kimi_k3_qfm.py": "64076f4a7df60158cb78036992949d0ec62c4516ddbab2da8423495d2cfcba3d",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog.py": "55cc7253c9c4bb1e552fe26a26e753e010960006320f77d89a044144d3a1e791",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py": "558f9665d0bc8f02cc08f403551e56ecb9919539251494829422e192da6f631d",
-    "source/vllm_ascend/attention/mla_v1.py": "f747ab789a6645fefe7fd11eaec2c91de3e57cf98ce5f6d7e4727e7707fe0018",
+    "source/vllm_ascend/attention/mla_v1.py": "9f4be18f87cd80377a9387dd990caad636441d583585086409a1452ad10f0d81",
     "source/vllm_ascend/core/kv_cache_interface.py": "5017fe57ce4f231ebb4153b75449b4b3e84171df9396345c711c9797ac924a9b",
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py": "02b356832daaae6c593f6edc627328c4887de925b0de93faa60c257296b5a372",
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/metadata.py": "38ee7bea387dab9c98fa55c19886d5f31c86bf064d0be32c6045867dc969d4b6",
@@ -26,10 +25,12 @@
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/qfm_contract.py": "1588e7bcb36f787bf05ebfa8f62fd2345f4d2bc89a06d555e004e4afefac634e",
     "source/vllm_ascend/worker/v2/attn_utils.py": "fc2840d0c00919d5701942c30adb88275dd38277e1e90481121de0d1df85345e",
     "source/vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3",
-    "va030-qfm-c8.patch": "6240cdfbb39633ab63f717e7d3d6e251cc123d3059dab1182fb752876f09c179",
+    "va030-qfm-c8.patch": "e6f363d06cade1a93ad62c5ce2495b4caf5a3050b9bef1a93af86a17ddce59cb",
     "native/quant_mla_prolog.py": "ab0876c2fc09b7cc2b0541063dc7bab16414b2046ea9030bc1fecce4020be1bc",
     "native/LICENSE": "7a2c992300c275afed721f5b69e950a2382b1b8f8f3f08e1858d7ee4d3134365",
     "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-    "README.md": "e48015566c336e2f3db733659ed464f9e894296fc86fafe62031596c4049fee1"
-  }
+    "README.md": "ce1b363f6c4fca7fb139bcc97b183219252e85480f5f6b6aa94ce85a5fbe55c7"
+  },
+  "installer_path": "va030_qfm/install-va030-qfm-stage-mlapo.py",
+  "installer_version": "stage-specific MLAPO; same commit as this source snapshot"
 }

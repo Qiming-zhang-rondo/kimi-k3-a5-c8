@@ -82,6 +82,7 @@ def select_qfm(impl, config) -> bool:
     if backend not in ("fia", "qfm"):
         raise ValueError("kimi_k3_c8_prefill_backend must be fia or qfm")
     impl.qfm_fia_prefill = backend == "fia" or getattr(config, "enable_kimi_k3_qfm_fia_prefill", False)
+    impl.qfm_mlapo_prefill = getattr(config, "enable_kimi_k3_mlapo_prefill", True)
     return True
 
 
@@ -195,6 +196,8 @@ class QFMBatch:
     # (query begin, query end, local history length, original request page table).
     fia_requests: tuple = ()
     qfm_needed: bool = True
+    # CPU scheduler stage ranges: (begin, end, is_prefill), including padding.
+    preprocess_segments: tuple = ()
 
 
 class QFMMetadataBuilder:
@@ -209,6 +212,7 @@ class QFMMetadataBuilder:
         self.mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.int8, device=device).triu_(1)
         self.buffers = {}
         self.fia_prefill = getattr(impl, "qfm_fia_prefill", False)
+        self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
 
     def metadata(self, lengths, cu, used, max_q, mode):
         return self.metadata_op(
@@ -308,6 +312,22 @@ class QFMMetadataBuilder:
         flags = common.is_prefilling
         if flags is not None and flags.device.type != "cpu":
             raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
+        batch.preprocess_segments = ()
+        if not self.mlapo_prefill:
+            if flags is None:
+                raise ValueError("Stage-specific MLAPO requires scheduler Prefill flags")
+            bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
+            segments = []
+            for begin, end, prefill in zip(bounds, bounds[1:], flags[: common.num_reqs].tolist()):
+                if begin == end:
+                    continue
+                if segments and segments[-1][2] == prefill:
+                    segments[-1] = (segments[-1][0], end, prefill)
+                else:
+                    segments.append((begin, end, prefill))
+            if segments:
+                segments[-1] = (segments[-1][0], tokens, segments[-1][2])
+            batch.preprocess_segments = tuple(segments)
         batch.fia_requests = ()
         batch.qfm_needed = True
         if self.fia_prefill:
@@ -448,7 +468,9 @@ def forward_qfm(impl, hidden, cache, metadata, output):
     prolog = getattr(impl, "qfm_prolog", None)
     q_scale = None
     kv = None
-    if prolog is None:
+    if prolog is not None and not getattr(impl, "qfm_mlapo_prefill", True) and batch.has_prefill:
+        q, kv = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
+    elif prolog is None:
         q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
         write_cache(kv, batch.slots, cache, impl.qfm_scale)
     elif batch.fia_requests:
@@ -479,6 +501,36 @@ def forward_qfm(impl, hidden, cache, metadata, output):
     result = impl.o_proj(projected, is_prefill=batch.has_prefill)[0]
     output.copy_(result)
     return output
+
+
+def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
+    """Ordinary Prefill, DSL Decode; mixed batches share floating Q outputs.
+
+    Pure Decode keeps the existing fused FP8 mode2 fast path. Mixed batches
+    use mode0 for Decode segments, matching the existing FIA mixed-batch
+    contract, then quantize Q together at the QFM reader boundary.
+    """
+    tokens = batch.slots.numel()
+    segments = batch.preprocess_segments
+    if not segments:
+        raise ValueError("Missing scheduler stage ranges for Prefill MLAPO routing")
+    if len(segments) == 1 and segments[0] == (0, tokens, True):
+        q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
+        write_cache(kv, batch.slots, cache, impl.qfm_scale)
+        return q, kv
+    q = torch.empty((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
+    kv = torch.empty((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
+    for begin, end, prefill in segments:
+        chunk = hidden[begin:end].contiguous()
+        slots = batch.slots[begin:end]
+        if prefill:
+            chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
+            write_cache(chunk_kv, slots, cache, impl.qfm_scale)
+        else:
+            chunk_q, chunk_kv = prolog.floating(chunk, slots, cache)
+        q[begin:end].copy_(chunk_q)
+        kv[begin:end].copy_(chunk_kv)
+    return q, kv
 
 
 def run_qfm_reader(impl, q, cache, batch, q_scale=None):

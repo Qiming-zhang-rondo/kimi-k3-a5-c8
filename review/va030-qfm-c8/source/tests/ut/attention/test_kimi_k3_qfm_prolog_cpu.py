@@ -153,3 +153,88 @@ def test_fused_dcp_gathers_query_bytes_and_scales_together(qfm, monkeypatch):
     qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), output)
     assert gather_calls == [torch.int8, torch.float32]
     assert output[4:].count_nonzero() == 0
+
+
+@pytest.mark.parametrize("dcp", [1, 2])
+def test_scheduler_stage_segments_keep_short_prefill_and_padding(qfm, monkeypatch, dcp):
+    b, _ = builder(qfm, monkeypatch, dcp=dcp)
+    b.mlapo_prefill = False
+    c = common([4, 1, 9, 2], [132, 129, 200, 300], capacity=20)
+    c.is_prefilling = torch.tensor([False, True, True, False])
+    batch = b.build(c)
+    assert batch.preprocess_segments == ((0, 4, False), (4, 14, True), (14, 20, False))
+    assert batch.has_prefill
+    c.is_prefilling = None
+    with pytest.raises(ValueError, match="stage|Stage"):
+        b.build(c)
+
+
+@pytest.mark.parametrize("queries,flags", [([1], [True]), ([4, 9, 1], [False, True, False])])
+def test_stage_routing_preserves_scatter_slots_and_bypasses_prefill_dsl(qfm, monkeypatch, queries, flags):
+    b, _ = builder(qfm, monkeypatch)
+    b.mlapo_prefill = False
+    tokens = sum(queries)
+    c = common(queries, [128 + q for q in queries], capacity=tokens + 2)
+    c.is_prefilling = torch.tensor(flags)
+    # Distinct, non-monotonic cache slots and invalid padding detect slicing errors.
+    c.slot_mapping = torch.tensor(list(reversed(range(tokens))) + [-1, -1])
+    batch = b.build(c)
+    hidden = torch.randn(tokens + 2, 1024, dtype=torch.bfloat16)
+    raw = torch.full((256 + 2 * (73728 + 256),), 91, dtype=torch.uint8)
+    cache = qfm.cache_view(raw[256:], 2, 73728 + 256)
+    expected = raw.clone()
+    qfm.write_cache(hidden[:, :576], batch.slots, qfm.cache_view(expected[256:], 2, 73728 + 256), torch.ones(1))
+    ordinary_calls, dsl_calls = [], []
+
+    def ordinary(impl, chunk, count):
+        ordinary_calls.append(count)
+        return chunk[:, :576, None].transpose(1, 2).repeat(1, 12, 1), chunk[:, :576]
+
+    def floating(chunk, slots, destination):
+        dsl_calls.append(chunk.shape[0])
+        qfm.write_cache(chunk[:, :576], slots, destination, torch.ones(1))
+        return chunk[:, None, :576].repeat(1, 12, 1), chunk[:, :576]
+
+    monkeypatch.setattr(qfm, "ordinary_qfm_inputs", ordinary)
+    impl = SimpleNamespace(qfm_scale=torch.ones(1), num_heads=12)
+    q, kv = qfm.stage_specific_qfm_inputs(impl, hidden, cache, batch, SimpleNamespace(floating=floating))
+    torch.testing.assert_close(q, hidden[:, None, :576].repeat(1, 12, 1), rtol=0, atol=0)
+    torch.testing.assert_close(kv, hidden[:, :576], rtol=0, atol=0)
+    assert torch.equal(raw, expected)
+    assert ordinary_calls == [end - begin for begin, end, p in batch.preprocess_segments if p]
+    assert dsl_calls == [end - begin for begin, end, p in batch.preprocess_segments if not p]
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+def test_forward_decode_keeps_mode2_prefill_uses_ordinary(qfm, monkeypatch, prefill):
+    b, _ = builder(qfm, monkeypatch)
+    b.mlapo_prefill = False
+    c = common([4], [132], capacity=8)
+    c.is_prefilling = torch.tensor([prefill])
+    batch = b.build(c, retain_for_graph=not prefill)
+    calls = []
+
+    def prolog(hidden, slots, cache):
+        calls.append("decode_mode2")
+        return torch.zeros(8, 12, 576).to(torch.float8_e4m3fn), torch.ones(8, 12)
+
+    def staged(*args):
+        calls.append("ordinary_prefill")
+        return torch.zeros(8, 12, 576, dtype=torch.bfloat16), torch.zeros(8, 576, dtype=torch.bfloat16)
+
+    def reader(impl, q, cache, batch, q_scale):
+        assert (q_scale is None) == prefill
+        return torch.ones(8, 12, 512), None
+
+    monkeypatch.setattr(qfm, "stage_specific_qfm_inputs", staged)
+    monkeypatch.setattr(qfm, "run_qfm_reader", reader)
+    impl = SimpleNamespace(
+        qfm_prolog=prolog,
+        qfm_mlapo_prefill=False,
+        dcp_enabled=False,
+        _v_up_proj_batch_major=lambda x: x.flatten(1),
+        use_output_gate=False,
+        o_proj=lambda x, **kw: (x,),
+    )
+    qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), torch.empty(8, 12 * 512))
+    assert calls == ["ordinary_prefill" if prefill else "decode_mode2"]

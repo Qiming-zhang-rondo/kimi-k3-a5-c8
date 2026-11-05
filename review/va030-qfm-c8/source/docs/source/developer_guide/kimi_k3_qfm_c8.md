@@ -175,6 +175,24 @@ the existing target/draft construction-tag isolation and cache format checks.
 
 ## Mooncake V2 PD candidate
 
+### Stage-specific Prolog
+
+Set `enable_mlapo=true` and `enable_kimi_k3_mlapo_prefill=false` to keep
+DSL Prolog for Decode while using ordinary W8A8 MXFP8 projections, RMSNorm
+and explicit FP8 Cache writing for Prefill. The new flag defaults to true;
+`enable_mlapo=false` still disables DSL Prolog for both stages. Attention's
+`kimi_k3_c8_prefill_backend` (qfm/fia) is independent of this writer policy.
+
+Routing uses scheduler CPU stage flags, including short final Prefill chunks,
+not query length. Pure Decode and DSpark verification retain the existing
+FP8-output mode2 path and Decode graph behavior. Mixed batches split adjacent
+stage ranges: Prefill uses ordinary projections, Decode uses mode0 DSL
+floating outputs, then Q is quantized at the shared QFM reader. This preserves
+the floating-Q contract for FIA Prefill; mixed-batch preparation adds launches
+and temporary tensors and needs separate performance measurement. No permanent
+Cache format or scale changes. CPU tests cover stage routing, padding, slots,
+gapped Cache writes and Decode path selection; NPU/model validation is pending.
+
 Both P and D must install this revision and enable QFM C8. Use the built-in
 `MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
 AscendStore or a custom connector module. Keep community K3 MRV2 hybrid cache,

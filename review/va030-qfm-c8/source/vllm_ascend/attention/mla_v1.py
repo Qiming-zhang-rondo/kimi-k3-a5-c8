@@ -1370,11 +1370,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 else:
                     self.qfm_prolog.update_weights(weights)
             logger.info(
-                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=%s heads=%s",
+                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=%s heads=%s prefill_mlapo=%s",
                 self.layer_name,
                 value,
                 "dsl-prolog" if self.enable_mlapo else "ordinary",
                 self.num_heads,
+                self.enable_mlapo and self.qfm_mlapo_prefill,
             )
             return
         if self.enable_mlapo:
