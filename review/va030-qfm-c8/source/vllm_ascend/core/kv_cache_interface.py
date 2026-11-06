@@ -173,6 +173,27 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     def unpadded_page_size_bytes(self) -> int:
         return self.real_page_size_bytes
 
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        """Keep QFM kernel subpages consistent with their physical manager page.
+
+        MRV2 copies the manager spec with the selected kernel block size
+        before constructing metadata builders. Its default copy retains the
+        full padded manager page, so it would overestimate each subpage's
+        stride. Shrink that padding proportionally, without changing the
+        allocator's original spec. Larger planning blocks keep upstream's
+        padding semantics rather than multiplying a minimum page budget.
+        """
+        if self.cache_qfm_c8 and self.page_size_padded is not None and block_size < self.block_size:
+            scaled_page_bytes = self.page_size_padded * block_size
+            if block_size <= 0 or scaled_page_bytes % self.block_size:
+                raise ValueError("QFM padded manager page must split into whole-byte kernel pages.")
+            page_size_padded = scaled_page_bytes // self.block_size
+            tile_bytes = 32
+            if page_size_padded % tile_bytes:
+                raise ValueError("QFM kernel page stride must remain aligned to 32-byte NZ tiles.")
+            return replace(self, block_size=block_size, page_size_padded=page_size_padded)
+        return super().copy_with_new_block_size(block_size)
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         # Uniformity probes may include indexer specs, which share the upstream

@@ -2,7 +2,7 @@
   "base_commit": "c09d3e20b9c45c80b34ae3781440d90904a44023",
   "prolog_commit": "9e01355ab8f809050579271c0eadcc5858ed20bc",
   "files_sha256": {
-    "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "052333c134c126fdbafce40378694069e9a2e33204e91e13b2c985cfa5996c44",
+    "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "6d52bc5919d9cc0e87a34f6336a1d6d7d0a2fc15dc64f3415c59778aebf3f46b",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_fia_prefill.py": "11ccef076e5fc7465c34f552176c91444559d50bb8d52775a83e8757f954eb78",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "05a5e2f9184b5f5ad6c809753ac8946e9ca4f51fee7f3b8b40fa7314c597b210",
     "source/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py": "97bd4859fce7c2a5b28fa199dc28f5fcf96de105ded51f29b6101c3ca65ffb15",
@@ -17,7 +17,7 @@
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog.py": "d1000529682c9d83b2345e2fb9b7f8cb94c752c696d9c4ab9be3aa3d2d975430",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py": "55161bea45afbfb88b3a40eba79e90b0612d32e58c197db46b5d62ddbf1c0070",
     "source/vllm_ascend/attention/mla_v1.py": "c436d2a1a4b1ae2438c8676a41f8be8ed16c9d601e948388f8e142f0d753007f",
-    "source/vllm_ascend/core/kv_cache_interface.py": "5017fe57ce4f231ebb4153b75449b4b3e84171df9396345c711c9797ac924a9b",
+    "source/vllm_ascend/core/kv_cache_interface.py": "e8d2e989e7cebb3e10de8fcf79769f5af3318f799a3b8d17c6c229edffbf6c18",
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py": "02b356832daaae6c593f6edc627328c4887de925b0de93faa60c257296b5a372",
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/metadata.py": "38ee7bea387dab9c98fa55c19886d5f31c86bf064d0be32c6045867dc969d4b6",
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/pull_scheduler.py": "daf3afec8b64d7a34507bc2fdc167afad0592158d06275d30cc5e3469774ce6e",
@@ -25,13 +25,14 @@
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/qfm_contract.py": "1588e7bcb36f787bf05ebfa8f62fd2345f4d2bc89a06d555e004e4afefac634e",
     "source/vllm_ascend/worker/v2/attn_utils.py": "fc2840d0c00919d5701942c30adb88275dd38277e1e90481121de0d1df85345e",
     "source/vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3",
-    "va030-qfm-c8.patch": "4a6453f394785894f08969fe87a88bfd0f2e05089b3d70b73a8090080821d347",
+    "va030-qfm-c8.patch": "55c104d53600a35fb2a1cad4d5475628cfd0d01c10eafb15b55e9eb5c212041e",
     "native/quant_mla_prolog.py": "ab0876c2fc09b7cc2b0541063dc7bab16414b2046ea9030bc1fecce4020be1bc",
     "native/LICENSE": "7a2c992300c275afed721f5b69e950a2382b1b8f8f3f08e1858d7ee4d3134365",
     "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-    "README.md": "9d4a9fc1b726e925313903d7c8eb9a495e469272bea933a51067d880d670ff6f",
-    "source/tests/ut/attention/test_kimi_k3_fia_optimized_cpu.py": "3733017cd588d40660651bf8e38db33b3fd4e8ec3ab0c51bbd3c4a553bdf3126"
+    "README.md": "4450a2d73a09c5345ce4ef07192b16a395cd7e71b3189b1256f14157f9c3bdb4",
+    "source/tests/ut/attention/test_kimi_k3_fia_optimized_cpu.py": "3733017cd588d40660651bf8e38db33b3fd4e8ec3ab0c51bbd3c4a553bdf3126",
+    "source/tests/ut/attention/test_kimi_k3_qfm_spec_copy_cpu.py": "f5fc765e6b0182d17a8644f3ab7a6c0a1739aede1836f8a1d17da96dde78d2ec"
   },
-  "installer_path": "va030_qfm/install-va030-qfm-fia-opt.py",
-  "installer_version": "FIA preparation optimization; QFM-only/Decode computational route unchanged"
+  "installer_path": "va030_qfm/install-va030-qfm-geometry.py",
+  "installer_version": "correct padded page stride in QFM kernel metadata copies"
 }

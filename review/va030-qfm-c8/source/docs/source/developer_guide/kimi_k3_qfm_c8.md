@@ -227,6 +227,29 @@ they do not establish that host preparation caused an observed Event Wait or
 that TPOT has recovered. NPU timing and end-to-end DSpark acceptance remain
 necessary. No native package rebuild is needed for these Python changes.
 
+### Manager and kernel page geometry
+
+MRV2 constructs metadata builders with a copy of the finalized manager spec
+whose `block_size` is the kernel size (128). For QFM padded pages, that copy
+must also scale `page_size_padded` by the new/old block-size ratio. Retaining
+the entire manager page here gives the shared Scatter plan an incorrect
+physical kernel-page stride. For example, a manager block of 768 and a
+padded page of 884736 bytes use six kernel pages of 147456 bytes each.
+
+`AscendMLAAttentionSpec.copy_with_new_block_size()` now preserves this
+relationship for QFM padded-page shrinking. The original manager spec and
+allocator stay unchanged; non-QFM, unpadded and larger-block copies retain
+the upstream behavior. Never divide by a fixed six or infer finalized
+manager geometry from the CLI alone. `--block-size 128` may still be used;
+the hybrid planner and kernel subpage geometry are separate stages.
+
+This fixes the reported `plan_stride=884736, cache_stride=147456` fallback
+without removing its safety checks. It applies to both QFM and FIA readers,
+which share the writer. Restart all workers to discard previously captured
+fallback nodes. CPU tests cover the actual upstream spec-copy path, repeated
+layer writes without fallback, and retained-buffer refresh. NPU timing is
+still required to determine how much this contributes to TTFT or TPOT.
+
 ### FIA Prefill preparation
 
 The FIA option prepares historical page IDs, token offsets and NZ tile IDs

@@ -6,7 +6,7 @@
 ## 版本与范围
 
 - VA 基线：`c09d3e20b9c45c80b34ae3781440d90904a44023`（0.30）。
-- 对应已发布安装补丁：[`install-va030-qfm-fia-opt.py`](../../va030_qfm/install-va030-qfm-fia-opt.py)。
+- 对应已发布安装补丁：[`install-va030-qfm-geometry.py`](../../va030_qfm/install-va030-qfm-geometry.py)。
 - `source/` 中的 23 个文件逐个 SHA256 校验，与该安装脚本的 AFTER 状态完全一致。
 - QFM / QFM metadata：CANN ops-transformer `8b6924e68ed27181141cde84fa5a942c0c060aac`。
 - DSL Prolog：cannbot-dsl `9e01355ab8f809050579271c0eadcc5858ed20bc`，源码 SHA256 见 manifest。
@@ -152,3 +152,21 @@ collective 顺序保留。不改变持久 Cache 布局、native 算子或 latent
 本版347项CPU回归、7项安装升级检查通过，含36组独立旧版/新版Attention
 数值对照（输出/LSE逐元素一致）。改动文件Ruff检查和格式检查通过；完整
 format.sh ci因本地缺少pre-commit而未运行。尚无本版NPU性能测量。
+
+
+## QFM / FIA 公共 Scatter stride 修复
+
+上游创建 Attention metadata builder 时，会把 manager spec 复制为 kernel
+block size，但原始 copy 只改 block_size，没有按比例缩小 page_size_padded。
+此前共享 Scatter plan 把整个 manager 页误当成一个 kernel 页。已在CPU复现
+manager768/padded884736 -> metadata128/884736，而 allocator stride147456
+的精确6倍失配。它导致逐层重算地址，捕获后重算节点也会随图重放执行。
+
+本版仅修正 QFM padded spec 缩小 block 时的 copy，按真实新旧 block 比例
+缩放 padded bytes。原 manager spec、实际分配、Cache 数据格式、启动参数和
+native 算子保持原样；普通 MLA、增大 block 的 copy 保留上游语义。不是硬除6，
+也不取消 Scatter 校验。QFM P/D、FIA Prefill 都共用这个正确的 metadata几何。
+
+重启所有 Worker 后，原 `mismatch=['stride']; plan_stride=884736,
+cache_stride=147456` 应不再触发。若仍有 fallback，保留完整字段继续定位。
+本地CPU回归与安装检查不代表已测得TTFT/TPOT恢复；NPU性能仍待实测。
