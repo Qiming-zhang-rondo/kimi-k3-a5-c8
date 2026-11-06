@@ -1369,13 +1369,35 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.qfm_prolog = QFMProlog(weights, self.qfm_scale)
                 else:
                     self.qfm_prolog.update_weights(weights)
+            if self.qfm_fia_expanded:
+                from vllm_ascend.attention.kimi_k3_fia_expanded import ExpandedFIA
+
+                if getattr(self, "fia_expanded", None) is None:
+                    self.fia_expanded = ExpandedFIA(self)
+                else:
+                    self.fia_expanded.refresh_weights(self)
+                if self.enable_mlapo and self.qfm_mlapo_prefill:
+                    from vllm_ascend.attention.kimi_k3_fia_native_prolog import NativeFIAProlog
+
+                    if getattr(self, "fia_native_prolog", None) is None:
+                        self.fia_native_prolog = NativeFIAProlog(self)
+                    else:
+                        self.fia_native_prolog.update_weights(self)
             logger.info(
-                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=%s heads=%s prefill_mlapo=%s",
+                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=%s heads=%s prefill_mlapo=%s "
+                "prefill_backend=%s fia_form=%s prefill_frontend=%s",
                 self.layer_name,
                 value,
                 "dsl-prolog" if self.enable_mlapo else "ordinary",
                 self.num_heads,
                 self.enable_mlapo and self.qfm_mlapo_prefill,
+                "fia" if self.qfm_fia_prefill else "qfm",
+                "expanded" if self.qfm_fia_expanded else "latent",
+                "native-prolog"
+                if self.qfm_fia_expanded and self.enable_mlapo and self.qfm_mlapo_prefill
+                else "dsl-prolog"
+                if self.enable_mlapo and self.qfm_mlapo_prefill
+                else "ordinary",
             )
             return
         if self.enable_mlapo:

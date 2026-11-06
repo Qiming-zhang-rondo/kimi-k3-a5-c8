@@ -1,310 +1,157 @@
-# Kimi K3 full576 FP8 QFM candidate
+# Kimi K3 A5 C8 candidate (VA 0.30)
 
-## Local experimental FIA Prefill variant (not the published bb79bb2 installer)
+Pinned framework: `c09d3e20b9c45c80b34ae3781440d90904a44023`.
+The framework and standalone probes are candidates; CPU regression is not
+NPU performance, distributed correctness or model accuracy acceptance.
 
-Set `enable_kimi_k3_qfm_fia_prefill=true` together with
-`enable_kimi_k3_qfm_c8=true`. Keep `enable_mlapo=false` and
-`enable_kv_nz=false`. Disabling the new flag retains the QFM-only reader.
+## Storage and common settings
 
-Scheduler-marked Prefill requests use BF16 FIA-v2 in the absorbed MLA
-latent512/raw64 representation. Existing FP8 history (including APC hits)
-is gathered through the request's kernel-page table and converted to temporary
-BF16. Current KV stays floating for Attention and is also written to FP8 cache.
-Only the past prefix is gathered; current KV must not be counted twice.
-History and causal current outputs are merged with natural-log LSE weights.
-There is one persistent FP8 cache, not a second BF16 cache pool.
+There is one persistent main-model MLA cache: full576 E4M3 PA_NZ,
+`[blocks,1,18,128,32]`, 576 payload bytes/token. Both latent512 and raw64
+are FP8, with an internal scalar descale of 1.0. This is different from
+packed656 Group128 C8. Do not set the obsolete `qfm_kv_scale` option.
+QFM receives separately scaled FP8 Q; W8A8 MXFP8 projection weights retain
+their Group32 scales. `kv_b_proj` remains BF16. Draft and KDA caches retain
+the upstream formats.
 
-Decode and main-model speculative verification keep QFM, including in mixed
-batches. Draft routing is unchanged. For DCP, each rank reads its local history;
-only rank zero contributes current KV, then the existing head exchange/LSE
-merge combines all contributions. Real multi-card validation is still required.
+Use A5, MRV2, `--kv-cache-dtype auto`, `enable_kv_nz=false`, and
+`--block-size 128` or a positive multiple. The hybrid manager may promote
+its block size. Kernel pages remain 128 tokens. The allocator/view/metadata
+preserve the actual storage offset and padded page stride; do not derive
+an address from the earlier CLI size or divide by a fixed factor.
 
-This candidate supports eager Prefill only. Decode-only capture/replay remains
-on QFM. Prefill graph capture is explicitly rejected, not silently downgraded.
-Metadata building reads corrected sequence lengths to CPU once for a Prefill
-step; it does not synchronize once per layer. That synchronization is an
-explicit candidate performance cost. History conversion is request-at-a-time,
-with memory proportional to that request's local history (including FP32
-conversion and gather temporaries). It is not an allocation-free path.
+Both readers retain the existing FP8 tile Scatter writer, shared batch
+addresses, negative-slot handling and the manager-to-kernel spec-copy fix.
+A stale Scatter plan is checked and rebuilt from the live physical stride;
+its warning must not be suppressed to hide a mapping error. Restart workers
+after installation; discard all old in-memory KV/APC pages.
 
-Run `check_kimi_k3_qfm_fia_prefill.py` directly on one A5 before model use.
-It checks paged FP8 history, nonzero storage offsets, padding, causal current
-KV, and simulated DCP partitions against sampled FP32 reference rows. It does
-not validate distributed HCCL or full-model accuracy. Compare actual TTFT,
-TPOT and peak memory; changing the API to FIA alone is not a speedup claim.
-The new option does not make toolkit MlaPrologV4 compatible with QFM storage.
+## Compare two expanded-FIA Prefill frontends
 
-Base: VA 0.30.0 commit `c09d3e20b9c45c80b34ae3781440d90904a44023`.
-Native provider: ops-transformer `8b6924e68ed27181141cde84fa5a942c0c060aac`,
-compiled separately against the validated CANN 9.2.0 image.
+The existing QFM-only route and absorbed FIA baseline remain available.
+`kimi_k3_c8_prefill_backend="fia"` plus `kimi_k3_c8_fia_form="expanded"`
+selects the new eager Prefill candidate: unabsorbed Q/K192 (128+raw64),
+V128. The default FIA form remains `latent` (QK576/V512), so installing
+this patch alone does not silently change an existing benchmark.
 
-This is a framework experiment candidate, not a model-accepted release.
-The native reader was tested independently; the new framework tile writer
-must pass `check_kimi_k3_qfm_writer.py` on the target image before model tests.
-CPU tests are not a substitute for that native smoke or full-model acceptance.
-
-## Configuration
-
-Keep the existing model's weight quantization and DSpark draft configuration.
-Use ModelRunner V2 and `--kv-cache-dtype auto`. Explicitly set `--block-size`
-to 128 or a positive multiple (for example 256, 512 or 1024). This is the KV
-manager block size; the QFM kernel page size remains 128. The final hybrid
-planner may promote the manager size after model loading; the allocator
-uses that final size rather than the earlier command-line value.
-Merge these keys into the existing additional-config object:
+Merge these keys into your existing additional configuration:
 
 ```json
 {
   "enable_kimi_k3_qfm_c8": true,
-  "enable_mlapo": false,
-  "enable_kv_nz": false
+  "enable_kv_nz": false,
+  "enable_mlapo": true,
+  "kimi_k3_c8_prefill_backend": "fia",
+  "kimi_k3_c8_fia_form": "expanded",
+  "enable_kimi_k3_mlapo_prefill": false
 }
 ```
 
-KV is unscaled FP8: internally the required FP32 descale tensor is `[1.0]`.
-This matches `prepare_prolog_weights()` in the
-[pinned official K3 recipe](https://gitcode.com/cann/cann-recipes-infer/blob/4447f2f0972cb9287e069e3994b1d46ffe244ebc/models/kimi_k3/models/modeling_kimi_k3.py#L2580).
-It is an identity scale, not a calibrated value from the checkpoint and not
-a model-accuracy guarantee. Writing still clips to E4M3's finite range before
-casting. Q retains its independent per-token/head dynamic scales.
+With the last flag **false**, Prefill uses the existing MXFP8 projection
+modules and RMSNorm operators. With it **true**, Prefill uses the package
+`cann_ops_transformer.mla_prolog` NoPE/V4 wrapper, modes 3/0/0 (MXFP8
+projection weights, BF16 Query, BF16 current scratch). This is the native
+CANN package implementation, not the DSL frontend used by Decode.
+`enable_mlapo=false` globally disables both stage frontends.
 
-**Remove `qfm_kv_scale` from the launch configuration.** The previous synthetic
-`0.03125` example is withdrawn; the deleted config field now fails validation
-if accidentally retained. Restart all workers and discard old in-memory KV
-pages: pages written with the old scale must never be read with the new one.
-Do not change KV scale dynamically between chunks or APC hits. The native
-reader accepts one scalar for the entire cache, not per-token/group scales.
+The native wrapper normally emits UK-absorbed Q512. The expanded adapter
+uses a private UK matrix `[I128 | 0]`, retains the first128 output columns,
+and appends raw64. The model's real UK/UV weights are not changed. Native
+still computes 128-to-512 and emits Q512 before slicing, so fusion alone
+is not a speedup claim. Private NZ weights/scales and the identity matrix
+are prepared at loading, not rebuilt per layer invocation. Reloads copy
+compatible buffers in place.
 
-Only main-model MLA is quantized. Draft model and KDA state caches retain
-their existing representation. kv_b_proj must remain unquantized. Existing
-MXFP8 projection weight modules are executed through their ordinary path.
-MLAPO is explicitly rejected: this patch does not claim fused full576 writes.
+The native package contract was checked against ops-transformer v9.2.0,
+commit `dff221330eecd2132233b1e73ed1072cd8925140`,
+`attention/mla_prolog_v3/torch_extension/mla_prolog.py` and its C++ wrapper
+for `MlaPrologV4WeightNz`. Required geometry is hidden7168 (or another
+admitted native size), q-rank1536/2048, NoPE128/raw64 and BF16 norm weights.
+A container must actually provide the matching wrapper and native runtime;
+checking source documentation does not establish local availability. The
+standalone probe verifies the installed implementation before model use.
+No new DSL or custom Prolog compilation is added by this patch.
 
-DSpark exclusion uses the loader's live `dspark_head` construction tag, not
-only `model_config.runner_type`. MRV2 deliberately retains the target config
-while loading its draft, and Kimi sets the draft RoPE flag after creating the
-MLA implementation. Relying on those two temporary values selected QFM for
-draft layers and sent a 5D FP8 cache to their 4D BF16 writer. The fix excludes
-that scope before QFM format checks and preserves the original draft backend.
+### Historical and current KV
 
-## Storage and execution
+Historical FP8 pages, including APC-hit prefixes, are gathered from the live
+page table, converted directly to BF16, and up-projected into temporary
+per-head K/V. The historical KV axis is bounded by a workspace budget derived
+from VA's existing MLA workspace sizing, including head expansion costs.
+Every FIA call retains the complete Query chunk. There is no Q-by-K index
+matrix and no limit of eight Query rows. History partial outputs are combined
+in FP32 using natural-log LSE weights.
 
-- One FP8 PA_NZ cache: `[blocks, 1, 18, 128, 32]`, 576 bytes per token,
-  plus one FP32 scale per layer. No BF16 history cache is allocated.
-- MRV2 physical page stride and storage offset are preserved. Hybrid KDA
-  page padding can still limit the actual allocator capacity savings.
-- MRV2 already expands each manager block into `manager_block_size / 128`
-  kernel block-table entries and computes matching slots. The QFM view now
-  exposes that many kernel pages per manager page; metadata does NOT expand
-  the table a second time. For manager=512, manager ID 2 maps to kernel IDs
-  8, 9, 10 and 11. Slots and page IDs remain consistent for APC, chunked
-  prefill, DSpark and DCP. No token-index matrix or extra KV copy is added.
-- With physical manager page size P and ratio R, each kernel page uses
-  stride P/R. Padding is distributed between subpages, not appended only
-  after the last one. P must cover the payload and be divisible by R*32;
-  shared Attention/KDA page sizes are rounded to this alignment before
-  memory budgeting and allocation, with the same size applied to both.
-  incompatible physical layouts fail before creating an overlapping view.
-  Startup logs report `QFM cache geometry: manager_block=... kernel_block=128`.
-- ScatterPaCache sees contiguous 32-byte aliases and remapped tile slots;
-  invalid slots remain -1. No invalid write is redirected to a live slot.
-- Prefill, chunked prefill, partial APC hits and verification read the same
-  FP8 pages. Q is absorbed to latent512+raw64, dynamically quantized per
-  token/head, and passed to QFM.
-- Ordinary eager batches organize queries into virtual rows of at most 16
-  query tokens, but invoke attention ONCE, not once per virtual row.
-- Graph decode uses one query per virtual row and stable cached metadata
-  buffers. Every iteration refreshes device lengths, slots and page tables;
-  DSpark rejection-adjusted lengths are not replaced by stale CPU mirrors.
-- DCP gathers distinct query heads, uses interleave-aware local prefix lengths
-  for every query, neutralizes empty shard output/LSE, and reuses VA's
-  all-to-all/LSE combine. All ranks execute the same collective structure.
-  This is wired code, not a claim of distributed model validation.
-- Metadata generation is shared across the attention group, not repeated per
-  MLA layer. Eager buffer shapes are not retained indefinitely.
+Current rows use the original BF16 latent from this step, up-project it for
+causal FIA, and also write the persistent FP8 cache. They are not counted a
+second time in history. Native Prolog uses two bounded, current-chunk BF16
+scratch buffers; ordinary preprocessing also has temporary BF16 tensors.
+Neither path allocates a second permanent BF16 history cache. Temporary
+workspace, current inputs, private weights and native kernel workspace still
+contribute to peak memory.
 
-## Explicit scope
+Expanded output already has V128 and bypasses latent V-up projection.
+QFM Decode output remains latent512 and still applies the original V-up.
+Do not compare only the FIA kernel: include projections, cache writing,
+history conversion/expansion, FIA and output merging in the timing interval.
 
-Candidate integration covers TP head counts admitted by QFM, APC/chunked
-prefill, DSpark main-model verification, MRV2 graph replay and DCP. Each still
-requires end-to-end validation. PCP, KV layer parallelism,
-sparse offload and other speculative methods are rejected, not silently
-executed on the old cache layout. No V1 model-runner changes are included.
+## Decode, mixed batches and feature boundaries
 
-Roll back by restarting without `enable_kimi_k3_qfm_c8`; caches cannot be
-reinterpreted across the switch. Do not load the old packed656 patch on top.
-Restart all workers after installing the manager-block mapping fix; do not
-reuse old in-memory/APC cache pages. This update does not include the separate
-experimental DSL Prolog; keep `enable_mlapo=false`.
-Save the startup log confirming `QFM C8 ... cache=FP8-full576` and profiling
-showing quant_flash_mla. Confirm short and 128K requests before enabling
-feature combinations. Compare with the same weights and server settings,
-changing only the QFM feature, not weight quantization or concurrency.
+Pure Decode and main-model DSpark verification retain the existing DSL
+Prolog mode2 plus QFM, including Decode graph capture/replay. Source the
+same pinned DSL/QFM runtime environment used by the accepted configuration.
+The Prefill flag never sends Decode through native BF16-output mode0.
+Mixed batches preserve Decode FP8 Q codes/scales without re-quantization;
+CPU scheduler stage flags select the Prefill ranges, including short final
+chunks. Pure Decode does not construct the new Prefill ranges or load
+historical expanded K/V.
 
-Native P quantization produces a measurable FP32-reference error. Preserve
-the raw FP32 accuracy metrics alongside implementation-consistency metrics;
-do not label this candidate a precision pass based solely on short outputs.
-# Local FIA/QFM + DSL Prolog integration candidate
+For DCP, head weights are gathered once on every rank before the first
+Prefill Query gather, in the same rank/head order, and invalidated on reload.
+Each rank reads only local history. Current BF16 KV contributes on rank zero
+only. Empty shards produce zero output and -infinity LSE. Prefill V128 and
+Decode latent512 share the existing 512-wide opaque merge container; unused
+Prefill columns are zero. After the common DCP merge, only Decode rows get
+V-up projection. CPU tests simulate these contracts; actual HCCL/TP/DCP
+execution and performance remain unverified for the new expanded route.
 
-The local candidate adds `kimi_k3_c8_prefill_backend="fia"|"qfm"`
-(default `qfm`). The previous experimental `enable_kimi_k3_qfm_fia_prefill`
-alias remains accepted. Keep `enable_kimi_k3_qfm_c8=true`,
-`enable_kv_nz=false`, and cache dtype `auto` for either route.
+APC hashes still use token IDs and prefix ancestry. The persistent FP8 layout,
+unit scale, page tables and prefix lengths do not change between these two
+frontends. Partial hits read FP8 history and current chunks stay BF16 for
+Attention. This wiring requires model validation with partial and full hits.
 
-With `enable_mlapo=true`, selected target MLA layers use the pinned DSL
-Prolog, **not toolkit MlaPrologV4**. QFM-only batches use FP8-output mode2.
-Batches containing FIA Prefill use BF16-output mode0 for the current batch,
-write the same persistent FP8 cache, and quantize any Decode queries at the
-QFM reader boundary. This preserves the floating current KV for FIA without
-a second permanent BF16 cache. FIA history is gathered/dequantized into a
-temporary BF16 tensor per request; peak memory and performance require
-long-context measurement. Prefill graph capture is not admitted by this
-candidate; Decode graph metadata remains on the existing path.
+FIA Prefill remains eager; Prefill graph capture is explicitly rejected.
+FULL_DECODE_ONLY still uses the existing QFM graph route. PCP, KV layer
+parallelism, sparse offload and speculative methods other than DSpark are
+not adapted and retain explicit guards.
 
-The DSL runtime must be explicitly loaded. This delivery imports the pinned
-wheel entry `ops.quant_mla_prolog` and checks its source hash and `_native`
-directory; it does not fall back to the old standalone source module. Source
-the private wheel environment with `CANNBOTDSL_NATIVE_BINARY_MODE=require`
-before starting workers to forbid JIT for uncovered configurations. Actual
-cold-process binary coverage is not yet validated. Synthetic probes for the two paths
-passed before integration; they do not validate this integrated candidate's
-model execution, real DCP/HCCL, DSpark acceptance, or performance.
+The existing PD candidate supports built-in MooncakeConnectorV2 or its
+MooncakePullConnector alias on both endpoints. Its full576/unit-scale format
+handshake, physical payload/stride descriptors and mapping are unchanged.
+PD with DCP requires `cp_kv_cache_interleave_size == manager block_size`.
+Custom/pool connectors are not admitted. Network completion, KDA/draft
+handoff and end-to-end PD acceptance are separate from CPU wire tests.
 
-PCP and KV layer parallelism remain unsupported. Preserve
-the existing target/draft construction-tag isolation and cache format checks.
+## Validation and performance comparison
 
-## Mooncake V2 PD candidate
+1. Run the standalone expanded-FIA probe in the target CANN environment.
+   It compares ordinary and native frontends with real K3 projection geometry,
+   independent encoded-weight FP32 references, paged FP8 history, causal
+   current KV, nonzero offset, page gaps and unchanged cache guards.
+2. Use its optional benchmark only after correctness passes. Exclude first
+   import/JIT/warmup; compare complete pipeline NPU and synchronized wall
+   times, peak memory, and the same Q/history/head sizes. This is single-card
+   eager testing, not a TP, DCP, graph or DSpark acceptance result.
+3. Install the framework candidate; restart every worker. Confirm startup
+   `fia_form=expanded prefill_frontend=ordinary` or `native-prolog`.
+   Keep weights, DSpark settings, APC state, chunk size, concurrency and prompt
+   lengths fixed. Compare the two Prefill flags, then the existing latent and
+   BF16-cache baselines. Measure TTFT, TPOT, acceptance lengths and peak memory.
+4. Recheck mixed-stage batches, APC partial/full hits, long chunks, Decode graph
+   replay and actual DCP/PD separately. Source-level isolation does not prove
+   zero TPOT impact in a scheduler with concurrent Prefill and Decode.
 
-### Stage-specific Prolog
-
-Set `enable_mlapo=true` and `enable_kimi_k3_mlapo_prefill=false` to keep
-DSL Prolog for Decode while using ordinary W8A8 MXFP8 projections, RMSNorm
-and explicit FP8 Cache writing for Prefill. The new flag defaults to true;
-`enable_mlapo=false` still disables DSL Prolog for both stages. Attention's
-`kimi_k3_c8_prefill_backend` (qfm/fia) is independent of this writer policy.
-
-Routing uses scheduler CPU stage flags, including short final Prefill chunks,
-not query length. Pure Decode and DSpark verification retain the existing
-FP8-output mode2 path and Decode graph behavior. Pure Decode does not build
-unused CPU stage segments. Mixed batches split adjacent stage ranges: Prefill
-uses ordinary projections and quantizes only its own Q; Decode keeps mode2
-FP8 Q and matching scales without re-quantization. Byte-view copies assemble
-the shared QFM input. The QFM Prefill backend needs no full-batch BF16 Q/KV
-scratch. FIA Prefill additionally keeps floating Q/current KV only in its
-Prefill slices (unused Decode slices are zero). With DCP, that FIA Q needs an
-additional BF16 head gather; this mixed FIA combination needs separate
-performance measurement. No permanent Cache format or scale changes.
-
-The pinned DSL schema has no RMSNorm bias argument. Weight preparation now
-rejects a loaded nonzero/NaN Q-a or KV-a norm bias rather than silently dropping
-ModelSlim correction. Loaded zero bias or an allocated but unloaded bias is
-accepted. The content check runs once at weight preparation, never in forward.
-Use ordinary preprocessing (`enable_mlapo=false`) for a checkpoint requiring
-nonzero norm bias until a bias-aware native Prolog is available.
-
-CPU regressions cover stage routing, padding, slots, gapped Cache writes,
-byte-exact Decode Q/scales and Capture→Prefill→Decode metadata refresh. These
-do not validate real NPU graph replay, native numerical equivalence, DSpark
-acceptance or an end-to-end performance recovery.
-
-### Shared batch preparation
-
-The attention metadata builder prepares ordinary-writer NZ Scatter addresses,
-invalid/empty-row masks and temporary-Cache staging indices once per batch.
-MLA layers reuse them instead of rebuilding the same integer tensors. The
-addresses include the actual physical page stride and preserve negative slots,
-page gaps and storage offsets. Mixed-stage slices share the corresponding
-address range; temporary-Cache indices always start at zero. Contiguous mode2
-Decode writes directly through Prolog and does not compute unused Scatter
-addresses. Retained graph metadata keeps the shared buffers at stable addresses
-and refreshes their values before replay.
-
-Single-query virtual rows also reuse the retained cumulative lengths and copy
-their live/visible lengths directly, without constructing CPU range lists or
-repeating per-layer mask inversions. FIA's fixed boolean causal mask is reused.
-These changes preserve quantization, stage selection and native operators;
-they do not establish that host preparation caused an observed Event Wait or
-that TPOT has recovered. NPU timing and end-to-end DSpark acceptance remain
-necessary. No native package rebuild is needed for these Python changes.
-
-### Manager and kernel page geometry
-
-MRV2 constructs metadata builders with a copy of the finalized manager spec
-whose `block_size` is the kernel size (128). For QFM padded pages, that copy
-must also scale `page_size_padded` by the new/old block-size ratio. Retaining
-the entire manager page here gives the shared Scatter plan an incorrect
-physical kernel-page stride. For example, a manager block of 768 and a
-padded page of 884736 bytes use six kernel pages of 147456 bytes each.
-
-`AscendMLAAttentionSpec.copy_with_new_block_size()` now preserves this
-relationship for QFM padded-page shrinking. The original manager spec and
-allocator stay unchanged; non-QFM, unpadded and larger-block copies retain
-the upstream behavior. Never divide by a fixed six or infer finalized
-manager geometry from the CLI alone. `--block-size 128` may still be used;
-the hybrid planner and kernel subpage geometry are separate stages.
-
-This fixes the reported `plan_stride=884736, cache_stride=147456` fallback
-without removing its safety checks. It applies to both QFM and FIA readers,
-which share the writer. Restart all workers to discard previously captured
-fallback nodes. CPU tests cover the actual upstream spec-copy path, repeated
-layer writes without fallback, and retained-buffer refresh. NPU timing is
-still required to determine how much this contributes to TTFT or TPOT.
-
-### FIA Prefill preparation
-
-The FIA option prepares historical page IDs, token offsets and NZ tile IDs
-once per request and metadata batch, shared across MLA layers. Each new
-batch rebuilds these coordinates from its live page table, including APC
-reuse and DSpark corrections. No historical KV values are shared between
-layers and no second persistent cache is introduced.
-
-The production unit KV descale uses direct FP8-to-BF16 conversion, skipping
-the FP32 intermediate, multiply and its output allocation.
-Generic non-unit helper calls retain their scaled conversion. History and
-Current reuse one contiguous pair of Query components. An empty history
-on the current-contributing rank goes directly to Current FIA; other DCP
-ranks retain the neutral zero output and negative-infinity LSE for merging.
-
-The production reader gathers latent512 and raw64 separately, producing the
-two contiguous BF16 inputs that FIA consumes. This avoids materializing a
-full576 BF16 history and then copying its components into contiguous buffers.
-The two gathers use the same shared coordinates and preserve page strides
-and storage offsets. Their NPU performance tradeoff requires measurement.
-
-Pure FIA batches skip QFM virtual-sequence/page-table expansion and the unused
-QFM metadata kernel; inert descriptors are never passed to QFM. In mixed FIA/Decode
-batches, FIA-only rows use zero Q8 and unit scale placeholders in the
-unchanged whole-batch QFM descriptor, with `used_q=0`. FIA still consumes
-the original BF16 Query and Current KV. Decode FP8 codes/scales, QFM
-Attention calls and DCP collective ordering are preserved. The QFM Prefill
-backend does not use these FIA optimizations. FIA Prefill remains eager.
-
-These changes remove redundant preparation; they do not change the latent
-Attention formulation, merge History and Current into a different native
-call, or establish a measured NPU speedup. Validate long chunks, APC and
-mixed DSpark output before comparing TTFT. No native rebuild is required.
-
-Both P and D must install this revision and enable QFM C8. Use the built-in
-`MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
-AscendStore or a custom connector module. Keep community K3 MRV2 hybrid cache,
-KDA state, DSpark and PP/DP scheduling configuration; this patch does not
-introduce another transfer engine or a permanent BF16 cache.
-
-The handshake identifies full576 E4M3 PA_NZ with unit KV descale. Missing or
-different format identifiers fail before transfer. Each descriptor carries
-one 128-token payload, its actual byte stride/base pointer, and the number of
-kernel pages per manager block. Only payload bytes are transferred; P/D page
-padding may differ. Old packed656, BF16 and unpatched endpoints are not peers.
-
-For PD with DCP, `cp_kv_cache_interleave_size` must equal that endpoint's
-manager `block_size`, matching the community whole-block ownership mapper.
-Both must be positive multiples of 128. This is an explicit limitation of
-this candidate, not a claim that all existing C8 DCP settings support PD.
-Non-PD DCP behavior is unchanged. KDA and draft cache formats are unchanged.
-
-CPU tests cover the wire contract and real community block-ID mapping with
-nonzero offsets, distinct P/D padding, manager blocks 128/256/768 and DCP
-1/2/4/8. They do NOT validate network registration, asynchronous completion,
-HCCL, graph replay, APC handoff or DSpark acceptance end to end. Start with
-P/D TP8 and DCP1, compare output against mixed deployment, then test APC
-partial/full hits, chunked prefill, DSpark, graph decode and DCP separately.
+The guarded installer accepts a clean pinned checkout or a recognized complete
+previous delivery, keeps backups, and refuses unknown or mixed modifications.
+It does not install native packages, compile operators, launch services or
+run NPU tests automatically.

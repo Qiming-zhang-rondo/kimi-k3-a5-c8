@@ -568,8 +568,9 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -642,6 +643,8 @@ class AscendConfig:
     # Experimental eager Prefill FIA reader; Decode/verification keep QFM.
     enable_kimi_k3_qfm_fia_prefill: bool = False
     kimi_k3_c8_prefill_backend: str = "qfm"
+    # Preserve the latent FIA baseline; opt in to QK192/V128 Prefill.
+    kimi_k3_c8_fia_form: str = "latent"
     # Keep Decode MLAPO while optionally using ordinary Prefill projections.
     enable_kimi_k3_mlapo_prefill: bool = True
     enable_sparse_li_c8: bool = False

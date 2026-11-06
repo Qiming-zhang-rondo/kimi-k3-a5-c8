@@ -84,6 +84,12 @@ def select_qfm(impl, config) -> bool:
         raise ValueError("kimi_k3_c8_prefill_backend must be fia or qfm")
     impl.qfm_fia_prefill = backend == "fia" or getattr(config, "enable_kimi_k3_qfm_fia_prefill", False)
     impl.qfm_mlapo_prefill = getattr(config, "enable_kimi_k3_mlapo_prefill", True)
+    form = getattr(config, "kimi_k3_c8_fia_form", "latent")
+    if form not in ("latent", "expanded"):
+        raise ValueError("kimi_k3_c8_fia_form must be latent or expanded")
+    impl.qfm_fia_expanded = impl.qfm_fia_prefill and form == "expanded"
+    if impl.qfm_fia_expanded and (impl.qk_nope_head_dim != 128 or impl.v_head_dim != 128):
+        raise ValueError("Expanded K3 FIA requires QK192 (128+64) and V128")
     return True
 
 
@@ -276,6 +282,7 @@ class QFMMetadataBuilder:
         self.buffers = {}
         self.fia_prefill = getattr(impl, "qfm_fia_prefill", False)
         self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
+        self.expanded_fia = getattr(impl, "qfm_fia_expanded", False)
         self.fia_mask = self.mask.to(torch.bool) if self.fia_prefill else None
         self.cache_stride = None
         self.has_prolog = getattr(impl, "enable_mlapo", False)
@@ -427,10 +434,10 @@ class QFMMetadataBuilder:
             batch.table.copy_(common.block_table_tensor[row_owner])
         batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
         batch.preprocess_segments = ()
-        if not self.mlapo_prefill:
+        if not self.mlapo_prefill or self.expanded_fia:
             if flags is None:
                 raise ValueError("Stage-specific MLAPO requires scheduler Prefill flags")
-        if not self.mlapo_prefill and batch.has_prefill:
+        if (not self.mlapo_prefill or self.expanded_fia) and batch.has_prefill:
             bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
             segments = []
             for begin, end, prefill in zip(bounds, bounds[1:], flags[: common.num_reqs].tolist()):
@@ -650,6 +657,69 @@ def ordinary_qfm_inputs(impl, hidden, tokens):
     return q, kv
 
 
+def ordinary_fia_inputs(impl, hidden, tokens):
+    """Baseline Prefill projections: unabsorbed BF16 Q192 and latent KV576."""
+    if impl.fused_qkv_a_proj is not None:
+        projected = impl.fused_qkv_a_proj(hidden)[0]
+        q, kv = projected.split([impl.q_lora_rank, QFM_WIDTH], dim=-1)
+        q = impl.q_a_layernorm(q)
+    else:
+        q, kv = hidden, impl.kv_a_proj_with_mqa(hidden)[0]
+        if getattr(impl, "q_a_proj", None) is not None:
+            q = impl.q_a_layernorm(impl.q_a_proj(hidden)[0])
+    if q.shape[0] < tokens or kv.shape[0] < tokens:
+        raise ValueError("FIA projected inputs do not cover the physical token capacity")
+    q = impl.q_proj(q[:tokens])[0].view(tokens, impl.num_heads, impl.qk_head_dim)
+    latent, raw = kv[:tokens].split([QFM_VALUE, QFM_WIDTH - QFM_VALUE], dim=-1)
+    kv = torch.cat((impl.kv_a_layernorm(latent.contiguous()), raw), dim=-1)
+    return q, kv
+
+
+def stage_expanded_fia_inputs(impl, hidden, cache, batch, prolog):
+    """Route eager expanded Prefill separately; preserve Decode mode2 bytes."""
+    tokens = batch.slots.numel()
+    segments = batch.preprocess_segments
+    if not segments:
+        raise ValueError("Expanded FIA requires scheduler stage ranges")
+    native = getattr(impl, "fia_native_prolog", None) if getattr(impl, "qfm_mlapo_prefill", True) else None
+
+    def prefill_inputs(chunk):
+        return native(chunk) if native is not None else ordinary_fia_inputs(impl, chunk, chunk.shape[0])
+
+    if len(segments) == 1 and segments[0] == (0, tokens, True):
+        q, kv = prefill_inputs(hidden[:tokens].contiguous())
+        write_cache(kv, batch.slots, cache, impl.qfm_scale, scatter_plan=batch.scatter_plan)
+        return q, kv, None, None
+    q_bytes = torch.zeros((tokens, impl.num_heads, QFM_WIDTH), dtype=torch.uint8, device=hidden.device)
+    q_scale = torch.ones((tokens, impl.num_heads), dtype=torch.float32, device=hidden.device)
+    kv = torch.zeros((tokens, QFM_WIDTH), dtype=torch.bfloat16, device=hidden.device)
+    fia_q = torch.zeros((tokens, impl.num_heads, impl.qk_head_dim), dtype=torch.bfloat16, device=hidden.device)
+    for begin, end, prefill in segments:
+        chunk = hidden[begin:end].contiguous()
+        slots = batch.slots[begin:end]
+        scatter_plan = batch.scatter_plan.slice(begin, end) if batch.scatter_plan is not None else None
+        if prefill:
+            chunk_q, chunk_kv = prefill_inputs(chunk)
+            write_cache(chunk_kv, slots, cache, impl.qfm_scale, scatter_plan=scatter_plan)
+            fia_q[begin:end].copy_(chunk_q)
+            kv[begin:end].copy_(chunk_kv)
+        else:
+            if prolog is None:
+                chunk_q, chunk_kv = ordinary_qfm_inputs(impl, chunk, end - begin)
+                write_cache(chunk_kv, slots, cache, impl.qfm_scale, scatter_plan=scatter_plan)
+                chunk_q, chunk_scale = quantize_query(chunk_q)
+            else:
+                kwargs = dict(batch.prolog_kwargs)
+                if scatter_plan is not None:
+                    kwargs["scatter_plan"] = scatter_plan
+                if "staging_indices" in kwargs:
+                    kwargs["staging_indices"] = kwargs["staging_indices"][: end - begin]
+                chunk_q, chunk_scale = prolog(chunk, slots, cache, **kwargs)
+            q_bytes[begin:end].copy_(chunk_q.view(torch.uint8))
+            q_scale[begin:end].copy_(chunk_scale)
+    return q_bytes.view(torch.float8_e4m3fn), kv, q_scale, fia_q
+
+
 def forward_qfm(impl, hidden, cache, metadata, output):
     batch = metadata.qfm
     if batch is None:
@@ -659,7 +729,13 @@ def forward_qfm(impl, hidden, cache, metadata, output):
     q_scale = None
     kv = None
     fia_q = None
-    if prolog is not None and not getattr(impl, "qfm_mlapo_prefill", True) and batch.has_prefill:
+    expanded = bool(batch.fia_requests) and getattr(impl, "qfm_fia_expanded", False)
+    if expanded:
+        # Collectives must run on every DCP rank before gathering Query heads,
+        # including ranks with no history. Private weights are cached thereafter.
+        impl.fia_expanded.prepare_for_dcp(impl)
+        q, kv, q_scale, fia_q = stage_expanded_fia_inputs(impl, hidden, cache, batch, prolog)
+    elif prolog is not None and not getattr(impl, "qfm_mlapo_prefill", True) and batch.has_prefill:
         q, kv, q_scale, fia_q = stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog)
     elif prolog is None:
         q, kv = ordinary_qfm_inputs(impl, hidden, tokens)
@@ -683,13 +759,30 @@ def forward_qfm(impl, hidden, cache, metadata, output):
     if batch.qfm_needed:
         latent, lse = run_qfm_reader(impl, q, cache, batch, q_scale=q_scale)
     else:
-        latent = torch.zeros((*q.shape[:2], QFM_VALUE), dtype=q.dtype, device=q.device)
+        latent = torch.zeros((*q.shape[:2], QFM_VALUE), dtype=torch.bfloat16, device=q.device)
         lse = torch.full((*q.shape[:2], 1), -float("inf"), device=q.device)
     if batch.fia_requests:
-        fill_fia_prefill(impl, q if fia_q is None else fia_q, kv, cache, batch, latent, lse)
+        if expanded:
+            from vllm_ascend.attention.kimi_k3_fia_expanded import fill_expanded_fia
+
+            fill_expanded_fia(impl, q if fia_q is None else fia_q, kv, cache, batch, latent, lse)
+        else:
+            fill_fia_prefill(impl, q if fia_q is None else fia_q, kv, cache, batch, latent, lse)
     if impl.dcp_enabled:
         latent = impl._merge_dcp_attention_output(latent, lse)
-    projected = impl._v_up_proj_batch_major(latent)
+    if expanded:
+        # The common DCP merge treats every row as an opaque vector. P rows
+        # already contain V128; only D rows still require the latent V-up step.
+        projected = torch.empty((tokens, impl.num_heads, impl.v_head_dim), dtype=latent.dtype, device=latent.device)
+        for begin, end, prefill in batch.preprocess_segments:
+            if prefill:
+                projected[begin:end].copy_(latent[begin:end, :, : impl.v_head_dim])
+            else:
+                value = impl._v_up_proj_batch_major(latent[begin:end])
+                projected[begin:end].copy_(value.view(end - begin, impl.num_heads, impl.v_head_dim))
+        projected = projected.view(tokens, -1)
+    else:
+        projected = impl._v_up_proj_batch_major(latent)
     invalid = batch.invalid if batch.invalid is not None else ~batch.live
     projected = projected.masked_fill(invalid[:, None], 0)
     if impl.use_output_gate:
