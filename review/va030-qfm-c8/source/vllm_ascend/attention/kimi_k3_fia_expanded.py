@@ -22,6 +22,11 @@ class ExpandedFIA:
         self.nope_dim = impl.qk_nope_head_dim
         self.raw_dim = impl.qk_rope_head_dim
         self.value_dim = impl.v_head_dim
+        self.qfa = None
+        if getattr(impl, "qfm_qfa_prefill", False):
+            from vllm_ascend.attention.kimi_k3_qfa_expanded import ExpandedQFA
+
+            self.qfa = ExpandedQFA()
         if self.latent_dim != 512 or self.raw_dim != 64 or not 0 < self.value_dim <= self.latent_dim:
             raise ValueError("Expanded FIA requires latent512/raw64 and value dimension in [1,512]")
         tokens = ascend_chunked_prefill_workspace_size(impl.vllm_config)
@@ -52,6 +57,10 @@ class ExpandedFIA:
         bytes_per_token = 2 * (
             self.latent_dim + self.raw_dim + heads * (2 * self.nope_dim + 2 * self.value_dim + self.raw_dim)
         )
+        if self.qfa is not None:
+            # Temporary padded BF16 K/V, V token-axis transpose and FP8
+            # encoded inputs/scales coexist with the expanded BF16 inputs.
+            bytes_per_token += heads * (3 * 256 * 2 + 2 * 256 + 24)
         limit = max(1, self.workspace_bytes // bytes_per_token)
         if self.max_context_tokens is None or self.max_context_tokens == self._default_max_context_tokens:
             self.max_context_tokens = limit
@@ -173,6 +182,22 @@ def fill_expanded_fia(impl, q, current_kv, cache, batch, latent_container, lse):
         if history_length == 0 and not current_rank:
             continue
         query = q[begin:end].to(torch.bfloat16).contiguous()
+        prepared_query = expanded.qfa.prepare_query(query) if expanded.qfa is not None else None
+
+        def partial(key, value, causal_mask=None, *, prepared_query=prepared_query, query=query):
+            if expanded.qfa is not None:
+                if causal_mask is not None and getattr(batch, "qfa_mask", None) is not None:
+                    causal_mask = batch.qfa_mask
+                return expanded.qfa.partial(
+                    prepared_query,
+                    key,
+                    value,
+                    impl.scale,
+                    causal_mask,
+                    metadata_cache=getattr(batch, "qfa_metadata", None),
+                )
+            return _partial(query, key, value, impl.scale, causal_mask)
+
         result = None
         if history_length:
             plan = plans[index] if plans else build_fia_history_plan(table, history_length)
@@ -183,7 +208,7 @@ def fill_expanded_fia(impl, q, current_kv, cache, batch, latent_container, lse):
                 chunk_plan = type(plan)(plan.pages[start:stop], plan.positions[start:stop], plan.tiles)
                 latent, raw = read_fia_history_parts(cache, chunk_plan)
                 key, value = expanded.expand(latent, raw, dcp=impl.dcp_enabled)
-                result = _merge(result, _partial(query, key, value, impl.scale))
+                result = _merge(result, partial(key, value))
                 del latent, raw, key, value
         if current_rank:
             current = current_kv[begin:end].reshape(end - begin, expanded.latent_dim + expanded.raw_dim)
@@ -191,7 +216,7 @@ def fill_expanded_fia(impl, q, current_kv, cache, batch, latent_container, lse):
             key, value = expanded.expand(
                 current[:, : expanded.latent_dim], current[:, expanded.latent_dim :], dcp=impl.dcp_enabled
             )
-            result = _merge(result, _partial(query, key, value, impl.scale, mask))
+            result = _merge(result, partial(key, value, mask))
         if result is not None:
             latent_container[begin:end, :, : expanded.value_dim].copy_(result[0].to(latent_container.dtype))
             lse[begin:end].copy_(result[1])

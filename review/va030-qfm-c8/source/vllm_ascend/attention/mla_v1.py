@@ -1391,7 +1391,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dsl-prolog" if self.enable_mlapo else "ordinary",
                 self.num_heads,
                 self.enable_mlapo and self.qfm_mlapo_prefill,
-                "fia" if self.qfm_fia_prefill else "qfm",
+                "qfa" if self.qfm_qfa_prefill else "fia" if self.qfm_fia_prefill else "qfm",
                 "expanded" if self.qfm_fia_expanded else "latent",
                 "native-prolog"
                 if self.qfm_fia_expanded and self.enable_mlapo and self.qfm_mlapo_prefill

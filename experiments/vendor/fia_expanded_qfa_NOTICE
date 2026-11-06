@@ -1,0 +1,29 @@
+CANN QFA MXFP8 reference attribution
+
+Copyright (c) 2026 Huawei Technologies Co., Ltd.
+
+The extracted reference and comparison functions in
+fia_expanded_qfa_golden920.py originate from CANN/ops-transformer, tag
+v9.2.0, commit dff221330eecd2132233b1e73ed1072cd8925140:
+
+  attention/quant_flash_attn/tests/pytest/qfa_mxfp8_test/common/quant_flash_attn_golden.py
+  https://gitcode.com/cann/ops-transformer/blob/dff221330eecd2132233b1e73ed1072cd8925140/attention/quant_flash_attn/tests/pytest/qfa_mxfp8_test/common/quant_flash_attn_golden.py
+  SHA-256: 793bf7d1adc1b28fa69bc5c87ea47f8caebbd10cf44cd8e37d5b07f37eb2c7b0
+
+  attention/quant_flash_attn/tests/pytest/qfa_mxfp8_test/common/result_compare_method.py
+  https://gitcode.com/cann/ops-transformer/blob/dff221330eecd2132233b1e73ed1072cd8925140/attention/quant_flash_attn/tests/pytest/qfa_mxfp8_test/common/result_compare_method.py
+  SHA-256: c5345e38c6a52cf12afb0da7563ea4283cdf9fc7f57abd6c0d978437cec36edc
+
+These functions remain licensed under the CANN Open Software License
+Agreement Version 2.0. Its complete text is provided in the accompanying
+fia_expanded_qfa_LICENSE, copied without modification from the same commit:
+https://gitcode.com/cann/ops-transformer/blob/dff221330eecd2132233b1e73ed1072cd8925140/LICENSE
+
+Local adaptation: selected pure functions were extracted by AST. Module
+imports, command-line/example setup and module configuration were replaced
+with a small importable harness. Function arithmetic and comparison
+thresholds are unchanged. The probe supplies explicit per-call configuration
+and a query-sampling mask preserving the original query positions.
+
+The reference is used for Ascend synthetic operator validation. It does not
+establish performance or end-to-end model accuracy.

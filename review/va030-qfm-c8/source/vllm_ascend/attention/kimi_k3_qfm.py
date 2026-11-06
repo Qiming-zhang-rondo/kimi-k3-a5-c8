@@ -80,13 +80,16 @@ def select_qfm(impl, config) -> bool:
     if impl.num_heads * size not in QFM_HEADS:
         raise ValueError("QFM does not support this DCP-gathered query head count")
     backend = getattr(config, "kimi_k3_c8_prefill_backend", "qfm")
-    if backend not in ("fia", "qfm"):
-        raise ValueError("kimi_k3_c8_prefill_backend must be fia or qfm")
-    impl.qfm_fia_prefill = backend == "fia" or getattr(config, "enable_kimi_k3_qfm_fia_prefill", False)
+    if backend not in ("fia", "qfm", "qfa"):
+        raise ValueError("kimi_k3_c8_prefill_backend must be fia, qfa or qfm")
+    impl.qfm_fia_prefill = backend in ("fia", "qfa") or getattr(config, "enable_kimi_k3_qfm_fia_prefill", False)
     impl.qfm_mlapo_prefill = getattr(config, "enable_kimi_k3_mlapo_prefill", True)
     form = getattr(config, "kimi_k3_c8_fia_form", "latent")
     if form not in ("latent", "expanded"):
         raise ValueError("kimi_k3_c8_fia_form must be latent or expanded")
+    if backend == "qfa" and form != "expanded":
+        raise ValueError("QFA Prefill requires kimi_k3_c8_fia_form=expanded (temporary Q/K/V padded to 256)")
+    impl.qfm_qfa_prefill = backend == "qfa"
     impl.qfm_fia_expanded = impl.qfm_fia_prefill and form == "expanded"
     if impl.qfm_fia_expanded and (impl.qk_nope_head_dim != 128 or impl.v_head_dim != 128):
         raise ValueError("Expanded K3 FIA requires QK192 (128+64) and V128")
@@ -267,6 +270,9 @@ class QFMBatch:
     prolog_kwargs: dict = field(default_factory=dict)
     # Rebuilt with the live request page tables each batch; shared by layers.
     fia_history_plans: tuple = ()
+    # Optional QFA schedules depend on lengths/layouts, never layer Q/K/V.
+    qfa_metadata: dict = field(default_factory=dict)
+    qfa_mask: torch.Tensor | None = None
 
 
 class QFMMetadataBuilder:
@@ -283,6 +289,7 @@ class QFMMetadataBuilder:
         self.fia_prefill = getattr(impl, "qfm_fia_prefill", False)
         self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
         self.expanded_fia = getattr(impl, "qfm_fia_expanded", False)
+        self.qfa_prefill = getattr(impl, "qfm_qfa_prefill", False)
         self.fia_mask = self.mask.to(torch.bool) if self.fia_prefill else None
         self.cache_stride = None
         self.has_prolog = getattr(impl, "enable_mlapo", False)
@@ -376,6 +383,7 @@ class QFMMetadataBuilder:
                 invalid=torch.empty(tokens, dtype=torch.bool, device=self.device),
                 invisible=torch.empty(tokens, dtype=torch.bool, device=self.device),
                 fia_mask=self.fia_mask,
+                qfa_mask=self.mask if self.qfa_prefill else None,
             )
             if self.scatter_possible:
                 batch.scatter_plan = QFMScatterPlan(

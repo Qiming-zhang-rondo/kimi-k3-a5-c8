@@ -15,7 +15,13 @@ qfm = base.qfm
 
 @pytest.mark.parametrize(
     "backend,form,expected",
-    [("fia", None, False), ("fia", "latent", False), ("fia", "expanded", True), ("qfm", "expanded", False)],
+    [
+        ("fia", None, False),
+        ("fia", "latent", False),
+        ("fia", "expanded", True),
+        ("qfm", "expanded", False),
+        ("qfa", "expanded", True),
+    ],
 )
 def test_expanded_form_is_explicit_fia_only_opt_in(qfm, backend, form, expected):
     impl, config = blocks.selection_inputs(128)
@@ -25,7 +31,19 @@ def test_expanded_form_is_explicit_fia_only_opt_in(qfm, backend, form, expected)
         config.kimi_k3_c8_fia_form = form
     assert qfm.select_qfm(impl, config)
     assert impl.qfm_fia_expanded is expected
-    assert impl.qfm_fia_prefill is (backend == "fia")
+    assert impl.qfm_fia_prefill is (backend in ("fia", "qfa"))
+    assert impl.qfm_qfa_prefill is (backend == "qfa")
+
+
+@pytest.mark.parametrize("form", [None, "latent"])
+def test_qfa_requires_explicit_expanded_form(qfm, form):
+    impl, config = blocks.selection_inputs(128)
+    impl.qk_nope_head_dim = impl.v_head_dim = 128
+    config.kimi_k3_c8_prefill_backend = "qfa"
+    if form is not None:
+        config.kimi_k3_c8_fia_form = form
+    with pytest.raises(ValueError, match="requires kimi_k3_c8_fia_form=expanded"):
+        qfm.select_qfm(impl, config)
 
 
 def test_expanded_form_rejects_unknown_value_and_wrong_model_dimensions(qfm):
@@ -331,6 +349,7 @@ def test_pure_decode_and_qfm_prefill_never_enter_expanded_route(qfm, monkeypatch
     )
     impl = SimpleNamespace(
         qfm_fia_expanded=expanded_flag,
+        qfm_qfa_prefill=expanded_flag,
         qfm_prolog=lambda *args, **kwargs: (query, scale),
         fia_expanded=SimpleNamespace(prepare_for_dcp=forbidden),
         dcp_enabled=False,

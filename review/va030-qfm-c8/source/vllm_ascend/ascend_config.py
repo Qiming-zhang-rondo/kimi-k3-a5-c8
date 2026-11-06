@@ -640,7 +640,7 @@ class AscendConfig:
     enable_sparse_sfa_c8: bool = False
     # Experimental full576 FP8 QFM cache; distinct from packed656 QSFA C8.
     enable_kimi_k3_qfm_c8: bool = False
-    # Experimental eager Prefill FIA reader; Decode/verification keep QFM.
+    # Experimental eager Prefill readers; Decode/verification keep QFM.
     enable_kimi_k3_qfm_fia_prefill: bool = False
     kimi_k3_c8_prefill_backend: str = "qfm"
     # Preserve the latent FIA baseline; opt in to QK192/V128 Prefill.

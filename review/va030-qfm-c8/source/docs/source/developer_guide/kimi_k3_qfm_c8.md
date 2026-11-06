@@ -95,6 +95,56 @@ QFM Decode output remains latent512 and still applies the original V-up.
 Do not compare only the FIA kernel: include projections, cache writing,
 history conversion/expansion, FIA and output merging in the timing interval.
 
+## Optional QFA after KV expansion
+
+Use `kimi_k3_c8_prefill_backend="qfa"` together with
+`kimi_k3_c8_fia_form="expanded"`. Both ordinary/native Prefill frontends
+above remain selectable. Decode/DSpark verification still use QFM. There
+is no QFA fallback or conversion of the permanent latent cache to expanded KV.
+
+Official CANN v9.2.0 and the inspected master checker admit head dimensions
+64/72/128/256 and require equal Q/K/V dimensions. They do **not** directly
+admit this model's QK192/V128. The adapter pads all three temporary inputs
+to256, calls MXFP8 mode1 and retains output128. It explicitly preserves the
+model's original softmax scale (192-based); padding is not a reason to change
+the scale to256-based.
+
+Q/K use Group32 along D with E8 scales `[T,H,4,2]`. V is quantized along
+the token axis, independently for each request and history/current chunk,
+with scales `[ceil(K/64),H,256,2]`. V is temporarily padded to a multiple
+of64 only for that quantizer and its FP8 codes are sliced back to the live
+KV length. Padded tokens must not enter the Attention denominator.
+All layout changes of FP8 codes/scales use byte views. Q is quantized once
+per request and reused across historical KV chunks. Metadata and cumulative
+length descriptors depend on shape/stage, not layer values, and are shared
+across MLA layers of a batch. Current uses the shared INT8 causal mask;
+history uses mask0 with no mask. Empty DCP shards never call an empty QFA.
+
+This has extra cost: the Attention multiply dimensions increase from
+`192+128=320` to `256+256=512`, before accounting for MXFP8 throughput.
+Padding, dynamic Q/K/V quantization, V transposes, E8 scales and native
+metadata also cost time and memory. The history workspace budget includes
+these additional temporary tensors. Neither lower precision nor selecting
+QFA proves a TTFT improvement.
+
+The private public-package wheel built with QFM Stage1 source `8b6924e6`
+contains a newer QFA Python/C++ wrapper with `v_tail`, `block_table_tail`
+and `seqused_v_tail` arguments. It must not call a CANN9.2.0 native QFA ABI.
+The adapter checks the explicit9.2 Python signature and reports its source
+path. That is a wrapper check, not proof of the linked native binary ABI.
+Use the explicit isolated9.2 wrapper preparation tool when the older
+QFM environment shadows the matching package. It preserves the QFM files
+and original environments and requires a new worker process. Do not merely
+delete Python tail arguments while keeping the newer C++ binding.
+
+The QFA probe additionally uses the official pinned MXFP8 golden, including
+internal FP8 P rounding, and the official BF16/FP32 result-comparison criteria.
+It separately reports error against BF16 expanded FIA as quantization loss.
+The vendored reference keeps its CANN Open Software License2.0 and source
+attribution. No arbitrary relative-L2 threshold replaces the official QFA
+criterion. Synthetic native correctness still does not establish model
+accuracy, DSpark acceptance, distributed execution or performance.
+
 ## Decode, mixed batches and feature boundaries
 
 Pure Decode and main-model DSpark verification retain the existing DSL
