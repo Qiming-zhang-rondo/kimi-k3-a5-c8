@@ -6,7 +6,7 @@
 ## 版本与范围
 
 - VA 基线：`c09d3e20b9c45c80b34ae3781440d90904a44023`（0.30）。
-- 对应已发布安装补丁：[`install-va030-qfm-hotpath.py`](../../va030_qfm/install-va030-qfm-hotpath.py)。
+- 对应已发布安装补丁：[`install-va030-qfm-scatter-fix.py`](../../va030_qfm/install-va030-qfm-scatter-fix.py)。
 - `source/` 中的 23 个文件逐个 SHA256 校验，与该安装脚本的 AFTER 状态完全一致。
 - QFM / QFM metadata：CANN ops-transformer `8b6924e68ed27181141cde84fa5a942c0c060aac`。
 - DSL Prolog：cannbot-dsl `9e01355ab8f809050579271c0eadcc5858ed20bc`，源码 SHA256 见 manifest。
@@ -120,3 +120,15 @@ Q/KV。混合 FIA 另外保留 Prefill 的浮点 Q/KV，DCP 时还有一次 BF16
   的 chunk（包括短尾块）都走普通前处理；Decode/DSpark verification 保留 mode2。
 - 这些改动去除已确认的重复准备，尚无 NPU TPOT 恢复证据，不能认定已定位两倍
   ITL 退化或 Event Wait 的全部原因。本轮不修改 native 实现、不需要重新编译算子。
+
+
+## Shared Scatter plan 启动回归修复
+
+图预热在框架的共享 Scatter plan 校验处报错，尚未进入 QFM Attention。
+旧报错没有区分 stride、slots 引用、offsets 属性，不能据此确定具体失配项。
+本版匹配时仍共享预计算；失配时打印 `QFM Scatter plan fallback` 及具体字段，
+使用当前 slots 和实际 Cache stride 重建地址。重建操作保留在捕获图内，重放时随
+slots 更新；不复用第一次预热的临时地址，不改变量化、Cache 布局或 native 算子。
+CPU 289 项回归覆盖失配后重建、slots 原地刷新、负 slots、页间隙、storage offset；
+这些检查不能替代 NPU 图捕获/重放和全模型验收。首次启动请保留 fallback 警告，
+其内容用于确认具体失配来源。该修复不证明此前的 ITL 退化已经解决。

@@ -9,6 +9,7 @@ shared across layers in an attention group; only captured capacities are kept.
 
 import importlib
 import math
+import warnings
 from dataclasses import dataclass, field
 
 import torch
@@ -149,6 +150,7 @@ class QFMScatterPlan:
     slots: torch.Tensor
     offsets: torch.Tensor
     stride: int
+    fallback_reported: bool = False
 
     def slice(self, begin, end):
         return QFMScatterPlan(self.slots[begin:end], self.offsets[begin:end], self.stride)
@@ -197,7 +199,32 @@ def scatter_fp8_cache(values, slots, cache, scatter_plan=None):
             or offsets.device != cache.device
             or not offsets.is_contiguous()
         ):
-            raise ValueError("QFM Scatter plan must match the live slots and physical cache stride")
+            # A shared plan is an optimization, not the address authority.
+            # Recompute from the LIVE slots and physical view. Keep this work
+            # inside the captured graph too: caching the rebuilt addresses in
+            # Python would leave them stale when graph replay updates slots.
+            if not scatter_plan.fallback_reported:
+                mismatches = {
+                    "stride": scatter_plan.stride != stride,
+                    "slots_pointer": scatter_plan.slots.data_ptr() != slots.data_ptr(),
+                    "slots_shape": scatter_plan.slots.shape != slots.shape,
+                    "offsets_shape": offsets.shape != (slots.numel(), QFM_WIDTH // QFM_TILE),
+                    "offsets_dtype": offsets.dtype != torch.int64,
+                    "offsets_device": offsets.device != cache.device,
+                    "offsets_contiguous": not offsets.is_contiguous(),
+                }
+                warnings.warn(
+                    "QFM Scatter plan fallback: "
+                    f"mismatch={[name for name, bad in mismatches.items() if bad]}; "
+                    f"plan_stride={scatter_plan.stride}, cache_stride={stride}; "
+                    f"plan_slots={tuple(scatter_plan.slots.shape)}, live_slots={tuple(slots.shape)}; "
+                    f"offsets={tuple(offsets.shape)}/{offsets.dtype}/{offsets.device}, cache_device={cache.device}. "
+                    "Rebuilding offsets from live slots; no cache layout or quantization change.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                scatter_plan.fallback_reported = True
+            offsets = build_scatter_offsets(slots, stride)
     torch_npu.npu_scatter_pa_cache(values.reshape(-1, 1, QFM_TILE).contiguous(), offsets.flatten(), key_cache=alias)
 
 

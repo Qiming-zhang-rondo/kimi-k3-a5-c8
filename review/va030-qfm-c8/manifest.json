@@ -5,7 +5,7 @@
     "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "1017a23af1bd1da6ba65b87922a1f48029ec06bfe26dc895e9d636da72b8f817",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_fia_prefill.py": "25508531362c2e5119a1a1f6cf981bc858b90009af0949851a4730e627dcbb49",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "05a5e2f9184b5f5ad6c809753ac8946e9ca4f51fee7f3b8b40fa7314c597b210",
-    "source/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py": "88298b311b28d6337ae2c561dbbf0dc5133d1a8b9849d5f3db11f7030f866ac9",
+    "source/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py": "97bd4859fce7c2a5b28fa199dc28f5fcf96de105ded51f29b6101c3ca65ffb15",
     "source/tests/ut/attention/test_kimi_k3_qfm_cpu.py": "7df14bcfce5bf007ee080cb00991d1eb15851148dc55e00ac9c35b5325c138f1",
     "source/tests/ut/attention/test_kimi_k3_qfm_pd_cpu.py": "51dbae2e5038e47ada614235a9c869a13e08f8d0cf1cfefae140576fbe163d1e",
     "source/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py": "58bd70ee6c40ef34dcdbfadd4922d9593cfd8662ea1d2a5128d7929abc049d5f",
@@ -13,7 +13,7 @@
     "source/tests/ut/attention/test_kimi_k3_qfm_worker_blocks_cpu.py": "1c2e70d55f6c57b9caff188b4cfb248ac2cff3ceed689863200b06a8ea799c80",
     "source/vllm_ascend/ascend_config.py": "3962e20f7cf01c434552ec951a6969d759f36e6311b1fa6c4c0e7e36abbff548",
     "source/vllm_ascend/attention/context_parallel/mla_cp.py": "7fc8a0f2ddc782f93dd21cfcb325cd181619ad501afa439dd7929b04e8361f01",
-    "source/vllm_ascend/attention/kimi_k3_qfm.py": "8d87019eea10479eb085f0d04218e08b37d5358a961c83178cf2a5a72fd1be7e",
+    "source/vllm_ascend/attention/kimi_k3_qfm.py": "e69802c9bfaffe4f9ef2f6dc5ad7e1b3e6b4d5bf2cb9c389ab141782d5fdc8e6",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog.py": "d1000529682c9d83b2345e2fb9b7f8cb94c752c696d9c4ab9be3aa3d2d975430",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py": "55161bea45afbfb88b3a40eba79e90b0612d32e58c197db46b5d62ddbf1c0070",
     "source/vllm_ascend/attention/mla_v1.py": "c436d2a1a4b1ae2438c8676a41f8be8ed16c9d601e948388f8e142f0d753007f",
@@ -25,12 +25,12 @@
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/qfm_contract.py": "1588e7bcb36f787bf05ebfa8f62fd2345f4d2bc89a06d555e004e4afefac634e",
     "source/vllm_ascend/worker/v2/attn_utils.py": "fc2840d0c00919d5701942c30adb88275dd38277e1e90481121de0d1df85345e",
     "source/vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3",
-    "va030-qfm-c8.patch": "0c6922094b4a830fbacc1245b1eb87e48b7b399be872bad3f057e6a7a41da119",
+    "va030-qfm-c8.patch": "b7930482028126f346d80ff864f2ea4a5816f5939885c2a896b5a32f208e0e37",
     "native/quant_mla_prolog.py": "ab0876c2fc09b7cc2b0541063dc7bab16414b2046ea9030bc1fecce4020be1bc",
     "native/LICENSE": "7a2c992300c275afed721f5b69e950a2382b1b8f8f3f08e1858d7ee4d3134365",
     "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-    "README.md": "856e2e18f2739ea6e62e131ba49d88812936e5bfcdc87c41447fb06f2c3d981e"
+    "README.md": "57ebe79cd353c50926e6e1ef233c1f97135480d87a21d5ade2dbe8dc57967ffd"
   },
-  "installer_path": "va030_qfm/install-va030-qfm-hotpath.py",
-  "installer_version": "shared batch Scatter addresses, masks and staging indices; same commit as snapshot"
+  "installer_path": "va030_qfm/install-va030-qfm-scatter-fix.py",
+  "installer_version": "shared Scatter plan mismatch fallback and diagnostics; same commit as snapshot"
 }

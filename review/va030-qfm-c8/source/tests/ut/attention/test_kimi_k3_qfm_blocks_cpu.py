@@ -369,24 +369,41 @@ def test_retained_shared_buffers_refresh_without_rebinding(qfm, monkeypatch):
     assert torch.equal(batch.fia_mask, b.mask.bool())
 
 
-@pytest.mark.parametrize("wrong", ["stride", "slots", "dtype", "shape"])
-def test_shared_scatter_plan_rejects_mismatched_geometry(qfm, wrong):
-    slots = torch.tensor([0, 129])
-    cache = qfm.cache_view(torch.zeros(2 * 73728, dtype=torch.uint8), 2, 73728)
-    offsets = qfm.build_scatter_offsets(slots, 73728)
-    plan = qfm.QFMScatterPlan(slots, offsets, 73728)
+@pytest.mark.parametrize("wrong", ["stride", "slots", "slots_shape", "dtype", "shape", "contiguous", "device"])
+def test_shared_scatter_plan_fallback_uses_live_geometry_on_each_replay(qfm, wrong):
+    stride = 73728 + 256
+    slots = torch.tensor([0, -1, 129])
+    backing = torch.full((256 + 2 * stride + 256,), 0x5A, dtype=torch.uint8)
+    cache = qfm.cache_view(backing[256 : 256 + 2 * stride], 2, stride)
+    offsets = qfm.build_scatter_offsets(slots, stride)
+    plan = qfm.QFMScatterPlan(slots, offsets, stride)
     if wrong == "stride":
         plan.stride += 32
     elif wrong == "slots":
-        plan.slots = slots.clone()
+        plan.slots = torch.tensor([255, 128, 127])
+    elif wrong == "slots_shape":
+        plan.slots = slots.view(1, -1)
     elif wrong == "dtype":
         plan.offsets = offsets.int()
-    else:
+    elif wrong == "shape":
         plan.offsets = offsets[:, :1]
-    before = cache.view(torch.uint8).clone()
-    with pytest.raises(ValueError, match="Scatter plan"):
-        qfm.scatter_fp8_cache(torch.zeros(2, WIDTH).to(torch.float8_e4m3fn), slots, cache, scatter_plan=plan)
-    assert torch.equal(cache.view(torch.uint8), before)
+    elif wrong == "contiguous":
+        plan.offsets = offsets.t().contiguous().t()
+    elif wrong == "device":
+        plan.offsets = torch.empty(offsets.shape, dtype=torch.int64, device="meta")
+    values = torch.randn(3, WIDTH).to(torch.float8_e4m3fn)
+    reference = backing.clone()
+    expected_cache = qfm.cache_view(reference[256 : 256 + 2 * stride], 2, stride)
+    qfm.scatter_fp8_cache(values, slots, expected_cache)
+    with pytest.warns(RuntimeWarning, match="Scatter plan fallback"):
+        qfm.scatter_fp8_cache(values, slots, cache, scatter_plan=plan)
+    assert torch.equal(backing, reference)
+    # Stand in for a new graph replay: refresh slots in place. The fallback
+    # must recompute from them, rather than retain the first call's offsets.
+    slots.copy_(torch.tensor([255, 128, -1]))
+    qfm.scatter_fp8_cache(values, slots, expected_cache)
+    qfm.scatter_fp8_cache(values, slots, cache, scatter_plan=plan)
+    assert torch.equal(backing, reference)
 
 
 def test_direct_mode2_decode_does_not_prepare_unused_scatter(qfm, monkeypatch):
