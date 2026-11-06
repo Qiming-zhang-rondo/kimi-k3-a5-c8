@@ -6,7 +6,7 @@
 ## 版本与范围
 
 - VA 基线：`c09d3e20b9c45c80b34ae3781440d90904a44023`（0.30）。
-- 对应已发布安装补丁：[`install-va030-qfm-scatter-fix.py`](../../va030_qfm/install-va030-qfm-scatter-fix.py)。
+- 对应已发布安装补丁：[`install-va030-qfm-fia-opt.py`](../../va030_qfm/install-va030-qfm-fia-opt.py)。
 - `source/` 中的 23 个文件逐个 SHA256 校验，与该安装脚本的 AFTER 状态完全一致。
 - QFM / QFM metadata：CANN ops-transformer `8b6924e68ed27181141cde84fa5a942c0c060aac`。
 - DSL Prolog：cannbot-dsl `9e01355ab8f809050579271c0eadcc5858ed20bc`，源码 SHA256 见 manifest。
@@ -132,3 +132,23 @@ slots 更新；不复用第一次预热的临时地址，不改变量化、Cache
 CPU 289 项回归覆盖失配后重建、slots 原地刷新、负 slots、页间隙、storage offset；
 这些检查不能替代 NPU 图捕获/重放和全模型验收。首次启动请保留 fallback 警告，
 其内容用于确认具体失配来源。该修复不证明此前的 ITL 退化已经解决。
+
+
+## FIA Prefill 去冗余
+
+启用原有 `kimi_k3_c8_prefill_backend=fia` 时，历史地址按批次从实时页表重建，
+各 MLA 层共享坐标；生产 unit scale 直接 FP8→BF16，省去FP32中间张量和乘1。
+History按512/64分别gather后直接转换为连续BF16，避免full576 BF16再切片拷贝。
+History/Current 共用一次 Query 整理；空历史直接走 Current，DCP 非贡献卡保持
+0/-inf 输出并参与原归约。纯 FIA 不再展开QFM虚拟序列/页表或生成 schedule；
+混合批次 FIA-only 的 Q8 行使用
+0/scale1 占位（used_q=0），FIA 继续读取原 BF16 Q/Current。
+
+QFM Prefill、Decode/DSpark 的 Attention 调用、FP8 Query/scales 和 DCP
+collective 顺序保留。不改变持久 Cache 布局、native 算子或 latent 计算形态。
+无需重新编译、安装 native 包；重启服务后才生效。FIA Prefill 仍是 eager。
+本地 CPU 回归不能替代 A5 长 Prefill/APC/DSpark 性能和精度验收。
+
+本版347项CPU回归、7项安装升级检查通过，含36组独立旧版/新版Attention
+数值对照（输出/LSE逐元素一致）。改动文件Ruff检查和格式检查通过；完整
+format.sh ci因本地缺少pre-commit而未运行。尚无本版NPU性能测量。

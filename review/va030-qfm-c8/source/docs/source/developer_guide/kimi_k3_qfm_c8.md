@@ -227,6 +227,40 @@ they do not establish that host preparation caused an observed Event Wait or
 that TPOT has recovered. NPU timing and end-to-end DSpark acceptance remain
 necessary. No native package rebuild is needed for these Python changes.
 
+### FIA Prefill preparation
+
+The FIA option prepares historical page IDs, token offsets and NZ tile IDs
+once per request and metadata batch, shared across MLA layers. Each new
+batch rebuilds these coordinates from its live page table, including APC
+reuse and DSpark corrections. No historical KV values are shared between
+layers and no second persistent cache is introduced.
+
+The production unit KV descale uses direct FP8-to-BF16 conversion, skipping
+the FP32 intermediate, multiply and its output allocation.
+Generic non-unit helper calls retain their scaled conversion. History and
+Current reuse one contiguous pair of Query components. An empty history
+on the current-contributing rank goes directly to Current FIA; other DCP
+ranks retain the neutral zero output and negative-infinity LSE for merging.
+
+The production reader gathers latent512 and raw64 separately, producing the
+two contiguous BF16 inputs that FIA consumes. This avoids materializing a
+full576 BF16 history and then copying its components into contiguous buffers.
+The two gathers use the same shared coordinates and preserve page strides
+and storage offsets. Their NPU performance tradeoff requires measurement.
+
+Pure FIA batches skip QFM virtual-sequence/page-table expansion and the unused
+QFM metadata kernel; inert descriptors are never passed to QFM. In mixed FIA/Decode
+batches, FIA-only rows use zero Q8 and unit scale placeholders in the
+unchanged whole-batch QFM descriptor, with `used_q=0`. FIA still consumes
+the original BF16 Query and Current KV. Decode FP8 codes/scales, QFM
+Attention calls and DCP collective ordering are preserved. The QFM Prefill
+backend does not use these FIA optimizations. FIA Prefill remains eager.
+
+These changes remove redundant preparation; they do not change the latent
+Attention formulation, merge History and Current into a different native
+call, or establish a measured NPU speedup. Validate long chunks, APC and
+mixed DSpark output before comparing TTFT. No native rebuild is required.
+
 Both P and D must install this revision and enable QFM C8. Use the built-in
 `MooncakeConnectorV2` (or its `MooncakePullConnector` alias), not MultiConnector,
 AscendStore or a custom connector module. Keep community K3 MRV2 hybrid cache,

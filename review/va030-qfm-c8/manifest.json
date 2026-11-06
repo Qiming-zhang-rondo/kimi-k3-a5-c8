@@ -2,18 +2,18 @@
   "base_commit": "c09d3e20b9c45c80b34ae3781440d90904a44023",
   "prolog_commit": "9e01355ab8f809050579271c0eadcc5858ed20bc",
   "files_sha256": {
-    "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "1017a23af1bd1da6ba65b87922a1f48029ec06bfe26dc895e9d636da72b8f817",
-    "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_fia_prefill.py": "25508531362c2e5119a1a1f6cf981bc858b90009af0949851a4730e627dcbb49",
+    "source/docs/source/developer_guide/kimi_k3_qfm_c8.md": "052333c134c126fdbafce40378694069e9a2e33204e91e13b2c985cfa5996c44",
+    "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_fia_prefill.py": "11ccef076e5fc7465c34f552176c91444559d50bb8d52775a83e8757f954eb78",
     "source/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py": "05a5e2f9184b5f5ad6c809753ac8946e9ca4f51fee7f3b8b40fa7314c597b210",
     "source/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py": "97bd4859fce7c2a5b28fa199dc28f5fcf96de105ded51f29b6101c3ca65ffb15",
     "source/tests/ut/attention/test_kimi_k3_qfm_cpu.py": "7df14bcfce5bf007ee080cb00991d1eb15851148dc55e00ac9c35b5325c138f1",
     "source/tests/ut/attention/test_kimi_k3_qfm_pd_cpu.py": "51dbae2e5038e47ada614235a9c869a13e08f8d0cf1cfefae140576fbe163d1e",
-    "source/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py": "58bd70ee6c40ef34dcdbfadd4922d9593cfd8662ea1d2a5128d7929abc049d5f",
+    "source/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py": "e0c889ca5897d6be7c145bfa24f8256570d93a637e14531fcac4ac2d54e96f8a",
     "source/tests/ut/attention/test_kimi_k3_qfm_prolog_weights_cpu.py": "bd03f817f230e7300568287ed3bc7fd7c3ecbf4318bfeeb9be151eb9c87e609e",
     "source/tests/ut/attention/test_kimi_k3_qfm_worker_blocks_cpu.py": "1c2e70d55f6c57b9caff188b4cfb248ac2cff3ceed689863200b06a8ea799c80",
     "source/vllm_ascend/ascend_config.py": "3962e20f7cf01c434552ec951a6969d759f36e6311b1fa6c4c0e7e36abbff548",
     "source/vllm_ascend/attention/context_parallel/mla_cp.py": "7fc8a0f2ddc782f93dd21cfcb325cd181619ad501afa439dd7929b04e8361f01",
-    "source/vllm_ascend/attention/kimi_k3_qfm.py": "e69802c9bfaffe4f9ef2f6dc5ad7e1b3e6b4d5bf2cb9c389ab141782d5fdc8e6",
+    "source/vllm_ascend/attention/kimi_k3_qfm.py": "5d239f7dc2694da479a500dcbcfe5e0c846c8caf7d5765c8bc5a0fa22dbab374",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog.py": "d1000529682c9d83b2345e2fb9b7f8cb94c752c696d9c4ab9be3aa3d2d975430",
     "source/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py": "55161bea45afbfb88b3a40eba79e90b0612d32e58c197db46b5d62ddbf1c0070",
     "source/vllm_ascend/attention/mla_v1.py": "c436d2a1a4b1ae2438c8676a41f8be8ed16c9d601e948388f8e142f0d753007f",
@@ -25,12 +25,13 @@
     "source/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/qfm_contract.py": "1588e7bcb36f787bf05ebfa8f62fd2345f4d2bc89a06d555e004e4afefac634e",
     "source/vllm_ascend/worker/v2/attn_utils.py": "fc2840d0c00919d5701942c30adb88275dd38277e1e90481121de0d1df85345e",
     "source/vllm_ascend/worker/v2/model_runner.py": "49ed9001946dd5fd5783676ec1c3360c67a22431a01245f44594a535cfe774b3",
-    "va030-qfm-c8.patch": "b7930482028126f346d80ff864f2ea4a5816f5939885c2a896b5a32f208e0e37",
+    "va030-qfm-c8.patch": "4a6453f394785894f08969fe87a88bfd0f2e05089b3d70b73a8090080821d347",
     "native/quant_mla_prolog.py": "ab0876c2fc09b7cc2b0541063dc7bab16414b2046ea9030bc1fecce4020be1bc",
     "native/LICENSE": "7a2c992300c275afed721f5b69e950a2382b1b8f8f3f08e1858d7ee4d3134365",
     "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-    "README.md": "57ebe79cd353c50926e6e1ef233c1f97135480d87a21d5ade2dbe8dc57967ffd"
+    "README.md": "9d4a9fc1b726e925313903d7c8eb9a495e469272bea933a51067d880d670ff6f",
+    "source/tests/ut/attention/test_kimi_k3_fia_optimized_cpu.py": "3733017cd588d40660651bf8e38db33b3fd4e8ec3ab0c51bbd3c4a553bdf3126"
   },
-  "installer_path": "va030_qfm/install-va030-qfm-scatter-fix.py",
-  "installer_version": "shared Scatter plan mismatch fallback and diagnostics; same commit as snapshot"
+  "installer_path": "va030_qfm/install-va030-qfm-fia-opt.py",
+  "installer_version": "FIA preparation optimization; QFM-only/Decode computational route unchanged"
 }

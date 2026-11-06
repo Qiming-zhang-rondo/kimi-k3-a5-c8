@@ -259,6 +259,8 @@ class QFMBatch:
     fia_mask: torch.Tensor | None = None
     scatter_plan: QFMScatterPlan | None = None
     prolog_kwargs: dict = field(default_factory=dict)
+    # Rebuilt with the live request page tables each batch; shared by layers.
+    fia_history_plans: tuple = ()
 
 
 class QFMMetadataBuilder:
@@ -314,10 +316,21 @@ class QFMMetadataBuilder:
         columns = common.block_table_tensor.shape[1]
         key = tokens, columns, common.causal
         batch = self.buffers.get(key)
+        flags = common.is_prefilling
+        if flags is not None and flags.device.type != "cpu":
+            raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
+        fia_only = self.fia_prefill and flags is not None and bool(flags[: common.num_reqs].all())
+        if fia_only and (retain_for_graph or batch is not None):
+            raise ValueError("FIA Prefill is eager only; Decode-only graphs remain supported")
         # All decode graph capacities use one physical query per virtual row.
         # Eager prefill batches use <=16 rows per sequence, NOT small op calls.
-        per_token = retain_for_graph or batch is not None or self.dcp_size > 1
-        if per_token:
+        per_token = not fia_only and (retain_for_graph or batch is not None or self.dcp_size > 1)
+        if fia_only:
+            # No QFM call consumes these descriptors. Keep one inert row;
+            # never expand Q-by-page tables or <=16-token virtual sequences.
+            cu_cpu = [0, tokens]
+            rows = 1
+        elif per_token:
             rows = tokens
         else:
             bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
@@ -343,7 +356,7 @@ class QFMMetadataBuilder:
                 cu,
                 used,
                 lengths,
-                torch.zeros((rows, columns), **ints),
+                torch.zeros((0, 0) if fia_only else (rows, columns), **ints),
                 torch.full((tokens,), -1, dtype=torch.int64, device=self.device),
                 torch.zeros(tokens, dtype=torch.bool, device=self.device),
                 torch.zeros(tokens, dtype=torch.bool, device=self.device),
@@ -392,7 +405,9 @@ class QFMMetadataBuilder:
         lengths_per_token = torch.where(live, lengths_per_token.clamp_min(0), 0)
         batch.visible.copy_(live & (lengths_per_token > 0))
         batch.invisible.copy_(~batch.visible)
-        if per_token:
+        if fia_only:
+            row_owner = None
+        elif per_token:
             # Each virtual row contains exactly this token. The general
             # first/last-token gathers reduce to identity, even for padding
             # and DCP ranks with zero local history.
@@ -408,10 +423,8 @@ class QFMMetadataBuilder:
             last = (batch.cu[:-1] + row_used - 1).clamp_min(0).long()
             batch.used.copy_(row_used)
             batch.lengths.copy_(torch.where(row_used > 0, lengths_per_token[last], 0))
-        batch.table.copy_(common.block_table_tensor[row_owner])
-        flags = common.is_prefilling
-        if flags is not None and flags.device.type != "cpu":
-            raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
+        if not fia_only:
+            batch.table.copy_(common.block_table_tensor[row_owner])
         batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
         batch.preprocess_segments = ()
         if not self.mlapo_prefill:
@@ -431,6 +444,7 @@ class QFMMetadataBuilder:
                 segments[-1] = (segments[-1][0], tokens, segments[-1][2])
             batch.preprocess_segments = tuple(segments)
         batch.fia_requests = ()
+        batch.fia_history_plans = ()
         batch.qfm_needed = True
         if self.fia_prefill:
             if flags is None:
@@ -459,50 +473,104 @@ class QFMMetadataBuilder:
                     )
                     requests.append((begin, end, local_history, common.block_table_tensor[owner]))
                 batch.fia_requests = tuple(requests)
-                selected_device = selected.to(self.device)
-                skip = selected_device[row_owner]
-                batch.used.masked_fill_(skip, 0)
-                batch.lengths.masked_fill_(skip, 0)
+                batch.fia_history_plans = tuple(
+                    build_fia_history_plan(table, length) for _, _, length, table in requests
+                )
+                if not fia_only:
+                    selected_device = selected.to(self.device)
+                    skip = selected_device[row_owner]
+                    batch.used.masked_fill_(skip, 0)
+                    batch.lengths.masked_fill_(skip, 0)
                 batch.qfm_needed = not bool(selected.all())
         if batch.scatter_plan is not None and (
             not self.has_prolog or self.cache_stride != QFM_BLOCK * QFM_WIDTH or batch.has_prefill
         ):
             batch.scatter_plan.offsets.copy_(build_scatter_offsets(batch.slots, self.cache_stride, self.scatter_tiles))
-        schedule = self.metadata(batch.lengths, batch.cu, batch.used, batch.max_q, mode)
-        if batch.schedule.numel() == 0:
-            batch.schedule = schedule
-        else:
-            batch.schedule.copy_(schedule)
+        if batch.qfm_needed:
+            schedule = self.metadata(batch.lengths, batch.cu, batch.used, batch.max_q, mode)
+            if batch.schedule.numel() == 0:
+                batch.schedule = schedule
+            else:
+                batch.schedule.copy_(schedule)
         return batch
 
 
-def read_fia_history(cache, table, length, scale):
+@dataclass
+class FIAHistoryPlan:
+    pages: torch.Tensor
+    positions: torch.Tensor
+    tiles: torch.Tensor
+
+
+def build_fia_history_plan(table, length):
+    """Prepare O(history) gather coordinates once per request and batch.
+
+    Cache values remain layer-specific. Never retain this plan across batch
+    updates: APC reuse, preemption and DSpark can change the live page table.
+    """
+    position = torch.arange(length, device=table.device)
+    pages = table[position.div(QFM_BLOCK, rounding_mode="floor")].long()
+    return FIAHistoryPlan(
+        pages,
+        position.remainder(QFM_BLOCK),
+        torch.arange(QFM_WIDTH // QFM_TILE, device=table.device),
+    )
+
+
+def read_fia_history(cache, table, length, scale, *, plan=None, unit_scale=False):
     """Gather only live history, preserving NZ strides and storage offset.
 
     Index FP8 as bytes (advanced FP8 indexing is not supported everywhere).
     The result is temporary BF16 latent512+raw64, not a second cache pool.
     """
-    position = torch.arange(length, device=cache.device)
-    pages = table[position.div(QFM_BLOCK, rounding_mode="floor")].long()
-    tiles = torch.arange(QFM_WIDTH // QFM_TILE, device=cache.device)
-    packed = cache.view(torch.uint8)[pages[:, None], 0, tiles[None, :], position.remainder(QFM_BLOCK)[:, None], :]
-    return (packed.view(torch.float8_e4m3fn).reshape(length, 1, QFM_WIDTH).float() * scale).to(torch.bfloat16)
+    if plan is None:
+        plan = build_fia_history_plan(table, length)
+    packed = cache.view(torch.uint8)[plan.pages[:, None], 0, plan.tiles[None, :], plan.positions[:, None], :]
+    values = packed.view(torch.float8_e4m3fn).reshape(length, 1, QFM_WIDTH)
+    if unit_scale:
+        # Production QFM fixes KV descale to 1 at weight initialization.
+        # No device scalar read, multiply or FP32 intermediate is needed.
+        return values.to(torch.bfloat16)
+    return (values.float() * scale).to(torch.bfloat16)
 
 
-def fia_partial(q, kv, scale, mask=None):
+def read_fia_history_parts(cache, plan):
+    """Gather/cast into FIA's contiguous components without full576 BF16.
+
+    Production history has unit descale. Each result is already contiguous
+    in token-major order, avoiding another whole-history split/copy in FIA.
+    """
+    source = cache.view(torch.uint8)
+    length = plan.pages.numel()
+    latent_tiles = QFM_VALUE // QFM_TILE
+    latent = source[plan.pages[:, None], 0, plan.tiles[None, :latent_tiles], plan.positions[:, None], :]
+    latent = latent.view(torch.float8_e4m3fn).reshape(length, 1, QFM_VALUE).to(torch.bfloat16)
+    raw = source[plan.pages[:, None], 0, plan.tiles[None, latent_tiles:], plan.positions[:, None], :]
+    raw = raw.view(torch.float8_e4m3fn).reshape(length, 1, QFM_WIDTH - QFM_VALUE).to(torch.bfloat16)
+    return latent, raw
+
+
+def fia_partial(q, kv, scale, mask=None, *, prepared_q=None, prepared_kv=None):
     """Use the same latent512/raw64 TND FIA-v2 contract as MLA CP."""
     if kv.shape[0] == 0:
         return (
             torch.zeros((*q.shape[:2], QFM_VALUE), dtype=torch.bfloat16, device=q.device),
             torch.full((*q.shape[:2], 1), -float("inf"), device=q.device),
         )
-    latent = kv[..., :QFM_VALUE].contiguous()
+    if prepared_kv is None:
+        prepared_kv = (kv[..., :QFM_VALUE].contiguous(), kv[..., QFM_VALUE:].contiguous())
+    latent = prepared_kv[0]
+    if prepared_q is None:
+        prepared_q = (
+            q[..., :QFM_VALUE].to(torch.bfloat16).contiguous(),
+            q[..., QFM_VALUE:].to(torch.bfloat16).contiguous(),
+        )
     output, lse = torch_npu.npu_fused_infer_attention_score_v2(
-        q[..., :QFM_VALUE].to(torch.bfloat16).contiguous(),
+        prepared_q[0],
         latent,
         latent,
-        query_rope=q[..., QFM_VALUE:].to(torch.bfloat16).contiguous(),
-        key_rope=kv[..., QFM_VALUE:].contiguous(),
+        query_rope=prepared_q[1],
+        key_rope=prepared_kv[1],
         num_query_heads=q.shape[1],
         num_key_value_heads=1,
         input_layout="TND",
@@ -537,14 +605,29 @@ def fill_fia_prefill(impl, q, kv, cache, batch, latent, lse):
     mask = getattr(batch, "fia_mask", None)
     if mask is None:
         mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.bool, device=q.device).triu_(1)
-    for begin, end, history_length, table in batch.fia_requests:
+    plans = getattr(batch, "fia_history_plans", ())
+    for index, (begin, end, history_length, table) in enumerate(batch.fia_requests):
         query = q[begin:end]
-        history = read_fia_history(cache, table, history_length, impl.qfm_scale)
-        result = fia_partial(query, history, impl.scale)
-        del history
+        if history_length == 0 and impl.dcp_enabled and impl.dcp_rank != 0:
+            # This rank contributes neither history nor current. Preserve the
+            # final collective, but skip Q packing and temporary neutral rows.
+            latent[begin:end].zero_()
+            lse[begin:end].fill_(-float("inf"))
+            continue
+        prepared_q = (
+            query[..., :QFM_VALUE].to(torch.bfloat16).contiguous(),
+            query[..., QFM_VALUE:].to(torch.bfloat16).contiguous(),
+        )
+        result = None
+        if history_length:
+            plan = plans[index] if plans else build_fia_history_plan(table, history_length)
+            history = read_fia_history_parts(cache, plan)
+            result = fia_partial(query, history[0], impl.scale, prepared_q=prepared_q, prepared_kv=history)
+            del history
         if not impl.dcp_enabled or impl.dcp_rank == 0:
             current = kv[begin:end].reshape(end - begin, 1, QFM_WIDTH).to(torch.bfloat16)
-            result = merge_fia_parts(result, fia_partial(query, current, impl.scale, mask))
+            current_result = fia_partial(query, current, impl.scale, mask, prepared_q=prepared_q)
+            result = current_result if result is None else merge_fia_parts(result, current_result)
         latent[begin:end].copy_(result[0])
         lse[begin:end].copy_(result[1])
 
@@ -648,6 +731,12 @@ def stage_specific_qfm_inputs(impl, hidden, cache, batch, prolog):
             if fia_q is not None:
                 fia_q[begin:end].copy_(chunk_q)
                 kv[begin:end].copy_(chunk_kv)
+                # These rows have used_q=0 in QFM and are overwritten by
+                # FIA using the original BF16 Q. Keep legal placeholders for
+                # the unchanged whole-batch QFM/DCP descriptor and gathers.
+                q_bytes[begin:end].zero_()
+                q_scale[begin:end].fill_(1.0)
+                continue
             chunk_q, chunk_scale = quantize_query(chunk_q)
         else:
             kwargs = dict(batch.prolog_kwargs)

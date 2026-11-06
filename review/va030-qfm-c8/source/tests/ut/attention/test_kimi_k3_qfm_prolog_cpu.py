@@ -308,7 +308,10 @@ def test_stage_routing_preserves_scatter_slots_and_decode_mode2(qfm, monkeypatch
         assert q_scale.shape == (tokens + 2, 12)
         decode_index = 0
         for begin, end, prefill in batch.preprocess_segments:
-            if prefill:
+            if prefill and fia_prefill:
+                expected_codes = torch.zeros(end - begin, 12, 576).to(torch.float8_e4m3fn)
+                expected_scale = torch.ones(end - begin, 12)
+            elif prefill:
                 expected_codes, expected_scale = qfm.quantize_query(expected_q[begin:end])
             else:
                 _, expected_codes, expected_scale = dsl_calls[decode_index]
