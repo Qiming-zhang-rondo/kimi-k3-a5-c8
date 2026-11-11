@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Opt-in K3 full576 FP8 cache. No persistent BF16 history or Q-by-K indices.
+"""Opt-in K3 full576 FP8 cache and optional paged BF16 Prefill history.
 
 KV uses unscaled FP8, matching the pinned CANN K3 recipe's unit descale.
 Caller-owned cache pages and their padding/offset are preserved. Metadata is
@@ -80,15 +80,23 @@ def select_qfm(impl, config) -> bool:
     if impl.num_heads * size not in QFM_HEADS:
         raise ValueError("QFM does not support this DCP-gathered query head count")
     backend = getattr(config, "kimi_k3_c8_prefill_backend", "qfm")
-    if backend not in ("fia", "qfm", "qfa"):
-        raise ValueError("kimi_k3_c8_prefill_backend must be fia, qfa or qfm")
-    impl.qfm_fia_prefill = backend in ("fia", "qfa") or getattr(config, "enable_kimi_k3_qfm_fia_prefill", False)
+    if backend not in ("fia", "qfm", "qfa", "fia_paged"):
+        raise ValueError("kimi_k3_c8_prefill_backend must be fia, qfa, qfm or fia_paged")
+    impl.qfm_fia_paged = backend == "fia_paged"
+    if impl.qfm_fia_paged and vcfg.kv_transfer_config is not None:
+        if vcfg.kv_transfer_config.kv_role != "kv_producer":
+            raise ValueError("fia_paged is a Prefill producer backend; use qfm on KV consumers")
+    impl.qfm_fia_prefill = backend in ("fia", "qfa", "fia_paged") or getattr(
+        config, "enable_kimi_k3_qfm_fia_prefill", False
+    )
     impl.qfm_mlapo_prefill = getattr(config, "enable_kimi_k3_mlapo_prefill", True)
     form = getattr(config, "kimi_k3_c8_fia_form", "latent")
     if form not in ("latent", "expanded"):
         raise ValueError("kimi_k3_c8_fia_form must be latent or expanded")
     if backend == "qfa" and form != "expanded":
         raise ValueError("QFA Prefill requires kimi_k3_c8_fia_form=expanded (temporary Q/K/V padded to 256)")
+    if impl.qfm_fia_paged and form != "latent":
+        raise ValueError("fia_paged uses latent FIA: set kimi_k3_c8_fia_form=latent")
     impl.qfm_qfa_prefill = backend == "qfa"
     impl.qfm_fia_expanded = impl.qfm_fia_prefill and form == "expanded"
     if impl.qfm_fia_expanded and (impl.qk_nope_head_dim != 128 or impl.v_head_dim != 128):
@@ -290,6 +298,7 @@ class QFMMetadataBuilder:
         self.mlapo_prefill = getattr(impl, "qfm_mlapo_prefill", True)
         self.expanded_fia = getattr(impl, "qfm_fia_expanded", False)
         self.qfa_prefill = getattr(impl, "qfm_qfa_prefill", False)
+        self.paged_fia = getattr(impl, "qfm_fia_paged", False)
         self.fia_mask = self.mask.to(torch.bool) if self.fia_prefill else None
         self.cache_stride = None
         self.has_prolog = getattr(impl, "enable_mlapo", False)
@@ -442,10 +451,10 @@ class QFMMetadataBuilder:
             batch.table.copy_(common.block_table_tensor[row_owner])
         batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
         batch.preprocess_segments = ()
-        if not self.mlapo_prefill or self.expanded_fia:
+        if not self.mlapo_prefill or self.expanded_fia or self.paged_fia:
             if flags is None:
                 raise ValueError("Stage-specific MLAPO requires scheduler Prefill flags")
-        if (not self.mlapo_prefill or self.expanded_fia) and batch.has_prefill:
+        if (not self.mlapo_prefill or self.expanded_fia or self.paged_fia) and batch.has_prefill:
             bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
             segments = []
             for begin, end, prefill in zip(bounds, bounds[1:], flags[: common.num_reqs].tolist()):
@@ -488,9 +497,10 @@ class QFMMetadataBuilder:
                     )
                     requests.append((begin, end, local_history, common.block_table_tensor[owner]))
                 batch.fia_requests = tuple(requests)
-                batch.fia_history_plans = tuple(
-                    build_fia_history_plan(table, length) for _, _, length, table in requests
-                )
+                if not self.paged_fia:
+                    batch.fia_history_plans = tuple(
+                        build_fia_history_plan(table, length) for _, _, length, table in requests
+                    )
                 if not fia_only:
                     selected_device = selected.to(self.device)
                     skip = selected_device[row_owner]
@@ -655,6 +665,8 @@ def ordinary_qfm_inputs(impl, hidden, tokens):
         q = impl.q_a_layernorm(q)
     else:
         q, kv = hidden, impl.kv_a_proj_with_mqa(hidden)[0]
+        if getattr(impl, "q_a_proj", None) is not None:
+            q = impl.q_a_layernorm(impl.q_a_proj(hidden)[0])
     if q.shape[0] < tokens or kv.shape[0] < tokens:
         raise ValueError("QFM projected inputs do not cover physical graph capacity")
     q, kv = q[:tokens], kv[:tokens]
@@ -752,6 +764,10 @@ def forward_qfm(impl, hidden, cache, metadata, output):
         q, kv = prolog.floating(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
     else:
         q, q_scale = prolog(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
+    if getattr(impl, "qfm_fia_paged", False):
+        # Mirror EVERY local writer, including Decode/Verify. APC and
+        # copy-on-write then retain the BF16 history for physical KV pages.
+        impl.fia_paged.update(cache, batch, kv)
     if impl.dcp_enabled:
         # HCCL byte gather preserves FP8 codes on implementations without
         # float8 collective dtype support. Gather the matching head scales.
@@ -770,7 +786,9 @@ def forward_qfm(impl, hidden, cache, metadata, output):
         latent = torch.zeros((*q.shape[:2], QFM_VALUE), dtype=torch.bfloat16, device=q.device)
         lse = torch.full((*q.shape[:2], 1), -float("inf"), device=q.device)
     if batch.fia_requests:
-        if expanded:
+        if getattr(impl, "qfm_fia_paged", False):
+            impl.fia_paged.fill(impl, q, kv, cache, batch, latent, lse)
+        elif expanded:
             from vllm_ascend.attention.kimi_k3_fia_expanded import fill_expanded_fia
 
             fill_expanded_fia(impl, q if fia_q is None else fia_q, kv, cache, batch, latent, lse)

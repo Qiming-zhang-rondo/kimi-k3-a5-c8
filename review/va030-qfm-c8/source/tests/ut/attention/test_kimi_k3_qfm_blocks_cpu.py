@@ -240,7 +240,7 @@ def test_backend_rejects_unknown_value(qfm):
     set_model_tag(qfm, "backbone")
     impl, config = selection_inputs(512)
     config.kimi_k3_c8_prefill_backend = "automatic"
-    with pytest.raises(ValueError, match="must be fia, qfa or qfm"):
+    with pytest.raises(ValueError, match="must be fia, qfa, qfm or fia_paged"):
         qfm.select_qfm(impl, config)
 
 

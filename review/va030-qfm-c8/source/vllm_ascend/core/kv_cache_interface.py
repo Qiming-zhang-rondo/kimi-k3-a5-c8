@@ -137,6 +137,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     cache_qfm_c8: bool = False
+    # Paged FIA Prefill reserves independent BF16 latent/raw history pools.
+    # Worker cache-budget reservation accounts for them outside the hybrid
+    # overlay arena; main page geometry and PD still describe FP8 only.
+    cache_qfm_bf16_prefill: bool = False
     cache_sparse_sfa_turboquant: bool = False
     store_on_host: bool = False
     # Ascend kernels consume padded pages through an explicit physical block
@@ -163,11 +167,34 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        return (
+        payload_bytes = (
             get_storage_block_size(self)
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
+        if self.cache_qfm_bf16_prefill:
+            _ = self.bf16_prefill_page_size_bytes
+        return payload_bytes
+
+    @property
+    def bf16_prefill_page_size_bytes(self) -> int:
+        """Independent dense BF16 history bytes per logical manager block.
+
+        These bytes must not be folded into the shared hybrid main-page
+        geometry: different cache groups overlay that arena by block ID.
+        """
+        if not self.cache_qfm_bf16_prefill:
+            return 0
+        if (
+            not self.cache_qfm_c8
+            or self.head_size != 576
+            or self.dtype != torch.float8_e4m3fn
+            or self.num_kv_heads != 1
+            or self.scale_dim != 0
+            or get_kv_cache_compression_ratio(self) != 1
+        ):
+            raise ValueError("Paged FIA BF16 history requires the uncompressed full576 QFM FP8 cache")
+        return get_storage_block_size(self) * self.head_size * get_dtype_size(torch.bfloat16)
 
     @property
     def unpadded_page_size_bytes(self) -> int:
@@ -208,6 +235,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_qfm_c8,
+                spec.cache_qfm_bf16_prefill,
                 spec.cache_sparse_sfa_turboquant,
                 spec.store_on_host,
                 spec.alignment,
@@ -231,6 +259,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             num_heads=first_spec.num_heads,
             scale_dtype=first_spec.scale_dtype,
             cache_qfm_c8=first_spec.cache_qfm_c8,
+            cache_qfm_bf16_prefill=first_spec.cache_qfm_bf16_prefill,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,

@@ -290,6 +290,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                 cache_qfm_c8=cache_qfm_c8,
+                cache_qfm_bf16_prefill=cache_qfm_c8 and getattr(attn_module.impl, "qfm_fia_paged", False),
                 store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
@@ -1699,6 +1700,30 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = cache_view_for_manager(
                     raw_single, kv_cache_spec.block_size, physical_page, kernel_block_size
                 )
+                if getattr(kv_cache_spec, "cache_qfm_bf16_prefill", False):
+                    # Distinct groups overlay the hybrid main arena by block
+                    # ID. Keep that physical geometry intact: dense history
+                    # pools must be independent allocations, accounted for by
+                    # the worker's cache-budget reservation before planning.
+                    kernel_pages = kv_caches[layer_name].shape[0]
+                    latent_width, raw_width, nz_tile = 512, 64, 16
+                    latent = torch.zeros(
+                        (kernel_pages, 1, latent_width // nz_tile, kernel_block_size, nz_tile),
+                        dtype=torch.bfloat16,
+                        device=raw_single.device,
+                    )
+                    auxiliary = torch.zeros(
+                        (kernel_pages, 1, raw_width // nz_tile, kernel_block_size, nz_tile),
+                        dtype=torch.bfloat16,
+                        device=raw_single.device,
+                    )
+                    expected_bytes = kv_cache_config.num_blocks * kv_cache_spec.bf16_prefill_page_size_bytes
+                    if (latent.numel() + auxiliary.numel()) * get_dtype_size(torch.bfloat16) != expected_bytes:
+                        raise ValueError("Paged FIA history allocation disagrees with its reserved byte budget")
+                    kv_caches[layer_name]._qfm_bf16_views = (latent, auxiliary)
+                    # Generic block-copy hooks need to copy the BF16 pools
+                    # together with main FP8 during APC copy-on-write.
+                    kv_caches[layer_name]._qfm_bf16_prefill = True
                 logger.info_once(
                     "QFM cache geometry: manager_block=%d kernel_block=%d physical_manager_bytes=%d "
                     "kernel_stride_bytes=%d kernel_pages=%d",

@@ -6,7 +6,7 @@ NPU performance, distributed correctness or model accuracy acceptance.
 
 ## Storage and common settings
 
-There is one persistent main-model MLA cache: full576 E4M3 PA_NZ,
+By default there is one persistent main-model MLA cache: full576 E4M3 PA_NZ,
 `[blocks,1,18,128,32]`, 576 payload bytes/token. Both latent512 and raw64
 are FP8, with an internal scalar descale of 1.0. This is different from
 packed656 Group128 C8. Do not set the obsolete `qfm_kv_scale` option.
@@ -25,6 +25,62 @@ addresses, negative-slot handling and the manager-to-kernel spec-copy fix.
 A stale Scatter plan is checked and rebuilt from the live physical stride;
 its warning must not be suppressed to hide a mapping error. Restart workers
 after installation; discard all old in-memory KV/APC pages.
+
+## CANN-style paged BF16 Prefill history
+
+`kimi_k3_c8_prefill_backend="fia_paged"` and
+`kimi_k3_c8_fia_form="latent"` select the CANN-style Chunked Prefill
+candidate. Unlike the other backends, this option reserves an additional
+BF16 latent512/raw64 history beside the FP8 main cache. The worker reserves
+the two additional dense pools before advertising the shared main-cache
+budget, including the explicit KV-memory fast path. Their effective payload is
+1728 bytes/token/layer (576 FP8 plus 1152 BF16), excluding hybrid padding.
+The number of available blocks/concurrent long requests can decrease.
+
+For a disaggregated P process use:
+
+```json
+{
+  "enable_kimi_k3_qfm_c8": true,
+  "enable_kv_nz": false,
+  "enable_mlapo": false,
+  "kimi_k3_c8_prefill_backend": "fia_paged",
+  "kimi_k3_c8_fia_form": "latent"
+}
+```
+
+This matches the recipe's ordinary Prefill projections. A fused floating
+DSL frontend remains selectable with `enable_mlapo=true` and
+`enable_kimi_k3_mlapo_prefill=true`; it does not require the expanded
+identity-UK Prolog or QFA wrapper. Existing stage flags still apply.
+On D retain `kimi_k3_c8_prefill_backend="qfm"` and `enable_mlapo=true`.
+No extra history is allocated on D, and PD still transfers only the same
+full576 FP8 payload. Native package installation is not part of this patch.
+
+Every local main-model KV write updates the BF16 mirror: Prefill keeps its
+original floating KV; Decode/Verify mirrors only the newly written FP8
+slots. APC retains physical-page history, and copy-on-write/block zeroing
+include the two BF16 pools. This backend admits a process without external
+KV transfer, or a `kv_producer`; `kv_consumer`/`kv_both` must use the
+existing reader backend because imported FP8 pages have no BF16 mirror.
+Draft-model and KDA formats remain unchanged.
+
+For DCP1, one native paged FIA-v2 call reads historical and current BF16 KV
+with a causal mask, then applies the normal V up-projection. It does not
+construct token-wise historical gather indices, convert the FP8 history,
+or merge historical/current partials. For DCP>1, history remains locally
+striped: each rank reads its BF16 history directly, rank zero contributes
+the original current KV once, and the existing LSE/HCCL merge is retained.
+All BF16 NZ pools are separate contiguous allocations with inner tile16.
+The main FP8/KDA shared backing, physical page strides and group ownership
+stay unchanged; rearranging that shared backing would corrupt other groups.
+The experimental backend rejects a forced block-count override, which would
+bypass its combined main-plus-BF16 memory budget.
+
+Prefill is eager; Decode-only graphs retain the existing QFM reader.
+The option is off by default and does not change previous FIA/QFA/QFM
+results. Compare the complete preparation+Attention stage, TTFT/ITL and
+available cache capacity on A5; CPU tests cannot establish a speedup.
 
 ## Compare two expanded-FIA Prefill frontends
 

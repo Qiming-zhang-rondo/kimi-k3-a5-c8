@@ -1,27 +1,30 @@
 # VA 0.30 Kimi K3 C8 review snapshot
 
 Base: c09d3e20b9c45c80b34ae3781440d90904a44023.
-Current installer: `../../va030_qfm/install-va030-qfm-expanded-qfa.py`.
-`source/` is the readable final source, not a sequence of incremental patches.
-`va030-qfm-c8.patch` applies to the clean base; `qfa-from-expanded-fia.patch`
-is the delta from the expanded-FIA delivery. Old immutable installers remain available.
+Current installer: `../../va030_qfm/install-va030-qfm-fia-paged.py`.
+`source/` contains the readable final source.
+`va030-qfm-c8.patch` applies to the clean base;
+`fia-paged-from-expanded-qfa.patch` upgrades the expanded-QFA delivery.
+Previously published installers and experiment probes remain immutable.
 
-This candidate adds expanded QK192/V128 FIA Prefill with two frontends:
-ordinary MXFP8 projections or package-native CANN MLAPO using private identity UK.
-An additional QFA option temporarily pads Q/K/V to256, quantizes MXFP8 along
-the required axes and uses the fixed CANN9.2 ABI. It is not native192 support.
-The default FIA form remains latent. Decode DSL mode2 plus QFM, one persistent
-FP8 cache, target/draft isolation, APC/page geometry and PD wire format are retained.
+The new `fia_paged` P backend keeps independent dense BF16 latent512/raw64
+history pools. The shared FP8/KDA hybrid arena and its physical block strides
+remain unchanged. The worker reserves the extra 1152 bytes/token/MLA-layer
+before choosing cache block capacity. Paged BF16 FIA reads history directly.
+Local writers and generic block copies preserve the BF16 history for chunked
+Prefill and APC reuse. This reservation can reduce available cache blocks.
 
-See [the configuration and compatibility guide](source/docs/source/developer_guide/kimi_k3_qfm_c8.md).
-Standalone single-card correctness/performance probe:
-`../../experiments/expanded-attention-probe.py`. It does not modify installed VA.
-The installer does not run tests, install packages or compile operators.
-CPU regressions and ABI source review are not NPU/model/performance acceptance.
+P selects `kimi_k3_c8_prefill_backend=fia_paged`,
+`kimi_k3_c8_fia_form=latent`, and `enable_mlapo=false`.
+D selects the existing `qfm` backend with `enable_mlapo=true`.
+PD producers can use the new path; consumers keep QFM. The versioned FP8 PD
+payload is unchanged and excludes the BF16 Prefill pools.
+The original QFM, temporary BF16 latent/expanded FIA, and QFA routes remain
+selectable. Prefill stays eager; Decode-only graph capture keeps QFM.
 
-For QFA, `../../experiments/install-qfa920-wrapper.py` explicitly prepares an
-isolated Python/C++ wrapper matching the existing CANN9.2 native kernel. Source
-its env after the existing QFM/DSL environments. The original packages stay intact.
-It does not rebuild the native Attention kernel; the host extension may compile
-on first use. The QFA probe embeds the pinned official P-quantization golden,
-comparison criteria, copyright notice and complete CANN Open Software License2.0.
+The installer does not install native packages, compile operators, or run tests.
+See [configuration and compatibility details](source/docs/source/developer_guide/kimi_k3_qfm_c8.md).
+The new standalone probe is `../../experiments/fia-paged-probe.py`.
+CPU address, allocator and installer checks are not NPU/model/performance
+acceptance. Real FIA, APC, DSpark, DCP, graph replay, and PD tests are required
+for the selected deployment configuration.

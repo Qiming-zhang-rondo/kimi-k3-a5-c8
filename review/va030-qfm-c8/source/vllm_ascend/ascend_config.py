@@ -642,6 +642,7 @@ class AscendConfig:
     enable_kimi_k3_qfm_c8: bool = False
     # Experimental eager Prefill readers; Decode/verification keep QFM.
     enable_kimi_k3_qfm_fia_prefill: bool = False
+    # fia_paged reserves an additional BF16 latent/raw history for direct PA FIA.
     kimi_k3_c8_prefill_backend: str = "qfm"
     # Preserve the latent FIA baseline; opt in to QK192/V128 Prefill.
     kimi_k3_c8_fia_form: str = "latent"

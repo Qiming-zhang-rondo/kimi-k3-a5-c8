@@ -1360,6 +1360,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 self.qfm_scale.fill_(value)
             self.qfm_ops = load_ops()
+            if self.qfm_fia_paged:
+                from vllm_ascend.attention.kimi_k3_fia_paged import PagedFIA
+
+                self.fia_paged = PagedFIA()
             if self.enable_mlapo:
                 from vllm_ascend.attention.kimi_k3_qfm_prolog import QFMProlog
                 from vllm_ascend.attention.kimi_k3_qfm_prolog_weights import prepare_prolog_weights
@@ -1391,7 +1395,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dsl-prolog" if self.enable_mlapo else "ordinary",
                 self.num_heads,
                 self.enable_mlapo and self.qfm_mlapo_prefill,
-                "qfa" if self.qfm_qfa_prefill else "fia" if self.qfm_fia_prefill else "qfm",
+                "fia_paged"
+                if self.qfm_fia_paged
+                else "qfa"
+                if self.qfm_qfa_prefill
+                else "fia"
+                if self.qfm_fia_prefill
+                else "qfm",
                 "expanded" if self.qfm_fia_expanded else "latent",
                 "native-prolog"
                 if self.qfm_fia_expanded and self.enable_mlapo and self.qfm_mlapo_prefill
