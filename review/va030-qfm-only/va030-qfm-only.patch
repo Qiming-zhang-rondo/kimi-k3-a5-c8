@@ -1,0 +1,3779 @@
+--- /dev/null
++++ b/docs/source/developer_guide/kimi_k3_qfm_c8.md
+@@ -0,0 +1,102 @@
++# Kimi K3 A5 C8: QFM + DSL candidate
++
++Framework base: VA 0.30 commit `c09d3e20b9c45c80b34ae3781440d90904a44023`.
++This candidate contains one main-model C8 path for both Prefill and Decode:
++DSL Prolog -> full576 FP8 KV Cache -> QFM -> Value up-projection.
++It does not include the experimental FIA/QFA readers, BF16 historical
++mirrors, stage-specific frontends, or a non-fused C8 frontend.
++
++## Configuration
++
++Merge these settings into both P and D processes:
++
++```json
++{
++  "enable_kimi_k3_qfm_c8": true,
++  "enable_mlapo": true,
++  "enable_kv_nz": false
++}
++```
++
++Keep `--kv-cache-dtype auto` and `--block-size 128` or an admitted positive
++multiple. The scheduler may promote its manager block size; kernel pages
++remain 128 tokens. The path requires A5, ModelRunner V2 and K3's NoPE
++latent512/raw64 MLA. Target projections use the existing ModelSlim dynamic
++W8A8 MXFP8 Group32 scheme; `kv_b_proj` remains BF16. Draft/KDA formats are
++unchanged. The default feature flag is off.
++
++Remove old experiment options from launch configurations:
++`kimi_k3_c8_prefill_backend`, `kimi_k3_c8_fia_form`,
++`enable_kimi_k3_mlapo_prefill`, and `enable_kimi_k3_qfm_fia_prefill`.
++Do not combine this route with packed656/SFA C8, a separate FA KV quantizer,
++or the obsolete `qfm_kv_scale` option. Disabling MLAPO while enabling this
++C8 flag is rejected instead of selecting another implementation.
++
++## Storage and attention
++
++The sole persistent main-model MLA cache contains latent512 and raw64,
++both in E4M3 FP8 PA_NZ: `[blocks,1,18,128,32]`, 576 effective bytes/token.
++The KV descale is the fixed internal value 1.0; there are no Group128 scales
++in each cache row. Prolog returns FP8 Q and matching per-token/head scales.
++Projection weights and activations retain their independent Group32 MXFP8
++scales. This storage format is not the packed656 FP8-latent/BF16-raw format.
++
++Prolog writes directly to dense pages. For physically padded/strided hybrid
++pages, it emits only current FP8 rows into a temporary staging buffer and
++the tile Scatter writer updates the actual pages. Storage offset, negative
++slots and live physical strides are preserved. No historical cache is copied
++to BF16. APC uses the physical FP8 pages; block copy-on-write preserves FP8
++bytes and manager/kernel page mapping, including a two-kernel-page pool.
++
++Prefill divides Query ranges into virtual sequences of at most 16 rows and
++submits them in one batched QFM call. This is not one Attention launch per
++virtual sequence and does not create Q-by-K token-index lists. Decode/Verify
++and graph/DCP descriptors use their established per-query visibility rules.
++Each batch updates device lengths, tables and Query scales; captured buffers
++keep stable addresses. DCP gathers Q bytes with matching scales, accounts
++for empty shards and merges natural-log LSE outputs before V up-projection.
++
++## PD and dependencies
++
++Built-in MooncakeConnectorV2/MooncakePullConnector transfer only FP8 MLA
++payloads: 73728 bytes per 128-token kernel page. P/D format, manager/kernel
++mapping and physical strides are checked. KDA and draft transfer protocols
++remain unchanged. PD with DCP requires the existing whole-manager-block
++interleave contract. PCP, KV layer parallelism and sparse KV offload are not
++adapted by this candidate.
++
++The framework patch does not install or replace any CANN/Python packages.
++Keep the QFM, metadata and DSL runtime environments that passed the target
++container tests. QFM/metadata must be registered in `cann_ops_transformer`;
++the separate Stage1 provider wheel and its distribution metadata must be
++visible as well as the native vendor packages. Prolog uses the pinned
++`ops.quant_mla_prolog` interface from CANNBot source revision `9e01355`.
++Its weight layouts, quantization modes and packaged native artifacts are
++validated. Missing providers or incompatible dependencies are explicit errors.
++
++CANN version labels alone do not establish interface compatibility. This
++candidate does not claim that an old 9.2.0 binary archive works on every
++9.2.1 image. Load dependency environments in the actual service launch shell
++before starting workers; a source operation in another child shell does not
++activate them for the service.
++
++## Candidate validation
++
++The user reported a reduced-layer model at concurrency 32, APC disabled,
++PD disaggregation, P/D QFM+DSL: TTFT approximately matched the BF16-cache
++baseline and TPOT changed from 4.2 ms to 3.95 ms (about 6% lower). That result is
++for the previously delivered runtime at that test point. This pruned
++candidate needs a fresh launch and accuracy/performance regression on A5.
++It is not a claim of full-model or all-feature-combination acceptance.
++
++CPU tests cover bytes/layout, offsets/padding, virtual sequences, multi-query
++verification visibility, graph metadata refresh, scale/head correspondence,
++PD contracts, projection weight preparation and APC block copying. CPU tests
++do not execute native kernels, HCCL, real network transfers or model accuracy.
++The native tile-writer probe is available at
++`tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py`.
++
++After migration, restart all workers and discard old in-memory KV/APC pages.
++The installer backs up known affected files, removes known experimental
++files and restores unrelated experiment-only changes to the pinned base.
++Unknown/partial edits are refused rather than overwritten or reset.
+--- /dev/null
++++ b/tests/e2e/nightly/single_node/ops/singlecard_ops/check_kimi_k3_qfm_writer.py
+@@ -0,0 +1,182 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Run directly with Python; no vLLM initialization or model weights needed."""
++
++import argparse
++import importlib.util
++import json
++import os
++import sys
++from pathlib import Path
++
++MANAGER_BLOCK_SIZES = (128, 256, 384, 512, 1024)
++NUM_MANAGER_PAGES = 3
++GUARD_BYTES = 256
++PAGE_GAP_PER_KERNEL = 256
++SENTINEL = 0x5A
++
++
++def _writer_slots(manager_block_size, kernel_block_size):
++    """Cover kernel-page and manager-page boundaries without duplicate slots."""
++    total_tokens = NUM_MANAGER_PAGES * manager_block_size
++    candidates = (
++        0,
++        kernel_block_size - 1,
++        kernel_block_size,
++        manager_block_size - 1,
++        manager_block_size,
++        2 * manager_block_size - 1,
++        2 * manager_block_size,
++        total_tokens - 1,
++    )
++    valid = list(dict.fromkeys(candidates))
++    assert all(0 <= slot < total_tokens for slot in valid)
++    return valid + [-1]
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--card", type=int, default=0)
++    args = parser.parse_args()
++    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(args.card)
++    os.environ.pop("ASCEND_DEVICE_ID", None)
++    import torch
++    import torch_npu  # noqa: F401
++
++    torch.npu.set_device(0)
++    root = Path(__file__).resolve().parents[6]
++    path = root / "vllm_ascend/attention/kimi_k3_qfm.py"
++    spec = importlib.util.spec_from_file_location("qfm_writer_under_test", path)
++    qfm = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = qfm
++    spec.loader.exec_module(qfm)
++    if qfm.QFM_KV_DESCALE != 1.0:
++        raise AssertionError("The pinned K3 QFM writer probe requires unit KV descale")
++    torch.manual_seed(417)
++    for manager_block_size in MANAGER_BLOCK_SIZES:
++        if manager_block_size % qfm.QFM_BLOCK:
++            raise AssertionError("Probe manager block must contain whole QFM kernel blocks")
++        kernel_blocks_per_manager = manager_block_size // qfm.QFM_BLOCK
++        for page_gap in (0, kernel_blocks_per_manager * PAGE_GAP_PER_KERNEL):
++            if page_gap % (kernel_blocks_per_manager * qfm.QFM_TILE):
++                raise AssertionError("Physical page gap must split into aligned kernel-page gaps")
++            page_bytes = manager_block_size * qfm.QFM_WIDTH + page_gap
++            kernel_page_bytes = page_bytes // kernel_blocks_per_manager
++            offset = GUARD_BYTES
++            raw_bytes = NUM_MANAGER_PAGES * page_bytes
++            expected = torch.full(
++                (offset + raw_bytes + GUARD_BYTES,),
++                SENTINEL,
++                dtype=torch.uint8,
++            )
++            backing = expected.to("npu")
++            cache = qfm.cache_view_for_manager(
++                backing[offset : offset + raw_bytes],
++                manager_block_size,
++                page_bytes,
++                kernel_block_size=qfm.QFM_BLOCK,
++            )
++            assert cache.shape == (
++                NUM_MANAGER_PAGES * kernel_blocks_per_manager,
++                1,
++                qfm.QFM_WIDTH // qfm.QFM_TILE,
++                qfm.QFM_BLOCK,
++                qfm.QFM_TILE,
++            )
++            assert cache.stride(0) == kernel_page_bytes
++
++            eager_ids = _writer_slots(manager_block_size, qfm.QFM_BLOCK)
++            rows_cpu = torch.randn(len(eager_ids), qfm.QFM_WIDTH).bfloat16()
++            rows = rows_cpu.to("npu")
++            slots = torch.tensor(eager_ids, dtype=torch.int64, device="npu")
++            scale = torch.tensor([qfm.QFM_KV_DESCALE], dtype=torch.float32, device="npu")
++            quant = (
++                (rows_cpu.float() / qfm.QFM_KV_DESCALE)
++                .clamp(-qfm.QFM_FP8_MAX, qfm.QFM_FP8_MAX)
++                .to(torch.float8_e4m3fn)
++                .view(torch.uint8)
++            )
++
++            def update_expected(
++                ids,
++                expected=expected,
++                quant=quant,
++                offset=offset,
++                page_bytes=page_bytes,
++                kernel_page_bytes=kernel_page_bytes,
++                kernel_blocks_per_manager=kernel_blocks_per_manager,
++            ):
++                for row, slot in enumerate(ids):
++                    if slot < 0:
++                        continue
++                    kernel_page, token = divmod(slot, qfm.QFM_BLOCK)
++                    manager_page, kernel_page_in_manager = divmod(kernel_page, kernel_blocks_per_manager)
++                    assert manager_page < NUM_MANAGER_PAGES
++                    kernel_page_start = offset + manager_page * page_bytes + kernel_page_in_manager * kernel_page_bytes
++                    for tile in range(qfm.QFM_WIDTH // qfm.QFM_TILE):
++                        begin = kernel_page_start + tile * qfm.QFM_BLOCK * qfm.QFM_TILE + token * qfm.QFM_TILE
++                        expected[begin : begin + qfm.QFM_TILE] = quant[
++                            row,
++                            tile * qfm.QFM_TILE : (tile + 1) * qfm.QFM_TILE,
++                        ]
++
++            qfm.write_cache(rows, slots, cache, scale)
++            update_expected(eager_ids)
++            torch.npu.synchronize()
++            assert torch.equal(backing.cpu(), expected), "Eager manager-page writer bytes/guards mismatch"
++
++            # Warm the native op on a side stream before graph capture.
++            side = torch.npu.Stream()
++            side.wait_stream(torch.npu.current_stream())
++            with torch.npu.stream(side):
++                qfm.write_cache(rows, slots, cache, scale)
++            torch.npu.current_stream().wait_stream(side)
++            graph = torch.npu.NPUGraph()
++            with torch.npu.graph(graph):
++                qfm.write_cache(rows, slots, cache, scale)
++
++            total_tokens = NUM_MANAGER_PAGES * manager_block_size
++            replay_ids = [(slot + manager_block_size // 2 + 1) % total_tokens for slot in eager_ids[:-1]] + [-1]
++            slots.fill_(-1)
++            graph.replay()
++            torch.npu.synchronize()
++            assert torch.equal(backing.cpu(), expected), "Invalid replay unexpectedly changed QFM cache bytes"
++
++            replay_rows_cpu = torch.randn_like(rows_cpu)
++            replay_quant = (
++                (replay_rows_cpu.float() / qfm.QFM_KV_DESCALE)
++                .clamp(-qfm.QFM_FP8_MAX, qfm.QFM_FP8_MAX)
++                .to(torch.float8_e4m3fn)
++                .view(torch.uint8)
++            )
++            rows.copy_(replay_rows_cpu)
++            slots.copy_(torch.tensor(replay_ids, dtype=torch.int64, device="npu"))
++            graph.replay()
++            update_expected(replay_ids, quant=replay_quant)
++            torch.npu.synchronize()
++            assert torch.equal(backing.cpu(), expected), "Replay manager-page writer bytes/guards mismatch"
++            print(
++                json.dumps(
++                    {
++                        "event": "qfm_framework_writer",
++                        "pass": True,
++                        "manager_block_size": manager_block_size,
++                        "kernel_blocks_per_manager": kernel_blocks_per_manager,
++                        "gap": page_gap,
++                        "kernel_page_bytes": kernel_page_bytes,
++                        "offset": offset,
++                    }
++                )
++            )
++    print(
++        json.dumps(
++            {
++                "event": "summary",
++                "pass": True,
++                "scope": "native framework tile writer eager/replay only, not full model",
++            }
++        )
++    )
++
++
++if __name__ == "__main__":
++    main()
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_blocks_cpu.py
+@@ -0,0 +1,489 @@
++# SPDX-License-Identifier: Apache-2.0
++"""CPU manager-block geometry contracts, not NPU/graph execution acceptance."""
++
++import ast
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from tests.ut.attention import test_kimi_k3_qfm_cpu as base
++
++# Reuse the existing CPU scatter mock without importing its fixture by name.
++qfm = base.qfm
++
++MANAGER_BLOCKS = (128, 256, 384, 512, 1024, 2048)
++KERNEL_BLOCK = 128
++WIDTH = 576
++TILE = 32
++OFFSET = 256
++MAIN_PAGES = 3
++DRAFT_PAGES = 2
++
++
++@pytest.mark.parametrize(
++    "manager_blocks,alignment",
++    (((128,), 32), ((128, 256), 64), ((384, 512), 384), ((1024, 2048), 512), ((384, 384), 96)),
++)
++@pytest.mark.parametrize("extra_bytes", (0, 1, 32))
++def test_hybrid_common_page_alignment_is_minimal_and_valid_for_every_manager(
++    qfm, manager_blocks, alignment, extra_bytes
++):
++    original = max(manager_blocks) * WIDTH + extra_bytes
++    aligned = qfm.align_qfm_page_bytes(original, manager_blocks)
++    assert aligned == ((original + alignment - 1) // alignment) * alignment
++    assert aligned >= original and aligned - original < alignment
++    assert qfm.align_qfm_page_bytes(aligned, manager_blocks) == aligned
++    assert qfm.align_qfm_page_bytes(original, tuple(reversed(manager_blocks))) == aligned
++    assert qfm.align_qfm_page_bytes(original, manager_blocks + manager_blocks) == aligned
++    for manager_block in manager_blocks:
++        raw = torch.zeros(2 * aligned, dtype=torch.uint8)
++        cache = qfm.cache_view_for_manager(raw, manager_block, aligned)
++        ratio = manager_block // KERNEL_BLOCK
++        assert cache.shape[0] == 2 * ratio
++        assert cache.stride(0) * ratio == aligned
++        assert cache.stride(0) % TILE == 0
++
++
++def test_common_page_alignment_without_qfm_managers_is_unchanged(qfm):
++    assert qfm.align_qfm_page_bytes(123457, []) == 123457
++
++
++@pytest.mark.parametrize("manager_block", MANAGER_BLOCKS)
++@pytest.mark.parametrize("kernel_gap", (0, 32, 1024))
++def test_manager_geometry_and_independent_scatter_guards(qfm, manager_block, kernel_gap):
++    ratio = manager_block // KERNEL_BLOCK
++    page_bytes = manager_block * WIDTH + ratio * kernel_gap
++    main_bytes = MAIN_PAGES * page_bytes
++    draft_start = OFFSET + main_bytes + OFFSET
++    total = draft_start + DRAFT_PAGES * page_bytes + OFFSET
++    backing = torch.full((total,), 0x5A, dtype=torch.uint8)
++    backing[draft_start : draft_start + DRAFT_PAGES * page_bytes].fill_(0x31)
++    raw = backing[OFFSET : OFFSET + main_bytes]
++    cache = qfm.cache_view_for_manager(raw, manager_block, page_bytes)
++    assert cache.dtype == torch.float8_e4m3fn
++    assert cache.shape == (MAIN_PAGES * ratio, 1, WIDTH // TILE, KERNEL_BLOCK, TILE)
++    assert cache.stride() == (page_bytes // ratio, KERNEL_BLOCK * WIDTH, KERNEL_BLOCK * TILE, TILE, 1)
++    assert cache.storage_offset() == OFFSET
++    assert cache.data_ptr() == raw.data_ptr()
++    assert cache.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
++
++    # Distinct live slots cover kernel and manager boundaries without undefined
++    # duplicate writes when manager_block itself is 128.
++    live = list(
++        dict.fromkeys(
++            (
++                0,
++                127,
++                128,
++                manager_block - 1,
++                manager_block,
++                manager_block + 127,
++                2 * manager_block - 1,
++                2 * manager_block,
++                MAIN_PAGES * manager_block - 1,
++            )
++        )
++    )
++    slots = torch.tensor([*live, -1, -17], dtype=torch.int64)
++    rows = ((torch.arange(slots.numel() * WIDTH).reshape(-1, WIDTH) % 127) - 63).float() / 8
++    scale = torch.tensor([1.0])
++    encoded = rows.to(torch.float8_e4m3fn).view(torch.uint8)
++    expected = backing.clone()
++    for token, slot in enumerate(slots.tolist()):
++        if slot < 0:
++            continue
++        manager, within_manager = divmod(slot, manager_block)
++        subpage, within_kernel = divmod(within_manager, KERNEL_BLOCK)
++        # Oracle starts from manager ownership, then its kernel subpage, then
++        # the PA_NZ tile. It does not use the writer's flat tile-index formula.
++        manager_start = OFFSET + manager * page_bytes
++        subpage_start = manager_start + subpage * (page_bytes // ratio)
++        for tile in range(WIDTH // TILE):
++            start = subpage_start + tile * KERNEL_BLOCK * TILE + within_kernel * TILE
++            expected[start : start + TILE] = encoded[token, tile * TILE : (tile + 1) * TILE]
++    qfm.write_cache(rows, slots, cache, scale)
++    assert torch.equal(backing, expected)
++    assert (backing[:OFFSET] == 0x5A).all()
++    assert (backing[draft_start : draft_start + DRAFT_PAGES * page_bytes] == 0x31).all()
++    before = backing.clone()
++    qfm.write_cache(rows, torch.full_like(slots, -1), cache, scale)
++    assert torch.equal(backing, before)
++
++
++@pytest.mark.parametrize(
++    "manager_block,page_bytes,kernel_block,raw_adjust",
++    (
++        (64, 64 * WIDTH, 128, 0),
++        (192, 192 * WIDTH, 128, 0),
++        (0, 128 * WIDTH, 128, 0),
++        (-128, 128 * WIDTH, 128, 0),
++        (True, 128 * WIDTH, 128, 0),
++        (512, 512 * WIDTH, 64, 0),
++        (512, 512 * WIDTH + 32, 128, 0),
++        (512, 512 * WIDTH - 128, 128, 0),
++        (512, 512 * WIDTH, 128, -32),
++    ),
++)
++def test_invalid_manager_geometry_is_rejected_without_writes(qfm, manager_block, page_bytes, kernel_block, raw_adjust):
++    backing = torch.full((OFFSET + page_bytes + raw_adjust + OFFSET,), 0x45, dtype=torch.uint8)
++    before = backing.clone()
++    raw = backing[OFFSET:-OFFSET]
++    with pytest.raises(ValueError):
++        qfm.cache_view_for_manager(raw, manager_block, page_bytes, kernel_block_size=kernel_block)
++    assert torch.equal(backing, before)
++
++
++def test_manager_view_rejects_empty_and_unaligned_offset(qfm):
++    page_bytes = 512 * WIDTH
++    with pytest.raises(ValueError):
++        qfm.cache_view_for_manager(torch.empty(0, dtype=torch.uint8), 512, page_bytes)
++    backing = torch.zeros(page_bytes + 1, dtype=torch.uint8)
++    with pytest.raises(ValueError):
++        qfm.cache_view_for_manager(backing[1:], 512, page_bytes)
++
++
++def selection_inputs(manager_block):
++    vllm_config = SimpleNamespace(
++        use_v2_model_runner=True,
++        cache_config=SimpleNamespace(block_size=manager_block, cache_dtype="auto"),
++        kv_transfer_config=None,
++        speculative_config=SimpleNamespace(method="dspark"),
++        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
++        # DSpark construction retains this target-derived config, so the
++        # runner type alone does not identify its draft attention layers.
++        model_config=SimpleNamespace(runner_type="generate"),
++    )
++    config = SimpleNamespace(
++        enable_kimi_k3_qfm_c8=True,
++        enable_sparse_sfa_c8=False,
++        kvpp_config=SimpleNamespace(size=1),
++        sparse_kv_offload_config=SimpleNamespace(enabled=False),
++    )
++    impl = SimpleNamespace(
++        is_draft_model=vllm_config.model_config.runner_type == "draft",
++        use_mla_rope=False,
++        kv_lora_rank=512,
++        qk_rope_head_dim=64,
++        support_fp8_attention=True,
++        num_kv_heads=1,
++        num_heads=12,
++        fa_quant_layer=False,
++        enable_mlapo=True,
++        enable_kv_nz=False,
++        pcp_enabled=False,
++        is_pcp_decode_sharded=False,
++        vllm_config=vllm_config,
++    )
++    return impl, config
++
++
++def set_model_tag(qfm, tag):
++    qfm.importlib.import_module("vllm.compilation.backends").model_tag = tag
++
++
++def load_dspark_cache_normalizer():
++    path = Path(__file__).resolve().parents[3] / "vllm_ascend/models/kimi_k3_dspark.py"
++    tree = ast.parse(path.read_text())
++    node = next(
++        item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == "_normalize_dspark_mla_cache"
++    )
++    module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
++    scope = {"torch": torch}
++    exec(compile(module, path, "exec"), scope)
++    return scope[node.name]
++
++
++def test_dspark_tag_excludes_target_derived_pre_rope_construction(qfm):
++    impl, config = selection_inputs(512)
++    assert impl.vllm_config.model_config.runner_type == "generate"
++    assert not impl.is_draft_model and not impl.use_mla_rope
++    set_model_tag(qfm, "dspark_head")
++    assert not qfm.select_qfm(impl, config)
++
++
++def test_select_qfm_reads_live_model_tag_and_restores_target_selection(qfm):
++    impl, config = selection_inputs(512)
++    set_model_tag(qfm, "dspark_head")
++    assert not qfm.select_qfm(impl, config)
++    set_model_tag(qfm, "backbone")
++    assert qfm.select_qfm(impl, config)
++    set_model_tag(qfm, "dspark_head")
++    assert not qfm.select_qfm(impl, config)
++
++
++def test_dspark_tag_precedes_target_only_geometry_validation(qfm):
++    set_model_tag(qfm, "dspark_head")
++    invalid_inputs = (
++        lambda impl: setattr(impl, "num_heads", 3),
++        lambda impl: setattr(impl.vllm_config.cache_config, "block_size", 192),
++        lambda impl: setattr(impl, "enable_mlapo", True),
++    )
++    for invalidate in invalid_inputs:
++        impl, config = selection_inputs(512)
++        invalidate(impl)
++        assert not qfm.select_qfm(impl, config)
++
++
++def test_backbone_still_rejects_invalid_target_geometry(qfm):
++    set_model_tag(qfm, "backbone")
++    invalid_inputs = (
++        ("unsupported local query/KV heads", lambda impl: setattr(impl, "num_heads", 3)),
++        (
++            "positive multiple of 128",
++            lambda impl: setattr(impl.vllm_config.cache_config, "block_size", 192),
++        ),
++        ("enable_kv_nz=false", lambda impl: setattr(impl, "enable_kv_nz", True)),
++    )
++    for message, invalidate in invalid_inputs:
++        impl, config = selection_inputs(512)
++        invalidate(impl)
++        with pytest.raises(ValueError, match=message):
++            qfm.select_qfm(impl, config)
++
++
++def test_dspark_cache_normalizer_splits_real_4d_cache_and_preserves_tuple():
++    normalize = load_dspark_cache_normalizer()
++    cache = torch.arange(2 * 128 * 576, dtype=torch.float32).to(torch.bfloat16).view(2, 128, 1, 576)
++    nope, rope = normalize(cache, 512)
++    assert nope.shape == (2, 128, 1, 512)
++    assert rope.shape == (2, 128, 1, 64) and rope.numel() > 0
++    assert nope.dtype == rope.dtype == torch.bfloat16
++    assert nope.untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
++    assert rope.storage_offset() == cache.storage_offset() + 512
++    torch.testing.assert_close(nope, cache[..., :512])
++    torch.testing.assert_close(rope, cache[..., 512:])
++
++    split_cache = (torch.empty(2, 128, 1, 512), torch.empty(2, 128, 1, 64))
++    assert normalize(split_cache, 512) is split_cache
++
++
++@pytest.mark.parametrize("manager_block", MANAGER_BLOCKS)
++def test_select_qfm_admits_manager_multiples_but_excludes_draft(qfm, manager_block):
++    impl, config = selection_inputs(manager_block)
++    assert qfm.select_qfm(impl, config)
++    impl.is_draft_model = True
++    assert not qfm.select_qfm(impl, config)
++
++
++@pytest.mark.parametrize("manager_block", (64, 192))
++def test_select_qfm_rejects_non_kernel_multiples(qfm, manager_block):
++    impl, config = selection_inputs(manager_block)
++    with pytest.raises(ValueError):
++        qfm.select_qfm(impl, config)
++
++
++def prepared_metadata(qfm, monkeypatch, manager=256, gap=256):
++    impl, _ = selection_inputs(manager)
++    impl.vllm_config.model_config.max_model_len = 2048
++    impl.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
++    ratio = manager // KERNEL_BLOCK
++    page_bytes = ratio * (KERNEL_BLOCK * WIDTH + gap)
++    spec = SimpleNamespace(block_size=manager, page_size_bytes=page_bytes, page_size_padded=page_bytes)
++    monkeypatch.setattr(qfm, "load_ops", lambda: (None, lambda lengths, *args, **kwargs: lengths.clone()))
++    return qfm.QFMMetadataBuilder(impl, torch.device("cpu"), spec)
++
++
++@pytest.mark.parametrize("manager,gap", [(128, 32), (256, 256), (768, 1024)])
++def test_shared_scatter_plan_reused_across_layers_without_new_indices(qfm, monkeypatch, manager, gap):
++    b = prepared_metadata(qfm, monkeypatch, manager, gap)
++    c = base.common([4, 5], [132, 133], capacity=12)
++    c.slot_mapping = torch.tensor([128, 3, 255, 0, 130, 127, 1, 129, 2])
++    batch = b.build(c, retain_for_graph=True)
++    stride = 73728 + gap
++    assert batch.scatter_plan.stride == stride
++    assert torch.equal(batch.scatter_plan.offsets, qfm.build_scatter_offsets(batch.slots, stride))
++    raw = torch.full((256 + 2 * stride + 256,), 0x6B, dtype=torch.uint8)
++    cache = qfm.cache_view(raw[256 : 256 + 2 * stride], 2, stride)
++    reference = raw.clone()
++    rows = torch.randn(12, WIDTH)
++    qfm.write_cache(rows, batch.slots, qfm.cache_view(reference[256 : 256 + 2 * stride], 2, stride), torch.ones(1))
++    offsets_ptr = batch.scatter_plan.offsets.data_ptr()
++
++    def forbidden(*args, **kwargs):
++        raise AssertionError("Layer writer must reuse group offsets")
++
++    monkeypatch.setattr(qfm, "build_scatter_offsets", forbidden)
++    monkeypatch.setattr(torch, "arange", forbidden)
++    for _ in range(3):
++        qfm.write_cache(rows, batch.slots, cache, torch.ones(1), scatter_plan=batch.scatter_plan)
++        assert torch.equal(raw, reference)
++        assert batch.scatter_plan.offsets.data_ptr() == offsets_ptr
++    qfm.write_cache(rows[4:], batch.slots[4:], cache, torch.ones(1), scatter_plan=batch.scatter_plan.slice(4, 12))
++    assert torch.equal(raw, reference)
++
++
++def test_retained_shared_buffers_refresh_without_rebinding(qfm, monkeypatch):
++    b = prepared_metadata(qfm, monkeypatch)
++    c = base.common([4], [132], capacity=8)
++    batch = b.build(c, retain_for_graph=True)
++    ptrs = (
++        batch.scatter_plan.offsets.data_ptr(),
++        batch.invalid.data_ptr(),
++        batch.invisible.data_ptr(),
++        batch.prolog_kwargs["staging_indices"].data_ptr(),
++    )
++    c.seq_lens[:] = 0
++    c.slot_mapping = torch.tensor([255, 128])
++    updated = b.build(c)
++    assert updated is batch
++    assert ptrs == (
++        batch.scatter_plan.offsets.data_ptr(),
++        batch.invalid.data_ptr(),
++        batch.invisible.data_ptr(),
++        batch.prolog_kwargs["staging_indices"].data_ptr(),
++    )
++    assert batch.invalid.all() and batch.invisible.all()
++    assert (batch.scatter_plan.offsets == -1).all()
++    c.seq_lens[:] = 132
++    b.build(c)
++    assert torch.equal(batch.invalid, ~batch.live)
++    assert torch.equal(batch.invisible, ~batch.visible)
++    assert torch.equal(batch.scatter_plan.offsets, qfm.build_scatter_offsets(batch.slots, b.cache_stride))
++    assert torch.equal(batch.prolog_kwargs["staging_indices"], torch.arange(8))
++
++
++@pytest.mark.parametrize("wrong", ["stride", "slots", "slots_shape", "dtype", "shape", "contiguous", "device"])
++def test_shared_scatter_plan_fallback_uses_live_geometry_on_each_replay(qfm, wrong):
++    stride = 73728 + 256
++    slots = torch.tensor([0, -1, 129])
++    backing = torch.full((256 + 2 * stride + 256,), 0x5A, dtype=torch.uint8)
++    cache = qfm.cache_view(backing[256 : 256 + 2 * stride], 2, stride)
++    offsets = qfm.build_scatter_offsets(slots, stride)
++    plan = qfm.QFMScatterPlan(slots, offsets, stride)
++    if wrong == "stride":
++        plan.stride += 32
++    elif wrong == "slots":
++        plan.slots = torch.tensor([255, 128, 127])
++    elif wrong == "slots_shape":
++        plan.slots = slots.view(1, -1)
++    elif wrong == "dtype":
++        plan.offsets = offsets.int()
++    elif wrong == "shape":
++        plan.offsets = offsets[:, :1]
++    elif wrong == "contiguous":
++        plan.offsets = offsets.t().contiguous().t()
++    elif wrong == "device":
++        plan.offsets = torch.empty(offsets.shape, dtype=torch.int64, device="meta")
++    values = torch.randn(3, WIDTH).to(torch.float8_e4m3fn)
++    reference = backing.clone()
++    expected_cache = qfm.cache_view(reference[256 : 256 + 2 * stride], 2, stride)
++    qfm.scatter_fp8_cache(values, slots, expected_cache)
++    with pytest.warns(RuntimeWarning, match="Scatter plan fallback"):
++        qfm.scatter_fp8_cache(values, slots, cache, scatter_plan=plan)
++    assert torch.equal(backing, reference)
++    # Stand in for a new graph replay: refresh slots in place. The fallback
++    # must recompute from them, rather than retain the first call's offsets.
++    slots.copy_(torch.tensor([255, 128, -1]))
++    qfm.scatter_fp8_cache(values, slots, expected_cache)
++    qfm.scatter_fp8_cache(values, slots, cache, scatter_plan=plan)
++    assert torch.equal(backing, reference)
++
++
++def test_direct_mode2_decode_does_not_prepare_unused_scatter(qfm, monkeypatch):
++    b = prepared_metadata(qfm, monkeypatch, gap=0)
++    c = base.common([4], [132], capacity=8)
++    c.is_prefilling.fill_(False)
++
++    def forbidden(*args, **kwargs):
++        raise AssertionError("Direct mode2 Decode does not use Scatter offsets")
++
++    monkeypatch.setattr(qfm, "build_scatter_offsets", forbidden)
++    batch = b.build(c, retain_for_graph=True)
++    assert not batch.has_prefill
++    assert "staging_indices" not in batch.prolog_kwargs
++
++
++def expanded_table(manager_ids, ratio=4):
++    """Stand in for MRV2's already-completed manager-to-kernel conversion."""
++    return torch.tensor(
++        [[manager * ratio + subpage for manager in row for subpage in range(ratio)] for row in manager_ids],
++        dtype=torch.int32,
++    )
++
++
++def metadata_common(queries, lengths, capacity, manager_ids):
++    common = base.common(queries, lengths, capacity)
++    common.block_table_tensor = expanded_table(manager_ids)
++    common.slot_mapping = torch.arange(sum(queries), dtype=torch.int64) + 2 * 512
++    if common.slot_mapping.numel() > 2:
++        common.slot_mapping[2] = -1
++    return common
++
++
++def test_apc_dspark_padding_uses_already_expanded_kernel_ids_once(qfm, monkeypatch):
++    builder, calls = base.builder(qfm, monkeypatch)
++    common = metadata_common([1, 17, 9], [513, 1025, 767], 48, [[2, 4], [3, 5], [6, 7]])
++    original = common.block_table_tensor.clone()
++    result = builder.build(common)
++    assert result.used.tolist() == [1, 16, 1, 9, 0, 0]
++    assert result.lengths.tolist() == [513, 1024, 1025, 767, 0, 0]
++    assert result.table.shape == (6, 8)
++    assert result.table[0, :4].tolist() == [8, 9, 10, 11]
++    assert torch.equal(result.table, original[[0, 1, 1, 2, 2, 2]])
++    assert torch.equal(common.block_table_tensor, original)
++    assert torch.equal(result.slots[:27], common.slot_mapping)
++    assert (result.slots[27:] == -1).all()
++    assert result.mask_mode == 3
++    assert len(calls) == 1
++
++
++@pytest.mark.parametrize("rank", (0, 1))
++def test_dcp_per_token_prefix_preserves_expanded_kernel_ids(qfm, monkeypatch, rank):
++    builder, _ = base.builder(qfm, monkeypatch, dcp=2, rank=rank)
++    common = metadata_common([9, 4], [513, 1025], 16, [[2, 4], [3, 5]])
++    result = builder.build(common)
++    expected = [
++        sum((position // 16) % 2 == rank for position in range(length))
++        for length in [*range(505, 514), *range(1022, 1026)]
++    ]
++    assert result.lengths.tolist() == expected + [0, 0, 0]
++    assert result.table.shape == (16, 8)
++    assert torch.equal(result.table, common.block_table_tensor[[0] * 9 + [1] * 7])
++    assert result.table[0, :4].tolist() == [8, 9, 10, 11]
++    assert torch.equal(result.slots[:13], common.slot_mapping)
++    assert (result.slots[13:] == -1).all()
++    assert result.mask_mode == 0 and result.max_q == 1
++
++
++@pytest.mark.parametrize("dcp,rank", ((1, 0), (2, 1)))
++def test_graph_metadata_refresh_keeps_addresses_and_does_not_expand_twice(qfm, monkeypatch, dcp, rank):
++    builder, calls = base.builder(qfm, monkeypatch, dcp=dcp, rank=rank)
++    first = builder.build(metadata_common([17, 4], [513, 1025], 32, [[2, 6], [3, 7]]), retain_for_graph=True)
++    fields = ("cu", "used", "lengths", "slots", "table", "live", "visible", "schedule")
++    addresses = {field: getattr(first, field).data_ptr() for field in fields}
++    refreshes = (([4, 9], [516, 1020]), ([0, 0], [0, 0]), ([1, 8], [1025, 129]))
++    for queries, lengths in refreshes:
++        common = metadata_common(queries, lengths, 32, [[5, 8], [9, 11]])
++        common.seq_lens_cpu = torch.tensor([9999, 9999])  # Deliberately stale DSpark-side mirror.
++        result = builder.build(common)
++        assert result is first
++        assert addresses == {field: getattr(result, field).data_ptr() for field in fields}
++        assert result.cu.tolist() == list(range(33))
++        actual = sum(queries)
++        assert result.used.tolist() == [1] * actual + [0] * (32 - actual)
++        owners = [0] * queries[0] + [1] * (32 - queries[0])
++        assert torch.equal(result.table, common.block_table_tensor[owners])
++        assert torch.equal(result.slots[:actual], common.slot_mapping)
++        assert (result.slots[actual:] == -1).all()
++        expected = []
++        for count, length in zip(queries, lengths):
++            for prefix in range(length - count + 1, length + 1):
++                expected.append(prefix if dcp == 1 else sum((p // 16) % dcp == rank for p in range(prefix)))
++        assert result.lengths.tolist() == expected + [0] * (32 - actual)
++        assert torch.equal(result.schedule, result.lengths)
++        assert result.table.shape[1] == 8
++    assert len(calls) == len(refreshes) + 1
++
++
++def test_target_requires_fused_prolog_but_disabled_feature_and_draft_are_untouched(qfm):
++    impl, config = selection_inputs(128)
++    impl.enable_mlapo = False
++    with pytest.raises(ValueError, match="enable_mlapo=true"):
++        qfm.select_qfm(impl, config)
++    config.enable_kimi_k3_qfm_c8 = False
++    assert not qfm.select_qfm(impl, config)
++    config.enable_kimi_k3_qfm_c8 = True
++    set_model_tag(qfm, "dspark_head")
++    assert not qfm.select_qfm(impl, config)
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_cpu.py
+@@ -0,0 +1,318 @@
++# SPDX-License-Identifier: Apache-2.0
++"""CPU contracts only. No claim of NPU or distributed acceptance."""
++
++import ast
++import importlib.util
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++
++@pytest.fixture
++def qfm(monkeypatch):
++    def scatter(values, indices, *, key_cache):
++        live = indices >= 0
++        key_cache.view(torch.uint8)[indices[live].long(), 0, 0] = values.view(torch.uint8)[live, 0]
++
++    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_scatter_pa_cache=scatter))
++    monkeypatch.setitem(sys.modules, "vllm.compilation.backends", SimpleNamespace(model_tag="backbone"))
++    path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/kimi_k3_qfm.py"
++    spec = importlib.util.spec_from_file_location("qfm_cpu_under_test", path)
++    module = importlib.util.module_from_spec(spec)
++    monkeypatch.setitem(sys.modules, spec.name, module)
++    spec.loader.exec_module(module)
++    return module
++
++
++@pytest.mark.parametrize("gap,offset", [(0, 0), (256, 256), (1024, 512)])
++def test_nz_writer_preserves_offset_padding_and_skips_invalid(qfm, gap, offset):
++    stride = 128 * 576 + gap
++    backing = torch.full((offset + 3 * stride + 256,), 0x5A, dtype=torch.uint8)
++    raw = backing[offset : offset + 3 * stride]
++    cache = qfm.cache_view(raw, 3, stride)
++    assert cache.storage_offset() == offset
++    slots = torch.tensor([128, -1, 0, 383, 127])
++    rows = torch.randn(5, 576)
++    scale = torch.tensor([0.03125])
++    expected = backing.clone()
++    quant = (rows / scale).clamp(-448, 448).to(torch.float8_e4m3fn).view(torch.uint8)
++    for i, slot in enumerate(slots.tolist()):
++        if slot < 0:
++            continue
++        page, token = divmod(slot, 128)
++        for tile in range(18):
++            start = offset + page * stride + tile * 128 * 32 + token * 32
++            expected[start : start + 32] = quant[i, tile * 32 : (tile + 1) * 32]
++    qfm.write_cache(rows, slots, cache, scale)
++    assert torch.equal(backing, expected)
++    before = backing.clone()
++    qfm.write_cache(rows, torch.full_like(slots, -1), cache, scale)
++    assert torch.equal(backing, before)
++
++
++def impl_config(dcp=1, rank=0):
++    return SimpleNamespace(
++        num_heads=12,
++        enable_mlapo=True,
++        dcp_rank=rank,
++        vllm_config=SimpleNamespace(
++            parallel_config=SimpleNamespace(decode_context_parallel_size=dcp, cp_kv_cache_interleave_size=16),
++            model_config=SimpleNamespace(max_model_len=131072),
++        ),
++    )
++
++
++def common(queries, lengths, capacity=None):
++    boundaries = [0]
++    for length in queries:
++        boundaries.append(boundaries[-1] + length)
++    actual = boundaries[-1]
++    offsets = torch.tensor(boundaries, dtype=torch.int32)
++    return SimpleNamespace(
++        num_actual_tokens=actual,
++        num_input_tokens=capacity or actual,
++        num_reqs=len(queries),
++        query_start_loc=offsets,
++        query_start_loc_cpu=offsets,
++        seq_lens=torch.tensor(lengths, dtype=torch.int32),
++        block_table_tensor=torch.arange(len(queries) * 1024, dtype=torch.int32).view(len(queries), 1024),
++        slot_mapping=torch.arange(actual, dtype=torch.int64),
++        causal=True,
++        is_prefilling=torch.tensor([q > 16 for q in queries]),
++        max_query_len=max(queries),
++    )
++
++
++def builder(qfm, monkeypatch, dcp=1, rank=0):
++    calls = []
++
++    def metadata(lengths, *args, **kwargs):
++        calls.append((lengths.clone(), kwargs))
++        return lengths.clone()
++
++    monkeypatch.setattr(qfm, "load_ops", lambda: (None, metadata))
++    return qfm.QFMMetadataBuilder(impl_config(dcp, rank), torch.device("cpu")), calls
++
++
++def test_chunked_prefill_groups_one_native_batch_and_no_dense_indices(qfm, monkeypatch):
++    b, calls = builder(qfm, monkeypatch)
++    c = common([8192], [131072])
++    result = b.build(c)
++    assert result.used.numel() == 512
++    assert result.used.unique().tolist() == [16]
++    assert result.lengths[0] == 122896 and result.lengths[-1] == 131072
++    assert result.table.shape == (512, 1024)
++    assert result.mask_mode == 3
++    assert not b.buffers  # no persistent eager-shape accumulation
++    assert torch.equal(result.schedule, result.lengths)
++
++
++def test_apc_mixed_requests_and_graph_padding(qfm, monkeypatch):
++    b, _ = builder(qfm, monkeypatch)
++    result = b.build(common([1, 17, 9], [129, 257, 511], 48))
++    assert result.used.tolist() == [1, 16, 1, 9, 0, 0]
++    assert result.lengths.tolist() == [129, 256, 257, 511, 0, 0]
++    assert (result.slots[27:] == -1).all()
++    assert result.live.sum() == 27
++
++
++def test_graph_buffers_refresh_same_addresses_after_empty(qfm, monkeypatch):
++    b, _ = builder(qfm, monkeypatch)
++    first = b.build(common([128], [256], 128), retain_for_graph=True)
++    addresses = [getattr(first, field).data_ptr() for field in ("cu", "used", "lengths", "slots", "table", "schedule")]
++    for queries, lengths in [([4], [127]), ([9], [129]), ([0], [0]), ([1, 8], [1, 129])]:
++        c = common(queries, lengths, 128)
++        result = b.build(c)
++        assert result is first
++        assert addresses == [
++            getattr(result, field).data_ptr() for field in ("cu", "used", "lengths", "slots", "table", "schedule")
++        ]
++        assert result.used.sum() == sum(queries)
++        assert torch.equal(result.schedule, result.lengths)
++        assert (result.slots[sum(queries) :] == -1).all()
++
++
++@pytest.mark.parametrize("rank", [0, 1])
++def test_dcp_per_query_prefix_not_naive_local_plus_one(qfm, monkeypatch, rank):
++    b, _ = builder(qfm, monkeypatch, 2, rank)
++    result = b.build(common([17], [129]))
++    expected = [sum((p // 16) % 2 == rank for p in range(length)) for length in range(113, 130)]
++    assert result.lengths.tolist() == expected
++    assert result.mask_mode == 0 and result.max_q == 1
++    assert result.table.shape[0] == 17
++
++
++def _per_token_reference(c, dcp_size, rank):
++    """Independent request/token ownership reference, including empty shards."""
++    bounds = c.query_start_loc_cpu.tolist()
++    lengths = c.seq_lens.tolist()
++    slots = c.slot_mapping.tolist()
++    owners, live, visible, used, local_lengths, mapped_slots = [], [], [], [], [], []
++    capacity = max(c.num_actual_tokens, c.num_input_tokens)
++    for token in range(capacity):
++        owner = next((i for i, end in enumerate(bounds[1:]) if token < end), c.num_reqs - 1)
++        active = token < c.num_actual_tokens and token < bounds[owner + 1] and lengths[owner] > 0
++        prefix = lengths[owner]
++        if c.causal:
++            prefix -= bounds[owner + 1] - token - 1
++        prefix = max(prefix, 0)
++        local = sum((position // 16) % dcp_size == rank for position in range(prefix))
++        local = local if active else 0
++        owners.append(owner)
++        live.append(active)
++        visible.append(active and local > 0)
++        used.append(int(active))
++        local_lengths.append(local)
++        mapped_slots.append(slots[token] if active and token < len(slots) else -1)
++    return dict(owners=owners, live=live, visible=visible, used=used, lengths=local_lengths, slots=mapped_slots)
++
++
++@pytest.mark.parametrize("dcp,rank,retained", [(1, 0, True), (2, 0, False), (2, 1, False), (4, 3, True)])
++@pytest.mark.parametrize("causal", [True, False])
++@pytest.mark.parametrize(
++    "queries,lengths,capacity",
++    [
++        ([1, 8], [127, 129], 16),
++        ([0, 4, 0, 2], [0, 129, 0, 17], 16),
++        ([1, 1], [1, 0], 8),
++        ([0], [0], 8),
++        ([17], [129], 32),
++    ],
++)
++def test_per_token_metadata_matches_request_reference(
++    qfm, monkeypatch, dcp, rank, retained, causal, queries, lengths, capacity
++):
++    b, _ = builder(qfm, monkeypatch, dcp=dcp, rank=rank)
++    c = common(queries, lengths, capacity)
++    c.causal = causal
++    # Distinct physical slots prevent confusing token IDs with cache addresses.
++    c.slot_mapping = torch.arange(c.num_actual_tokens, dtype=torch.int64).flip(0) + 128
++    expected = _per_token_reference(c, dcp, rank)
++    batch = b.build(c, retain_for_graph=retained)
++    assert batch.cu.tolist() == list(range(capacity + 1))
++    for name in ("live", "visible", "used", "lengths", "slots"):
++        assert getattr(batch, name).tolist() == expected[name], name
++    assert torch.equal(batch.table, c.block_table_tensor[expected["owners"]])
++    assert batch.mask_mode == 0 and batch.max_q == 1
++
++
++def test_per_token_refresh_clears_only_unprovided_slots_without_stale_values(qfm, monkeypatch):
++    b, _ = builder(qfm, monkeypatch)
++    first_input = common([8], [128], 8)
++    first = b.build(first_input, retain_for_graph=True)
++    pointers = {
++        name: getattr(first, name).data_ptr() for name in ("cu", "used", "lengths", "slots", "table", "schedule")
++    }
++    for queries, lengths, supplied_slots in [
++        ([4, 2], [129, 17], [100, 101, 102]),
++        ([1], [1], [300] * 8),
++        ([0], [0], []),
++        ([3, 5], [130, 200], list(reversed(range(8)))),
++    ]:
++        c = common(queries, lengths, 8)
++        c.slot_mapping = torch.tensor(supplied_slots, dtype=torch.int64)
++        expected = _per_token_reference(c, 1, 0)
++        result = b.build(c)
++        assert result is first
++        assert pointers == {name: getattr(result, name).data_ptr() for name in pointers}
++        for name in ("live", "visible", "used", "lengths", "slots"):
++            assert getattr(result, name).tolist() == expected[name], name
++        assert torch.equal(result.table, c.block_table_tensor[expected["owners"]])
++
++
++def test_official_unit_scale_is_internal_not_a_user_knob(qfm):
++    assert qfm.QFM_KV_DESCALE == 1.0
++    root = Path(__file__).resolve().parents[3]
++    config = ast.parse((root / "vllm_ascend/ascend_config.py").read_text())
++    fields = [
++        node.target.id
++        for node in ast.walk(config)
++        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
++    ]
++    assert "qfm_kv_scale" not in fields
++    impl = (root / "vllm_ascend/attention/mla_v1.py").read_text()
++    assert "value = QFM_KV_DESCALE" in impl
++    assert "resolve_kv_scale" not in impl
++    assert not qfm.select_qfm(SimpleNamespace(is_draft_model=True), SimpleNamespace(enable_kimi_k3_qfm_c8=True))
++
++
++@pytest.mark.parametrize("value", [-500.0, -448.0, -16.0, -0.00001, 0.0, 0.00001, 16.0, 448.0, 500.0])
++def test_unit_scale_writer_matches_direct_fp8_and_retains_prior_pages(qfm, value):
++    cache = qfm.cache_view(torch.zeros(2 * 128 * 576, dtype=torch.uint8), 2, 128 * 576)
++    scale = torch.tensor([qfm.QFM_KV_DESCALE])
++    first = torch.full((1, 576), 32.0)
++    qfm.write_cache(first, torch.tensor([0]), cache, scale)
++    previous = cache[0].view(torch.uint8).clone()
++    rows = torch.full((1, 576), value)
++    qfm.write_cache(rows, torch.tensor([128]), cache, scale)
++    assert torch.equal(cache[0].view(torch.uint8), previous)
++    actual = cache[1, 0, :, 0].reshape(1, 576).float() * scale
++    expected = rows.clamp(-448, 448).to(torch.float8_e4m3fn).float()
++    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++
++
++def test_forward_writes_before_reader_and_masks_padding(qfm, monkeypatch):
++    b, _ = builder(qfm, monkeypatch)
++    batch = b.build(common([4], [4], capacity=8))
++    cache = qfm.cache_view(torch.zeros(128 * 576, dtype=torch.uint8), 1, 128 * 576)
++    hidden = torch.randn(8, 576)
++    scale = torch.tensor([qfm.QFM_KV_DESCALE])
++    observed = []
++
++    def attention(q, kv, q_scale, kv_scale, table, lengths, *args, **kwargs):
++        assert kv_scale.shape == (1,) and kv_scale.dtype == torch.float32
++        assert kv_scale.item() == 1.0
++        # The reader must see the current write, not stale pages or a copy.
++        stored = kv[0, 0].permute(1, 0, 2).reshape(128, 576).float()
++        expected = (hidden[:4] / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
++        torch.testing.assert_close(stored[:4], expected, rtol=0, atol=0)
++        assert torch.count_nonzero(stored[4:]) == 0
++        assert lengths.tolist() == [4, 0]
++        assert kwargs["layout_q"] == "TND" and kwargs["layout_kv"] == "PA_NZ"
++        observed.append(q.shape)
++        return torch.ones(8, 12, 512), None
++
++    def prolog(h, slots, destination, **kwargs):
++        qfm.write_cache(h, slots, destination, scale)
++        return h[:, None, :].expand(-1, 12, -1).float().to(torch.float8_e4m3fn), torch.ones(h.shape[0], 12)
++
++    impl = SimpleNamespace(
++        qfm_prolog=prolog,
++        qfm_scale=scale,
++        dcp_enabled=False,
++        qfm_ops=(attention, None),
++        scale=0.1,
++        _v_up_proj_batch_major=lambda x: x.flatten(1),
++        use_output_gate=True,
++        g_proj=lambda x: (torch.zeros(8, 12 * 512),),
++        o_proj=lambda x, **kwargs: (x,),
++    )
++    output = torch.empty(8, 12 * 512)
++    assert qfm.forward_qfm(impl, hidden, cache, SimpleNamespace(qfm=batch), output) is output
++    assert observed == [torch.Size([8, 12, 576])]
++    torch.testing.assert_close(output[:4], torch.full_like(output[:4], 0.5))
++    assert torch.count_nonzero(output[4:]) == 0
++
++
++def test_missing_qfm_registration_reports_loaded_provider(qfm, monkeypatch):
++    monkeypatch.setattr(
++        qfm.importlib, "import_module", lambda _: SimpleNamespace(__file__="/private/qfm/python/ops/__init__.py")
++    )
++    monkeypatch.setattr(torch, "ops", SimpleNamespace(cann_ops_transformer=SimpleNamespace()))
++    with pytest.raises(RuntimeError, match="not registered; loaded provider=/private/qfm/python/ops/__init__.py"):
++        qfm.load_ops()
++
++
++def test_forward_has_no_unfused_fallback(qfm):
++    batch = SimpleNamespace(slots=torch.arange(1))
++    with pytest.raises(RuntimeError, match="initialized DSL Prolog"):
++        qfm.forward_qfm(
++            SimpleNamespace(qfm_prolog=None),
++            torch.zeros(1, 1024),
++            None,
++            SimpleNamespace(qfm=batch),
++            torch.empty(1),
++        )
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_only_integration_cpu.py
+@@ -0,0 +1,244 @@
++# SPDX-License-Identifier: Apache-2.0
++"""QFM-only model wiring and independent physical-page COW contracts."""
++
++import ast
++import copy
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from tests.ut.attention import test_kimi_k3_qfm_cpu as base
++from tests.ut.attention import test_kimi_k3_qfm_worker_blocks_cpu as worker_blocks
++
++qfm = base.qfm
++ROOT = Path(__file__).resolve().parents[3]
++MLA = ROOT / "vllm_ascend/attention/mla_v1.py"
++PAYLOAD = 128 * 576
++
++
++def compile_definition(path, name, namespace):
++    tree = ast.parse(path.read_text())
++    node = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
++    node = copy.deepcopy(node)
++    node.decorator_list = []
++    module = ast.Module(
++        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node],
++        type_ignores=[],
++    )
++    exec(compile(ast.fix_missing_locations(module), str(path), "exec"), namespace)
++    return namespace[name]
++
++
++def compile_qfm_branch(method_name, parameters, namespace):
++    tree = ast.parse(MLA.read_text())
++    method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == method_name)
++    branch = next(
++        node
++        for node in method.body
++        if isinstance(node, ast.If)
++        and isinstance(node.test, ast.Call)
++        and isinstance(node.test.func, ast.Name)
++        and node.test.func.id == "getattr"
++        and isinstance(node.test.args[1], ast.Constant)
++        and node.test.args[1].value == "use_qfm"
++    )
++    method = ast.FunctionDef(
++        name="qfm_branch",
++        args=ast.arguments(
++            posonlyargs=[], args=[ast.arg(arg=name) for name in parameters], kwonlyargs=[], kw_defaults=[], defaults=[]
++        ),
++        body=[copy.deepcopy(branch)],
++        decorator_list=[],
++    )
++    module = ast.Module(
++        body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), method],
++        type_ignores=[],
++    )
++    exec(compile(ast.fix_missing_locations(module), str(MLA), "exec"), namespace)
++    return namespace["qfm_branch"]
++
++
++@pytest.mark.parametrize("manager", [128, 256, 768])
++def test_qfm_worker_view_retains_stride_and_explicit_page_axis_marker(qfm, monkeypatch, manager):
++    monkeypatch.setitem(sys.modules, worker_blocks.QFM_MODULE, qfm)
++    ratio = manager // 128
++    page_bytes = ratio * (PAYLOAD + 256)
++    spec = worker_blocks.PageSpec(manager, manager * 576, cache_qfm_c8=True, page_size_padded=page_bytes)
++    backing = torch.full((256 + 2 * page_bytes + 256,), 0x5A, dtype=torch.uint8)
++    raw = backing[256 : 256 + 2 * page_bytes]
++    config = SimpleNamespace(layer_specs={"mla": spec}, num_blocks=2)
++    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=["mla"])
++    reshape, _ = worker_blocks._reshape_qfm_branch()
++    result = reshape([group], {"mla": raw}, "auto", [128], {}, config)["mla"]
++    assert result.shape == (2 * ratio, 1, 18, 128, 32)
++    assert result.stride(0) == page_bytes // ratio
++    assert result.storage_offset() == 256
++    assert result._qfm_fp8_cache is True
++    assert not hasattr(result, "_qfm_bf16_views")
++    assert result.untyped_storage().data_ptr() == backing.data_ptr()
++    assert torch.equal(backing, torch.full_like(backing, 0x5A))
++
++
++@pytest.mark.parametrize("ratio", [1, 2, 6])
++@pytest.mark.parametrize("managers", [2, 3])
++@pytest.mark.parametrize("gap,offset", [(0, 0), (256, 256)])
++def test_qfm_cow_copies_manager_kernel_pages_without_padding_or_alias_corruption(qfm, ratio, managers, gap, offset):
++    stride = PAYLOAD + gap
++    backing = torch.full((offset + managers * ratio * stride + 256,), 0x5A, dtype=torch.uint8)
++    cache = qfm.cache_view(backing[offset : offset + managers * ratio * stride], managers * ratio, stride)
++    cache._qfm_fp8_cache = True
++    features = torch.arange(PAYLOAD)
++    for kernel_page in range(managers * ratio):
++        start = offset + kernel_page * stride
++        backing[start : start + PAYLOAD] = ((features * 7 + kernel_page * 13) % 112).to(torch.uint8)
++    before, expected = backing.clone(), backing.clone()
++    copies = [SimpleNamespace(src_block_id=0, dst_block_id=1)]
++    if managers == 3:
++        copies.append(SimpleNamespace(src_block_id=1, dst_block_id=2))
++    for operation in copies:
++        for subpage in range(ratio):
++            source = offset + (operation.src_block_id * ratio + subpage) * stride
++            destination = offset + (operation.dst_block_id * ratio + subpage) * stride
++            expected[destination : destination + PAYLOAD] = before[source : source + PAYLOAD]
++    namespace = {"torch": torch}
++    function = compile_definition(ROOT / "vllm_ascend/worker/utils.py", "copy_kv_cache_blocks_inplace", namespace)
++    function([cache, cache], managers, copies)
++    assert torch.equal(backing, expected)
++    assert torch.equal(backing[offset : offset + PAYLOAD], before[offset : offset + PAYLOAD])
++
++
++def test_legacy_fused_key_value_axis_remains_separate(qfm):
++    cache = torch.arange(2 * 3 * 4 * 2 * 8).reshape(2, 3, 4, 2, 8).float()
++    expected = cache.clone()
++    expected[:, 1].copy_(expected[:, 0])
++    function = compile_definition(
++        ROOT / "vllm_ascend/worker/utils.py", "copy_kv_cache_blocks_inplace", {"torch": torch}
++    )
++    function([cache], 3, [SimpleNamespace(src_block_id=0, dst_block_id=1)])
++    assert torch.equal(cache, expected)
++
++
++@pytest.mark.parametrize("retain", [False, True])
++def test_qfm_metadata_is_shared_without_legacy_prefill_split(retain):
++    recorded = []
++    slots = torch.tensor([7, -1, 9])
++    batch = SimpleNamespace(slots=slots)
++    common = SimpleNamespace(
++        num_actual_tokens=2,
++        num_input_tokens=3,
++        num_reqs=1,
++        query_start_loc=torch.tensor([0, 2]),
++        seq_lens=torch.tensor([129]),
++        _seq_lens_cpu=torch.tensor([129]),
++        block_table_tensor=torch.tensor([[3, 0]]),
++        attn_state=object(),
++        causal=True,
++    )
++    owner = SimpleNamespace(
++        qfm_state=SimpleNamespace(build=lambda value, **kwargs: recorded.append((value, kwargs)) or batch),
++        metadata_cls=lambda **kwargs: SimpleNamespace(**kwargs),
++    )
++    function = compile_definition(MLA, "_build_qfm", {})
++    metadata = function(owner, common, retain_for_graph=retain)
++    assert recorded == [(common, {"retain_for_graph": retain})]
++    assert metadata.qfm is batch and metadata.slot_mapping is slots
++    assert metadata.num_prefills == 0 and metadata.num_decode_tokens == 3
++    assert metadata.block_tables is common.block_table_tensor
++
++
++def test_qfm_forward_preserves_connector_order_and_single_cache_binding():
++    events = []
++    output = torch.empty(2, 4)
++    cache = torch.zeros(2, 1, 18, 128, 32, dtype=torch.float8_e4m3fn)
++
++    def execute(owner, hidden, active_cache, metadata, destination):
++        assert active_cache is cache and destination is output
++        events.append("attention")
++        return destination
++
++    namespace = {
++        "torch": torch,
++        "wait_for_kv_layer_from_connector": lambda name: events.append(("wait", name)),
++        "forward_qfm": execute,
++        "maybe_save_kv_layer_to_connector": lambda name, tensors: events.append(("save", name, tensors)),
++    }
++    function = compile_qfm_branch(
++        "forward", ("self", "layer_name", "hidden_states", "kv_cache", "attn_metadata", "output"), namespace
++    )
++    result = function(SimpleNamespace(use_qfm=True), "mla", torch.ones(2, 4), cache, object(), output)
++    assert result is output
++    assert events[0] == ("wait", "mla") and events[1] == "attention"
++    assert events[2][0:2] == ("save", "mla")
++    assert len(events[2][2]) == 1 and events[2][2][0] is cache
++    events.clear()
++    with pytest.raises(RuntimeError, match="single"):
++        function(SimpleNamespace(use_qfm=True), "mla", torch.ones(2, 4), (cache,), object(), output)
++    assert events == []
++
++
++def test_qfm_weight_reload_retains_scale_and_prolog_state(qfm, monkeypatch):
++    weights = {"weights": torch.ones(1)}
++    events = []
++
++    class Prolog:
++        def __init__(self, loaded, scale):
++            assert loaded is weights
++            self.scale = scale
++            events.append("initialize")
++
++        def update_weights(self, loaded):
++            assert loaded is weights
++            events.append("update")
++
++    monkeypatch.setitem(sys.modules, "vllm_ascend.attention.kimi_k3_qfm_prolog", SimpleNamespace(QFMProlog=Prolog))
++    monkeypatch.setitem(
++        sys.modules,
++        "vllm_ascend.attention.kimi_k3_qfm_prolog_weights",
++        SimpleNamespace(prepare_prolog_weights=lambda owner: weights),
++    )
++    namespace = {
++        "torch": torch,
++        "QFM_KV_DESCALE": 1.0,
++        "load_ops": lambda: ("qfm", "metadata"),
++        "logger": SimpleNamespace(info=lambda *args: None),
++    }
++    function = compile_qfm_branch("process_weights_after_loading", ("self",), namespace)
++    owner = SimpleNamespace(use_qfm=True, W_UV=torch.ones(1), layer_name="mla", num_heads=12)
++    function(owner)
++    prolog, scale = owner.qfm_prolog, owner.qfm_scale
++    scale.fill_(2)
++    function(owner)
++    assert events == ["initialize", "update"]
++    assert owner.qfm_prolog is prolog and owner.qfm_scale is scale
++    assert scale.tolist() == [1.0]
++    assert owner.qfm_ops == ("qfm", "metadata")
++
++
++def test_experimental_prefill_routes_are_absent_from_configuration_and_allocation():
++    forbidden = {
++        "enable_kimi_k3_qfm_fia_prefill",
++        "kimi_k3_c8_prefill_backend",
++        "kimi_k3_c8_fia_form",
++        "enable_kimi_k3_mlapo_prefill",
++        "cache_qfm_bf16_prefill",
++        "bf16_prefill_page_size_bytes",
++    }
++    for relative in (
++        "ascend_config.py",
++        "attention/mla_v1.py",
++        "core/kv_cache_interface.py",
++        "worker/v2/attn_utils.py",
++        "worker/utils.py",
++    ):
++        tree = ast.parse((ROOT / "vllm_ascend" / relative).read_text())
++        names = {
++            node.attr if isinstance(node, ast.Attribute) else node.id
++            for node in ast.walk(tree)
++            if isinstance(node, (ast.Attribute, ast.Name))
++        }
++        assert forbidden.isdisjoint(names)
++        imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
++        assert all(not name or not any(part in name for part in ("kimi_k3_fia_", "kimi_k3_qfa_")) for name in imports)
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_pd_cpu.py
+@@ -0,0 +1,245 @@
++# SPDX-License-Identifier: Apache-2.0
++"""CPU wire/page tests; not Mooncake networking or model acceptance."""
++
++import ast
++import importlib.util
++import math
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from tests.ut.attention import test_kimi_k3_qfm_cpu as base
++from tests.ut.attention.test_kimi_k3_qfm_blocks_cpu import selection_inputs
++
++qfm = base.qfm
++
++ROOT = Path(__file__).resolve().parents[3]
++MOONCAKE = ROOT / "vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake"
++spec = importlib.util.spec_from_file_location("qfm_pd_contract_test", MOONCAKE / "qfm_contract.py")
++contract = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(contract)
++
++
++def metadata(gap=0, manager=128, wire=contract.QFM_WIRE_FORMAT):
++    return SimpleNamespace(
++        cache_formats=[wire],
++        block_shapes=[[(1, 18, 128, 32)]],
++        block_lens=[[128 * 576]],
++        block_strides=[[128 * 576 + gap]],
++        block_size_scales=[[manager // 128]],
++        layer_block_sizes=[manager],
++    )
++
++
++@pytest.mark.parametrize("manager", [128, 256, 512, 768])
++def test_wire_allows_distinct_padding_and_manager_sizes(manager):
++    contract.validate_qfm_transfer(metadata(256, manager), metadata(512, 128), 0, 0)
++
++
++@pytest.mark.parametrize(
++    "field,value",
++    [
++        ("cache_formats", None),
++        ("cache_formats", [""]),
++        ("cache_formats", ["packed656"]),
++        ("block_shapes", [[(128, 576)]]),
++        ("block_lens", [[128 * 576 * 2]]),
++        ("block_strides", [[128 * 576 + 1]]),
++        ("block_size_scales", [[2]]),
++    ],
++)
++def test_wire_rejects_wrong_or_old_endpoint(field, value):
++    other = metadata()
++    setattr(other, field, value)
++    with pytest.raises(ValueError):
++        contract.validate_qfm_transfer(metadata(), other, 0, 0)
++    with pytest.raises(ValueError):
++        contract.validate_qfm_transfer(other, metadata(), 0, 0)
++
++
++def test_non_qfm_layers_unchanged():
++    contract.validate_qfm_transfer(SimpleNamespace(), SimpleNamespace(), 0, 0)
++
++
++@pytest.mark.parametrize("manager,gap", [(128, 0), (256, 256), (768, 512)])
++def test_actual_registration_keeps_kernel_shape_offset_and_payload(qfm, manager, gap):
++    tree = ast.parse((MOONCAKE / "base_worker.py").read_text())
++    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MooncakeBaseConnectorWorker")
++    fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "register_kv_caches")
++    mla_spec_type = type("MLA", (), {})
++    ns = dict(
++        torch=torch,
++        math=math,
++        MLAAttentionSpec=mla_spec_type,
++        SlidingWindowMLASpec=type("SWA", (), {}),
++        AscendSFAIndexerCacheSpec=type("Indexer", (), {}),
++        QFM_WIRE_FORMAT=contract.QFM_WIRE_FORMAT,
++        validate_qfm_transfer=contract.validate_qfm_transfer,
++        get_kv_cache_tensor_layers=lambda _: ["target"],
++        as_kv_cache_tensors=lambda c: (c,),
++        collect_configured_register_regions=lambda *_: SimpleNamespace(ptrs=[], lengths=[]),
++        validate_register_region_count=lambda _: None,
++        global_te=SimpleNamespace(register_buffer=lambda *_: None),
++        MooncakeTransferMetadata=SimpleNamespace,
++        logger=SimpleNamespace(info=lambda *_: None, debug=lambda *_: None),
++    )
++    exec(compile(ast.Module(body=[fn], type_ignores=[]), "registration", "exec"), ns)
++    spec = mla_spec_type()
++    spec.cache_qfm_c8, spec.block_size = True, manager
++    pages = 2 * manager // 128
++    raw = torch.zeros(256 + pages * (73728 + gap), dtype=torch.uint8)
++    cache = qfm.cache_view(raw[256:], pages, 73728 + gap)
++    worker = SimpleNamespace(
++        kv_cache_config=SimpleNamespace(num_blocks=2, kv_cache_tensors=[None]),
++        _build_kv_cache_spec_mappings=lambda: None,
++        ascend_config=SimpleNamespace(kvpp_config=SimpleNamespace(size=1)),
++        pcp_rank=0,
++        tp_size=8,
++        tp_rank=0,
++        layer_name_to_group_index={"target": 0},
++        layer_name_to_spec_index={"target": 0},
++        kv_cache_specs=[spec],
++        engine_id="P",
++        te_rpc_port=1,
++        block_size=manager,
++        side_channel_host="localhost",
++        handshake_port=2,
++    )
++    ns["register_kv_caches"](worker, {"target": cache})
++    meta = worker.transfer_metadata
++    assert meta.kv_caches_base_addr == [[cache.data_ptr()]]
++    assert meta.block_shapes == [[(1, 18, 128, 32)]]
++    assert meta.block_lens == [[73728]]
++    assert meta.block_strides == [[73728 + gap]]
++    assert meta.block_size_scales == [[manager // 128]]
++    assert meta.cache_formats == [contract.QFM_WIRE_FORMAT]
++
++
++@pytest.mark.parametrize("dcp", [1, 2, 4, 8])
++def test_selection_requires_builtin_and_block_aligned_dcp(qfm, dcp):
++    impl, config = selection_inputs(768)
++    impl.num_heads = 12
++    impl.vllm_config.parallel_config.decode_context_parallel_size = dcp
++    impl.vllm_config.parallel_config.cp_kv_cache_interleave_size = 768
++    impl.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
++    assert qfm.select_qfm(impl, config)
++    if dcp > 1:
++        impl.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
++        with pytest.raises(ValueError, match="interleave"):
++            qfm.select_qfm(impl, config)
++    impl.vllm_config.kv_transfer_config.kv_connector = "MultiConnector"
++    with pytest.raises(ValueError, match="built-in"):
++        qfm.select_qfm(impl, config)
++
++
++def community_mapper():
++    """Execute the actual community block-mapping methods without NPU imports."""
++    tree = ast.parse((MOONCAKE / "pull_worker.py").read_text())
++    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MooncakePullRecvingThread")
++    cls.bases = []
++    names = {"_compute_group_block_ids", "_expand_block_ids", "_select_remote_tp_rank"}
++    cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
++    full = type("FullAttentionSpec", (), {})
++    ns = {
++        "FullAttentionSpec": full,
++        "KVCacheSpec": full,
++        "AscendSFAIndexerCacheSpec": type("Indexer", (), {}),
++        "SlidingWindowSpec": type("Sliding", (), {}),
++        "MambaSpec": type("Mamba", (), {}),
++        "is_circular_kv_cache_spec": lambda _: False,
++    }
++    exec(compile(ast.Module(body=[cls], type_ignores=[]), "community_mapper", "exec"), ns)
++    return ns[cls.name](), full()
++
++
++@pytest.mark.parametrize("dcp", [1, 2, 4, 8])
++@pytest.mark.parametrize("manager", [128, 256, 768])
++@pytest.mark.parametrize("prefix_blocks", [0, 1])
++def test_dcp_page_transfer_roundtrip(qfm, dcp, manager, prefix_blocks):
++    mapper, spec = community_mapper()
++    ratio = manager // 128
++    # Two local manager blocks per rank; deliberately non-identical physical IDs.
++    remote_ids = list(range((2 + prefix_blocks) * dcp - 1, -1, -1))
++    producer_raw = torch.full((256 + len(remote_ids) * ratio * (73728 + 256),), 91, dtype=torch.uint8)
++    producer = qfm.cache_view(producer_raw[256:], len(remote_ids) * ratio, 73728 + 256)
++    for logical, physical in enumerate(remote_ids):
++        for k in range(ratio):
++            producer.view(torch.uint8)[physical * ratio + k].fill_((logical * ratio + k) % 251)
++    for rank in range(dcp):
++        mapper.dcp_size, mapper.dcp_rank = dcp, rank
++        local_ids = [1, 0]
++        mappings = mapper._compute_group_block_ids(
++            "r",
++            [[0]],
++            1,
++            0,
++            manager,
++            manager,
++            local_ids,
++            local_ids,
++            remote_ids,
++            len(remote_ids) * manager,
++            len(remote_ids) * manager,
++            prefix_blocks * dcp * manager,
++            ratio,
++            ratio,
++            spec,
++            0,
++            dcp,
++        )
++        target_raw = torch.full((512 + 2 * ratio * (73728 + 512),), 77, dtype=torch.uint8)
++        target = qfm.cache_view(target_raw[512:], 2 * ratio, 73728 + 512)
++        for _, local_pages, remote_pages in mappings:
++            for dst, src in zip(local_pages, remote_pages):
++                target.view(torch.uint8)[dst].copy_(producer.view(torch.uint8)[src])
++        for logical, physical in enumerate(local_ids):
++            for k in range(ratio):
++                expected = (((logical + prefix_blocks) * dcp + rank) * ratio + k) % 251
++                assert (target.view(torch.uint8)[physical * ratio + k] == expected).all()
++        assert (target_raw[:512] == 77).all()
++        for page in range(2 * ratio):
++            start = 512 + page * (73728 + 512) + 73728
++            assert (target_raw[start : start + 512] == 77).all()
++
++
++@pytest.mark.parametrize("local_dcp,remote_dcp", [(1, 2), (2, 4), (4, 2), (8, 1)])
++@pytest.mark.parametrize("local_block,remote_block", [(768, 768), (128, 768), (768, 256)])
++def test_asymmetric_dcp_maps_the_same_global_tokens(local_dcp, remote_dcp, local_block, remote_block):
++    mapper, spec = community_mapper()
++    total = 768 * 8 * 2
++    local_ids = list(range(total // (local_dcp * local_block)))
++    remote_ids = list(reversed(range(total // (remote_dcp * remote_block))))
++    for rank in range(local_dcp):
++        mapper.dcp_rank, mapper.dcp_size = rank, local_dcp
++        mappings = mapper._compute_group_block_ids(
++            "r",
++            [list(range(remote_dcp))],
++            remote_dcp,
++            0,
++            local_block,
++            remote_block,
++            local_ids,
++            local_ids,
++            remote_ids,
++            total + 1,
++            total,
++            0,
++            local_block // 128,
++            remote_block // 128,
++            spec,
++            0,
++            local_dcp,
++        )
++        seen = set()
++        for remote_rank, local_pages, remote_pages in mappings:
++            for lp, rp in zip(local_pages, remote_pages):
++                local_id, lo = divmod(lp, local_block // 128)
++                remote_id, ro = divmod(rp, remote_block // 128)
++                local_token = (local_ids.index(local_id) * local_dcp + rank) * local_block + lo * 128
++                remote_token = (remote_ids.index(remote_id) * remote_dcp + remote_rank) * remote_block + ro * 128
++                assert local_token == remote_token
++                assert lp not in seen
++                seen.add(lp)
++        assert len(seen) == total // local_dcp // 128
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_cpu.py
+@@ -0,0 +1,267 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Adapter contracts only; mocks are NOT native Prolog/HCCL acceptance."""
++
++import importlib.util
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from tests.ut.attention.test_kimi_k3_qfm_cpu import builder, common
++from tests.ut.attention.test_kimi_k3_qfm_cpu import qfm as _qfm_fixture
++
++qfm = _qfm_fixture
++
++
++@pytest.fixture
++def prolog(qfm, monkeypatch):
++    def quant(hidden, **kwargs):
++        assert kwargs == dict(dst_type=torch.float8_e4m3fn, scale_alg=0)
++        x = hidden.float().clamp(-448, 448).to(torch.float8_e4m3fn)
++        scale = torch.full((hidden.shape[0], hidden.shape[1] // 32), 127, dtype=torch.uint8)
++        return x, scale
++
++    sys.modules["torch_npu"].npu_dynamic_mx_quant = quant
++    monkeypatch.setitem(sys.modules, "vllm_ascend.attention.kimi_k3_qfm", qfm)
++    path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/kimi_k3_qfm_prolog.py"
++    spec = importlib.util.spec_from_file_location("qfm_prolog_cpu_under_test", path)
++    module = importlib.util.module_from_spec(spec)
++    monkeypatch.setitem(sys.modules, spec.name, module)
++    spec.loader.exec_module(module)
++    return module
++
++
++@pytest.mark.parametrize("gap,offset", [(0, 0), (0, 256), (256, 256), (1024, 512)])
++@pytest.mark.parametrize("heads", [12, 24, 48])
++def test_fused_writer_direct_or_staged_preserves_pages(prolog, qfm, monkeypatch, gap, offset, heads):
++    stride = 128 * 576 + gap
++    backing = torch.full((offset + 3 * stride + 256,), 0x5A, dtype=torch.uint8)
++    cache = qfm.cache_view(backing[offset : offset + 3 * stride], 3, stride)
++    hidden = torch.randn(9, 1024, dtype=torch.bfloat16)
++    slots = torch.tensor([128, -1, 0, 383, 127, 7, 129, -1, -1])
++    rows = hidden[:, :576].float().to(torch.float8_e4m3fn)
++    seen = []
++
++    def native(**kwargs):
++        destination, indices = kwargs["kv_cache"], kwargs["cache_index"]
++        mode = kwargs["cache_mode"]
++        assert kwargs["rope_mode"] == 0 and kwargs["qkv_quant_mode"] == 2
++        assert kwargs["w_qr_quant_mode"] == 1 and not kwargs["return_qr"]
++        assert kwargs["descale_x"].dtype == torch.float8_e8m0fnu
++        if gap == 0:
++            assert mode == 1 and destination.data_ptr() == cache.data_ptr()
++            assert destination.storage_offset() == offset
++            qfm.scatter_fp8_cache(rows, indices, destination.view(3, 1, 18, 128, 32))
++        else:
++            assert mode == 0 and destination.data_ptr() != cache.data_ptr()
++            assert destination.numel() == 128 * 576  # current batch, NOT whole history
++            assert indices.tolist() == list(range(9))
++            destination.view(torch.uint8).view(-1, 576)[:9].copy_(rows.view(torch.uint8))
++        seen.append(mode)
++        return torch.zeros(9, heads, 576).to(torch.float8_e4m3fn), torch.ones(9, heads, 1), None, None
++
++    monkeypatch.setattr(prolog, "load_prolog", lambda: native)
++    fused = prolog.QFMProlog({}, torch.ones(1))
++    expected_backing = backing.clone()
++    expected_cache = qfm.cache_view(expected_backing[offset : offset + 3 * stride], 3, stride)
++    qfm.scatter_fp8_cache(rows, slots, expected_cache)
++    q, scales = fused(hidden, slots, cache)
++    assert q.shape == (9, heads, 576) and scales.shape == (9, heads)
++    assert torch.equal(backing, expected_backing)
++    before = backing.clone()
++    fused(hidden, torch.full_like(slots, -1), cache)
++    assert torch.equal(before, backing)
++    assert seen == ([0, 0] if gap else [1, 1])
++
++
++@pytest.mark.parametrize("mode", [2])
++@pytest.mark.parametrize("gap", [0, 256])
++def test_precomputed_prolog_indices_and_scatter_plan_avoid_arange(prolog, qfm, monkeypatch, mode, gap):
++    tokens, offset, stride = 9, 256, 73728 + gap
++    backing = torch.full((offset + 3 * stride + 256,), 0x5A, dtype=torch.uint8)
++    cache = qfm.cache_view(backing[offset : offset + 3 * stride], 3, stride)
++    slots = torch.tensor([128, -1, 0, 383, 127, 7, 129, -1, -1])
++    staging = torch.arange(tokens, dtype=torch.int64)
++    plan = qfm.QFMScatterPlan(slots, qfm.build_scatter_offsets(slots, stride), stride)
++    saved_offsets = plan.offsets.clone()
++    hidden = torch.randn(tokens, 1024, dtype=torch.bfloat16)
++    rows = hidden[:, :576].float().clamp(-448, 448).to(torch.float8_e4m3fn)
++    expected = backing.clone()
++    qfm.write_cache(
++        hidden[:, :576], slots, qfm.cache_view(expected[offset : offset + 3 * stride], 3, stride), torch.ones(1)
++    )
++
++    def native(**kwargs):
++        indices, destination = kwargs["cache_index"], kwargs["kv_cache"]
++        assert kwargs["qkv_quant_mode"] == mode
++        if mode == 2 and gap == 0:
++            assert kwargs["cache_mode"] == 1
++            # Direct PA_NZ writes must keep the actual scheduler slots, not
++            # replace them with the immutable sequential staging indices.
++            assert indices is slots
++            qfm.scatter_fp8_cache(rows, indices, cache, scatter_plan=plan)
++        else:
++            assert kwargs["cache_mode"] == 0 and indices is staging
++            if mode == 0:
++                destination.view(-1, 576)[:tokens].copy_(hidden[:, :576])
++            else:
++                destination.view(torch.uint8).view(-1, 576)[:tokens].copy_(rows.view(torch.uint8))
++        return (
++            torch.zeros(tokens, 12, 576, dtype=torch.bfloat16 if mode == 0 else torch.float8_e4m3fn),
++            None if mode == 0 else torch.ones(tokens, 12, 1),
++            None,
++            None,
++        )
++
++    monkeypatch.setattr(prolog, "load_prolog", lambda: native)
++    fused = prolog.QFMProlog({}, torch.ones(1))
++
++    def forbidden_arange(*args, **kwargs):
++        raise AssertionError("Prepared Prolog paths must reuse indices and Scatter offsets")
++
++    monkeypatch.setattr(torch, "arange", forbidden_arange)
++    fused(hidden, slots, cache, staging_indices=staging, scatter_plan=plan)
++    assert torch.equal(backing, expected)
++    assert torch.equal(plan.offsets, saved_offsets)
++
++
++@pytest.mark.parametrize("mode", [2])
++@pytest.mark.parametrize("case", ["dtype", "length", "rank", "contiguous", "device"])
++def test_prolog_rejects_invalid_precomputed_indices_before_quantization(prolog, qfm, monkeypatch, mode, case):
++    hidden = torch.zeros(9, 1024, dtype=torch.bfloat16)
++    slots = torch.arange(9, dtype=torch.int64)
++    cache = qfm.cache_view(torch.zeros(73728, dtype=torch.uint8), 1, 73728)
++    staging = torch.arange(9, dtype=torch.int64)
++    if case == "dtype":
++        staging = staging.int()
++    elif case == "length":
++        staging = staging[:8]
++    elif case == "rank":
++        staging = staging.view(3, 3)
++    elif case == "contiguous":
++        staging = torch.arange(18, dtype=torch.int64)[::2]
++    elif case == "device":
++        staging = torch.empty(9, dtype=torch.int64, device="meta")
++    monkeypatch.setattr(prolog, "load_prolog", lambda: None)
++    fused = prolog.QFMProlog({}, torch.ones(1))
++
++    def forbidden_quant(*args, **kwargs):
++        raise AssertionError("Invalid metadata must fail before any device operation")
++
++    monkeypatch.setattr(sys.modules["torch_npu"], "npu_dynamic_mx_quant", forbidden_quant)
++    with pytest.raises(ValueError, match="staging_indices"):
++        fused(hidden, slots, cache, staging_indices=staging)
++
++
++def test_weight_refresh_retains_addresses_and_validates_first(prolog, monkeypatch):
++    monkeypatch.setattr(prolog, "load_prolog", lambda: None)
++    fused = prolog.QFMProlog({"wqa": torch.zeros(2, 3), "norm_eps": 1e-5}, torch.ones(1))
++    address = fused.weights["wqa"].data_ptr()
++    fused.update_weights({"wqa": torch.ones(2, 3), "norm_eps": 1e-5})
++    assert fused.weights["wqa"].data_ptr() == address
++    assert fused.weights["wqa"].sum() == 6
++    with pytest.raises(ValueError, match="norm_eps changed"):
++        fused.update_weights({"wqa": torch.zeros(2, 3), "norm_eps": 1e-4})
++    assert fused.weights["wqa"].sum() == 6
++    with pytest.raises(ValueError, match="internal unit"):
++        prolog.QFMProlog({}, torch.tensor([0.03125]))
++
++
++def test_fused_dcp_gathers_query_bytes_and_scales_together(qfm, monkeypatch):
++    b, _ = builder(qfm, monkeypatch, dcp=2, rank=1)
++    batch = b.build(common([4], [129], capacity=8), retain_for_graph=True)
++    q8 = torch.randn(8, 12, 576).to(torch.float8_e4m3fn)
++    qs = torch.arange(8 * 12, dtype=torch.float32).reshape(8, 12) + 1
++    gather_calls = []
++
++    def gather(x, dim):
++        assert dim == 1
++        gather_calls.append(x.dtype)
++        return torch.cat((x, x), dim=dim)
++
++    def attention(q, cache, scales, *args, **kwargs):
++        assert q.shape == (8, 24, 576) and scales.shape == (8, 24)
++        assert torch.equal(q[:, :12].view(torch.uint8), q8.view(torch.uint8))
++        assert torch.equal(scales[:, 12:], qs)
++        return torch.ones(8, 24, 512), torch.zeros(24, 8)
++
++    def merge(x, lse):
++        assert torch.isneginf(lse[4:]).all()
++        return x[:, :12]
++
++    impl = SimpleNamespace(
++        qfm_prolog=lambda h, s, c: (q8, qs),
++        dcp_enabled=True,
++        _dcp_all_gather=gather,
++        _merge_dcp_attention_output=merge,
++        qfm_ops=(attention, None),
++        qfm_scale=torch.ones(1),
++        scale=0.1,
++        _v_up_proj_batch_major=lambda x: x.flatten(1),
++        use_output_gate=False,
++        o_proj=lambda x, **kw: (x,),
++    )
++    output = torch.empty(8, 12 * 512)
++    qfm.forward_qfm(impl, torch.randn(8, 1024), None, SimpleNamespace(qfm=batch), output)
++    assert gather_calls == [torch.int8, torch.float32]
++    assert output[4:].count_nonzero() == 0
++
++
++@pytest.mark.parametrize("dcp,retain_for_graph", [(1, True), (2, False), (2, True)])
++def test_pure_decode_skips_host_stage_boundaries(qfm, monkeypatch, dcp, retain_for_graph):
++    b, _ = builder(qfm, monkeypatch, dcp=dcp)
++    c = common([8], [1024], capacity=16)
++    c.is_prefilling.fill_(False)
++
++    class ForbiddenHostBoundaries:
++        def __getitem__(self, index):
++            raise AssertionError("Pure Decode must not read or reconstruct CPU stage boundaries")
++
++    c.query_start_loc_cpu = ForbiddenHostBoundaries()
++    batch = b.build(c, retain_for_graph=retain_for_graph)
++    assert not batch.has_prefill
++
++
++@pytest.mark.parametrize("same_capacity", [False, True])
++def test_decode_capture_then_prefill_then_decode_keeps_mode2(qfm, monkeypatch, same_capacity):
++    b, _ = builder(qfm, monkeypatch)
++    c = common([4], [132], capacity=8)
++    c.is_prefilling.fill_(False)
++    captured = b.build(c, retain_for_graph=True)
++    original_pointers = {name: getattr(captured, name).data_ptr() for name in ("table", "slots", "lengths", "used")}
++    p = common([4 if same_capacity else 33], [1024], capacity=8 if same_capacity else 40)
++    p.is_prefilling.fill_(True)
++    prefill = b.build(p)
++    assert prefill.has_prefill
++    c.seq_lens.fill_(260)
++    c.slot_mapping.add_(128)
++    decoded = b.build(c)
++    assert decoded is captured
++    assert not decoded.has_prefill
++    assert original_pointers == {name: getattr(decoded, name).data_ptr() for name in original_pointers}
++    assert torch.equal(decoded.slots[:4], c.slot_mapping)
++    assert decoded.lengths[:4].tolist() == [257, 258, 259, 260]
++    mode2 = []
++
++    class Prolog:
++        def __call__(self, hidden, slots, cache):
++            mode2.append(slots.clone())
++            return torch.zeros(8, 12, 576).to(torch.float8_e4m3fn), torch.full((8, 12), 0.25)
++
++    def reader(impl, q, cache, batch, q_scale):
++        assert q.dtype == torch.float8_e4m3fn
++        assert torch.equal(q_scale, torch.full((8, 12), 0.25))
++        return torch.zeros(8, 12, 512), None
++
++    monkeypatch.setattr(qfm, "run_qfm_reader", reader)
++    impl = SimpleNamespace(
++        qfm_prolog=Prolog(),
++        dcp_enabled=False,
++        _v_up_proj_batch_major=lambda x: x.flatten(1),
++        use_output_gate=False,
++        o_proj=lambda x, **kw: (x,),
++    )
++    qfm.forward_qfm(impl, torch.zeros(8, 1024), None, SimpleNamespace(qfm=decoded), torch.empty(8, 12 * 512))
++    assert len(mode2) == 1
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_prolog_weights_cpu.py
+@@ -0,0 +1,261 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Post-load weight/layout contracts only; no native Prolog accuracy claim."""
++
++import importlib.util
++import sys
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++
++@pytest.fixture
++def adapter(monkeypatch):
++    class MXFP8:
++        group_size = 32
++        dynamic_mx_quant_scale_alg = 0
++
++    conversions = []
++
++    def format_cast(tensor, fmt):
++        conversions.append((tensor.shape, fmt))
++        return tensor
++
++    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_format_cast=format_cast))
++    monkeypatch.setitem(
++        sys.modules,
++        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8",
++        SimpleNamespace(AscendW8A8MXFP8DynamicLinearMethod=MXFP8),
++    )
++    path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py"
++    spec = importlib.util.spec_from_file_location("qfm_prolog_weights_cpu_under_test", path)
++    module = importlib.util.module_from_spec(spec)
++    monkeypatch.setitem(sys.modules, spec.name, module)
++    spec.loader.exec_module(module)
++    return module, MXFP8, conversions
++
++
++def projection(scheme, inputs, outputs, device):
++    return SimpleNamespace(
++        input_size=inputs,
++        quant_method=SimpleNamespace(quant_method=scheme()),
++        _mxfp8_transformed=True,
++        weight=torch.full((inputs, outputs), 0x32, dtype=torch.uint8, device=device).view(torch.float8_e4m3fn),
++        weight_scale=torch.full((inputs // 64, outputs, 2), 120, dtype=torch.uint8, device=device),
++        bias=None,
++    )
++
++
++def make_impl(scheme, *, hidden=1024, q_rank=640, heads=6, nope=128, fused=True, device="meta"):
++    impl = SimpleNamespace(
++        use_mla_rope=False,
++        q_lora_rank=q_rank,
++        kv_lora_rank=512,
++        qk_nope_head_dim=nope,
++        qk_rope_head_dim=64,
++        num_heads=heads,
++        q_a_layernorm=SimpleNamespace(
++            weight=torch.ones(q_rank, dtype=torch.bfloat16, device=device), variance_epsilon=1e-6
++        ),
++        kv_a_layernorm=SimpleNamespace(
++            weight=torch.ones(512, dtype=torch.bfloat16, device=device), variance_epsilon=1e-6
++        ),
++        q_proj=projection(scheme, q_rank, heads * (nope + 64), device),
++        W_UK_T=torch.ones((heads, nope, 512), dtype=torch.bfloat16, device=device),
++        fused_qkv_a_proj=None,
++    )
++    if fused:
++        impl.fused_qkv_a_proj = projection(scheme, hidden, q_rank + 576, device)
++    else:
++        impl.q_a_proj = projection(scheme, hidden, q_rank, device)
++        impl.kv_a_proj_with_mqa = projection(scheme, hidden, 576, device)
++    return impl
++
++
++@pytest.mark.parametrize("fused", [True, False])
++@pytest.mark.parametrize("norm_dtype", [torch.bfloat16, torch.float32])
++def test_reconstructs_exact_weight_and_scale_bytes_without_mutation(adapter, fused, norm_dtype):
++    module, scheme, conversions = adapter
++    impl = make_impl(scheme, fused=fused, device="cpu")
++    impl.q_a_layernorm.weight = impl.q_a_layernorm.weight.to(norm_dtype)
++    impl.kv_a_layernorm.weight = impl.kv_a_layernorm.weight.to(norm_dtype)
++    layers = [impl.fused_qkv_a_proj] if fused else [impl.q_a_proj, impl.kv_a_proj_with_mqa]
++    layers.append(impl.q_proj)
++    for index, layer in enumerate(layers):
++        layer.weight.view(torch.uint8)[0, 0] = 11 + index
++        layer.weight.view(torch.uint8)[-1, -1] = 41 + index
++        layer.weight_scale[0, 0, :] = torch.tensor([100 + index, 110 + index], dtype=torch.uint8)
++        layer.weight_scale[-1, -1, :] = torch.tensor([130 + index, 140 + index], dtype=torch.uint8)
++    originals = [(layer.weight.view(torch.uint8).clone(), layer.weight_scale.clone()) for layer in layers]
++    result = module.prepare_prolog_weights(impl)
++    if fused:
++        expected_wa = originals[0][0].T
++        expected_sa = originals[0][1].transpose(0, 1)
++        targets = [("wqa", expected_wa[:640]), ("wkva", expected_wa[640:])]
++        scales = [("descale_wqa", expected_sa[:640]), ("descale_wkva", expected_sa[640:])]
++    else:
++        targets = [("wqa", originals[0][0].T), ("wkva", originals[1][0].T)]
++        scales = [("descale_wqa", originals[0][1].transpose(0, 1)), ("descale_wkva", originals[1][1].transpose(0, 1))]
++    targets.append(("wqb", originals[-1][0].T))
++    scales.append(("descale_wqb", originals[-1][1].transpose(0, 1)))
++    for key, expected in targets + scales:
++        assert result[key].is_contiguous()
++        assert torch.equal(result[key].view(torch.uint8), expected)
++        if key.startswith("descale"):
++            assert result[key].dtype == torch.float8_e8m0fnu
++        result[key].view(torch.uint8).zero_()
++    for key in ("norm_weight_qa", "norm_weight_kva"):
++        assert result[key].dtype == torch.float32
++        assert result[key].device == impl.q_a_layernorm.weight.device
++        assert torch.all(result[key] == 1)
++        result[key].zero_()
++    result["wkb"].zero_()
++    for layer, (weight, scale) in zip(layers, originals):
++        assert torch.equal(layer.weight.view(torch.uint8), weight)
++        assert torch.equal(layer.weight_scale, scale)
++    assert torch.all(impl.W_UK_T == 1)
++    assert torch.all(impl.q_a_layernorm.weight == 1)
++    assert torch.all(impl.kv_a_layernorm.weight == 1)
++    assert all(fmt == 2 for _, fmt in conversions)
++    assert result["norm_eps"] == 1e-6
++
++
++@pytest.mark.parametrize("heads", [1, 6, 12, 24, 48, 96, 128])
++def test_real_k3_geometry_retains_local_heads(adapter, heads):
++    module, scheme, _ = adapter
++    impl = make_impl(scheme, hidden=7168, q_rank=1536, heads=heads)
++    result = module.prepare_prolog_weights(impl)
++    assert result["wqa"].shape == (1536, 7168)
++    assert result["wkva"].shape == (576, 7168)
++    assert result["wqb"].shape == (heads * 192, 1536)
++    assert result["wkb"].shape == (heads, 128, 512)
++    assert result["descale_wqa"].shape == (1536, 112, 2)
++    assert result["descale_wqb"].shape == (heads * 192, 24, 2)
++
++
++@pytest.mark.parametrize("q_rank,nope", [(640, 128), (1024, 192), (1536, 128), (2048, 192)])
++def test_new_dsl_supported_small_and_large_shapes(adapter, q_rank, nope):
++    module, scheme, _ = adapter
++    result = module.prepare_prolog_weights(make_impl(scheme, q_rank=q_rank, nope=nope))
++    assert result["wqb"].shape == (6 * (nope + 64), q_rank)
++
++
++@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
++@pytest.mark.parametrize("bias_value", [0.25, float("nan")])
++def test_rejects_loaded_norm_bias_before_weight_conversion(adapter, norm_name, bias_value):
++    module, scheme, conversions = adapter
++    impl = make_impl(scheme, device="cpu")
++    norm = getattr(impl, norm_name)
++    # A loaded nonzero or NaN correction must not silently disappear from
++    # the bias-free native interface. This is checked at weight preparation.
++    norm.bias = torch.full_like(norm.weight, bias_value)
++    norm.bias_loaded = True
++    with pytest.raises(ValueError, match="bias") as error:
++        module.prepare_prolog_weights(impl)
++    message = str(error.value).lower()
++    assert "mlapo" in message and ("disable" in message or "false" in message)
++    assert not conversions
++
++
++@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
++def test_loaded_zero_norm_bias_is_accepted_without_mutation(adapter, norm_name):
++    module, scheme, _ = adapter
++    impl = make_impl(scheme, device="cpu")
++    norm = getattr(impl, norm_name)
++    allocated_bias = torch.zeros_like(norm.weight)
++    norm.bias = allocated_bias
++    norm.bias_loaded = True
++    result = module.prepare_prolog_weights(impl)
++    assert result["norm_weight_qa"].shape == impl.q_a_layernorm.weight.shape
++    assert result["norm_weight_kva"].shape == impl.kv_a_layernorm.weight.shape
++    assert norm.bias is allocated_bias and norm.bias_loaded
++    assert torch.count_nonzero(allocated_bias).item() == 0
++
++
++@pytest.mark.parametrize("norm_name", ["q_a_layernorm", "kv_a_layernorm"])
++def test_allocated_but_unloaded_norm_bias_keeps_existing_contract(adapter, norm_name):
++    module, scheme, _ = adapter
++    impl = make_impl(scheme)
++    norm = getattr(impl, norm_name)
++    allocated_bias = torch.full_like(norm.weight, 0.25)
++    norm.bias = allocated_bias
++    norm.bias_loaded = False
++    result = module.prepare_prolog_weights(impl)
++    assert result["norm_weight_qa"].shape == impl.q_a_layernorm.weight.shape
++    assert result["norm_weight_kva"].shape == impl.kv_a_layernorm.weight.shape
++    assert norm.bias is allocated_bias
++    assert not norm.bias_loaded
++
++
++@pytest.mark.parametrize(
++    "case,match",
++    [
++        ("rope", "NoRoPE"),
++        ("qrank", "q rank"),
++        ("raw", "latent512"),
++        ("heads", "local heads"),
++        ("epsilon", "RMSNorm epsilon"),
++        ("epsilon_nan", "RMSNorm epsilon"),
++        ("norm_dtype", "RMSNorm weight"),
++        ("hidden", "hidden size"),
++        ("scheme", "W8A8_MXFP8"),
++        ("group", "Group32"),
++        ("scale_alg", "scale_alg=0"),
++        ("unloaded", "after MXFP8"),
++        ("bias", "bias-free"),
++        ("grouped_gmm", "grouped-GMM"),
++        ("chunked", "chunked"),
++        ("padding", "TP-padded"),
++        ("weight_shape", "processed E4M3"),
++        ("scale_shape", "paired E8M0"),
++        ("scale_dtype", "paired E8M0"),
++        ("wkb_heads", "without padded/global heads"),
++    ],
++)
++def test_rejects_unknown_or_incompatible_projection_contracts(adapter, case, match):
++    module, scheme, _ = adapter
++    impl = make_impl(scheme)
++    layer = impl.fused_qkv_a_proj
++    if case == "rope":
++        impl.use_mla_rope = True
++    elif case == "qrank":
++        impl.q_lora_rank = 128
++    elif case == "raw":
++        impl.qk_rope_head_dim = 128
++    elif case == "heads":
++        impl.num_heads = 129
++    elif case == "epsilon":
++        impl.kv_a_layernorm.variance_epsilon = 1e-5
++    elif case == "epsilon_nan":
++        impl.q_a_layernorm.variance_epsilon = float("nan")
++    elif case == "norm_dtype":
++        impl.q_a_layernorm.weight = impl.q_a_layernorm.weight.half()
++    elif case == "hidden":
++        layer.input_size = 1280 + 1
++    elif case == "scheme":
++        layer.quant_method = SimpleNamespace(group_size=32)
++    elif case == "group":
++        layer.quant_method.quant_method.group_size = 128
++    elif case == "scale_alg":
++        layer.quant_method.quant_method.dynamic_mx_quant_scale_alg = 1
++    elif case == "unloaded":
++        layer._mxfp8_transformed = False
++    elif case == "bias":
++        layer.bias = torch.zeros(1216, device="meta")
++    elif case == "grouped_gmm":
++        layer._mxfp8_gmm_nz_layout = True
++    elif case == "chunked":
++        impl.q_proj._chunk_size = 128
++    elif case == "padding":
++        layer.mxfp8_tp_padding = (1, 31)
++    elif case == "weight_shape":
++        layer.weight = layer.weight.T
++    elif case == "scale_shape":
++        layer.weight_scale = layer.weight_scale.flatten(1)
++    elif case == "scale_dtype":
++        layer.weight_scale = layer.weight_scale.float()
++    elif case == "wkb_heads":
++        impl.W_UK_T = impl.W_UK_T[:1]
++    with pytest.raises(ValueError, match=match):
++        module.prepare_prolog_weights(impl)
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_spec_copy_cpu.py
+@@ -0,0 +1,207 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Exercise the real spec-copy chain without importing the NPU framework.
++
++The production Ascend class and upstream dataclasses/methods are AST-loaded
++unchanged; only unrelated package imports/registries are omitted. CPU Scatter
++stands in for the native writer, not for address or spec-copy arithmetic.
++"""
++
++import ast
++import importlib.util
++import math
++import sys
++from dataclasses import dataclass, fields, replace
++from enum import Enum, IntEnum
++from fractions import Fraction
++from functools import cached_property
++from pathlib import Path
++from types import ModuleType
++from typing import Self
++
++import pytest
++import torch
++
++from tests.ut.attention import test_kimi_k3_qfm_cpu as base
++
++ROOT = Path(__file__).resolve().parents[3]
++ASCEND_SOURCE = ROOT / "vllm_ascend/core/kv_cache_interface.py"
++qfm = base.qfm
++
++
++def _upstream_source():
++    try:
++        package = importlib.util.find_spec("vllm")
++    except (ModuleNotFoundError, ValueError):
++        package = None
++    if package is not None and package.submodule_search_locations:
++        return Path(next(iter(package.submodule_search_locations))) / "v1/kv_cache_interface.py"
++    # Local lightweight CPU environment: use the checked-out dependency.
++    source = ROOT.parent / "vllm-v0.30.0/vllm/v1/kv_cache_interface.py"
++    if not source.is_file():
++        pytest.skip("An installed or checked-out vLLM source is required for actual spec-copy coverage")
++    return source
++
++
++@pytest.fixture
++def spec_type(monkeypatch):
++    module = ModuleType("qfm_spec_copy_production_types")
++    monkeypatch.setitem(sys.modules, module.__name__, module)
++    module.__dict__.update(
++        dataclass=dataclass,
++        fields=fields,
++        replace=replace,
++        Enum=Enum,
++        IntEnum=IntEnum,
++        Fraction=Fraction,
++        cached_property=cached_property,
++        torch=torch,
++        Self=Self,
++        cdiv=lambda a, b: (a + b - 1) // b,
++        round_up=lambda a, b: math.ceil(a / b) * b,
++        get_dtype_size=lambda dtype: torch.empty(0, dtype=dtype).element_size(),
++    )
++    upstream = _upstream_source()
++    names = {
++        "KVQuantMode",
++        "KVCacheSpecKind",
++        "SparseCacheRole",
++        "KVCacheSpec",
++        "AttentionSpec",
++        "FullAttentionSpec",
++        "MLAAttentionSpec",
++        "UniformTypeKVCacheSpecs",
++        "_apply_alignment_padding",
++    }
++    nodes = [node for node in ast.parse(upstream.read_text()).body if getattr(node, "name", None) in names]
++    ascend_names = {"get_kv_cache_compression_ratio", "get_storage_block_size", "AscendMLAAttentionSpec"}
++    ascend = [node for node in ast.parse(ASCEND_SOURCE.read_text()).body if getattr(node, "name", None) in ascend_names]
++    future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
++    tree = ast.fix_missing_locations(ast.Module(body=[future, *nodes, *ascend], type_ignores=[]))
++    exec(compile(tree, str(ASCEND_SOURCE), "exec"), module.__dict__)
++    return module.AscendMLAAttentionSpec
++
++
++def _spec(spec_type, block_size, padded=None, qfm_enabled=True):
++    return spec_type(
++        block_size=block_size,
++        num_kv_heads=1,
++        head_size=576,
++        dtype=torch.float8_e4m3fn,
++        cache_qfm_c8=qfm_enabled,
++        page_size_padded=padded,
++    )
++
++
++def test_reported_768_manager_page_becomes_147456_kernel_stride(spec_type, qfm):
++    original = _spec(spec_type, 768, 884736)
++    copied = original.copy_with_new_block_size(128)
++    cache = qfm.cache_view_for_manager(torch.empty(2 * original.page_size_bytes, dtype=torch.uint8), 768, 884736)
++    assert copied.block_size == 128
++    assert copied.page_size_padded == copied.page_size_bytes == cache.stride(0) == 147456
++    assert original.block_size == 768 and original.page_size_padded == 884736
++
++
++@pytest.mark.parametrize("ratio", [1, 2, 4, 6])
++@pytest.mark.parametrize("kernel_padding", [0, 256])
++@pytest.mark.parametrize("offset", [0, 256])
++@pytest.mark.parametrize("writer", ["ordinary", "staged_fp8"])
++def test_copied_spec_shares_live_scatter_plan_across_layers_and_refresh(
++    spec_type, qfm, monkeypatch, ratio, kernel_padding, offset, writer
++):
++    stride = 128 * 576 + kernel_padding
++    manager = 128 * ratio
++    original = _spec(spec_type, manager, stride * ratio)
++    copied = original.copy_with_new_block_size(128)
++    backing = torch.full((offset + 2 * original.page_size_bytes + 256,), 0x5A, dtype=torch.uint8)
++    cache = qfm.cache_view_for_manager(
++        backing[offset : offset + 2 * original.page_size_bytes], manager, original.page_size_bytes
++    )
++    impl = base.impl_config()
++    impl.enable_mlapo = True
++    monkeypatch.setattr(qfm, "load_ops", lambda: (None, lambda lengths, *a, **kw: lengths.clone()))
++    builder = qfm.QFMMetadataBuilder(impl, torch.device("cpu"), copied)
++    assert builder.cache_stride == cache.stride(0) == stride
++    common = base.common([4], [260], capacity=8)
++    common.slot_mapping = torch.tensor([128, -1, 0, 2 * ratio * 128 - 1])
++    batch = builder.build(common, retain_for_graph=True)
++    slots_pointer = batch.slots.data_ptr()
++    if kernel_padding:
++        assert batch.scatter_plan is not None
++        offsets_pointer = batch.scatter_plan.offsets.data_ptr()
++    else:
++        # Dense pages are written directly by DSL Prolog in production; no
++        # extra Scatter plan or scratch buffer belongs in the captured step.
++        assert batch.scatter_plan is None
++        offsets_pointer = None
++    rows = torch.randn(8, 576)
++    encoded = rows.clamp(-448, 448).to(torch.float8_e4m3fn)
++    expected = backing.clone()
++
++    def forbid_rebuild(*args, **kwargs):
++        raise AssertionError("A layer writer must reuse the corrected shared plan without fallback")
++
++    for refresh in (False, True):
++        if refresh:
++            common.slot_mapping = torch.tensor([127, 0, 129, -1])
++            assert builder.build(common) is batch
++        assert batch.slots.data_ptr() == slots_pointer
++        if offsets_pointer is not None:
++            assert batch.scatter_plan.offsets.data_ptr() == offsets_pointer
++        else:
++            assert batch.scatter_plan is None
++        for row, slot in zip(encoded.view(torch.uint8), batch.slots.tolist()):
++            if slot < 0:
++                continue
++            page, token = divmod(slot, 128)
++            for tile in range(18):
++                start = offset + page * stride + tile * 128 * 32 + token * 32
++                expected[start : start + 32] = row[tile * 32 : (tile + 1) * 32]
++        with monkeypatch.context() as guarded:
++            if kernel_padding:
++                guarded.setattr(qfm, "build_scatter_offsets", forbid_rebuild)
++            guarded.setattr(qfm.warnings, "warn", forbid_rebuild)
++            for _ in range(3):
++                if writer == "ordinary":
++                    # Exercise the standalone writer's address contract even
++                    # though model forward always uses fused DSL Prolog.
++                    qfm.write_cache(rows, batch.slots, cache, torch.ones(1), scatter_plan=batch.scatter_plan)
++                else:
++                    # Payload from a Prolog scratch writer is already FP8.
++                    qfm.scatter_fp8_cache(encoded, batch.slots, cache, scatter_plan=batch.scatter_plan)
++                assert torch.equal(backing, expected)
++    assert original.block_size == manager and original.page_size_padded == stride * ratio
++
++
++@pytest.mark.parametrize("ratio", [1, 2, 4, 6])
++def test_unpadded_copy_uses_recomputed_payload_size(spec_type, ratio):
++    original = _spec(spec_type, 128 * ratio)
++    copied = original.copy_with_new_block_size(128)
++    assert copied.page_size_padded is None
++    assert copied.page_size_bytes == 128 * 576
++    assert original.page_size_bytes == ratio * copied.page_size_bytes
++
++
++@pytest.mark.parametrize("qfm_enabled", [False, True])
++@pytest.mark.parametrize("new_block", [768, 1536])
++def test_same_or_larger_block_keeps_upstream_padding_semantics(spec_type, qfm_enabled, new_block):
++    original = _spec(spec_type, 768, 884736, qfm_enabled)
++    copied = original.copy_with_new_block_size(new_block)
++    assert copied.block_size == new_block and copied.page_size_padded == 884736
++    assert copied == super(spec_type, original).copy_with_new_block_size(new_block)
++    assert copied is not original
++    assert original.block_size == 768 and original.page_size_padded == 884736
++
++
++def test_non_qfm_shrink_keeps_upstream_padding_semantics(spec_type):
++    original = _spec(spec_type, 768, 884736, qfm_enabled=False)
++    copied = original.copy_with_new_block_size(128)
++    assert copied.page_size_padded == 884736
++    assert copied == super(spec_type, original).copy_with_new_block_size(128)
++
++
++@pytest.mark.parametrize("padded,new_block", [(884737, 128), (884742, 128), (884736, 0), (884736, -128)])
++def test_invalid_qfm_subpage_alignment_is_rejected(spec_type, padded, new_block):
++    original = _spec(spec_type, 768, padded)
++    with pytest.raises(ValueError, match="QFM"):
++        original.copy_with_new_block_size(new_block)
++    assert original.block_size == 768 and original.page_size_padded == padded
+--- /dev/null
++++ b/tests/ut/attention/test_kimi_k3_qfm_worker_blocks_cpu.py
+@@ -0,0 +1,165 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Bounded CPU hookup checks for K3 QFM manager/kernel cache blocks."""
++
++import ast
++import sys
++from dataclasses import dataclass, replace
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++import torch
++
++from tests.ut.attention.test_kimi_k3_qfm_cpu import qfm as existing_qfm_fixture
++
++ROOT = Path(__file__).resolve().parents[3]
++ATTN_UTILS = ROOT / "vllm_ascend/worker/v2/attn_utils.py"
++QFM_MODULE = "vllm_ascend.attention.kimi_k3_qfm"
++
++
++@dataclass(frozen=True)
++class PageSpec:
++    block_size: int
++    payload_bytes: int
++    cache_qfm_c8: bool = False
++    page_size_padded: int | None = None
++
++    @property
++    def page_size_bytes(self):
++        return self.page_size_padded if self.page_size_padded is not None else self.payload_bytes
++
++
++class FullAttentionSpec:
++    pass
++
++
++class SlidingWindowSpec:
++    pass
++
++
++class AscendSFAIndexerCacheSpec:
++    pass
++
++
++@pytest.fixture
++def qfm(monkeypatch):
++    return existing_qfm_fixture.__wrapped__(monkeypatch)
++
++
++def _source_function(name):
++    tree = ast.parse(ATTN_UTILS.read_text(encoding="utf-8"))
++    return next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
++
++
++def _compile_function(node, scope):
++    future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
++    module = ast.fix_missing_locations(ast.Module(body=[future, node], type_ignores=[]))
++    exec(compile(module, str(ATTN_UTILS), "exec"), scope)
++    return scope[node.name]
++
++
++def _shared_mamba_alignment():
++    source = _source_function("get_kv_cache_spec")
++    branch = next(
++        node
++        for node in source.body
++        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "mamba_specs"
++    )
++    wrapper = ast.FunctionDef(
++        name="run_shared_mamba_alignment",
++        args=ast.arguments(
++            posonlyargs=[],
++            args=[
++                ast.arg(arg="kv_cache_spec"),
++                ast.arg(arg="mamba_specs"),
++                ast.arg(arg="attention_layer_names"),
++            ],
++            kwonlyargs=[],
++            kw_defaults=[],
++            defaults=[],
++        ),
++        body=[branch, ast.Return(value=ast.Name(id="kv_cache_spec", ctx=ast.Load()))],
++        decorator_list=[],
++    )
++    scope = {
++        "replace": replace,
++        "FullAttentionSpec": FullAttentionSpec,
++        "SlidingWindowSpec": SlidingWindowSpec,
++    }
++    _compile_function(_source_function("_align_hybrid_attention_page_sizes"), scope)
++    return _compile_function(wrapper, scope)
++
++
++def _reshape_qfm_branch():
++    logs = []
++    scope = {
++        "torch": torch,
++        "get_current_vllm_config": lambda: SimpleNamespace(),
++        "_is_dsv4_model": lambda _config: False,
++        "_get_layer_kv_cache_specs": lambda config: config.layer_specs,
++        "is_deepseek_v41_cache": lambda _specs: False,
++        "get_storage_block_size": lambda spec: spec.block_size,
++        "FullAttentionSpec": FullAttentionSpec,
++        "is_c8_mxfp_kv_quant": lambda _config: False,
++        "AscendSFAIndexerCacheSpec": AscendSFAIndexerCacheSpec,
++        "get_single_raw_mla_backing": lambda raw: raw if isinstance(raw, torch.Tensor) else None,
++        "logger": SimpleNamespace(info_once=lambda *args: logs.append(args)),
++    }
++    return _compile_function(_source_function("_reshape_kv_cache_v2"), scope), logs
++
++
++def test_worker_uses_aligned_manager_page_and_selected_kernel_block(qfm, monkeypatch):
++    monkeypatch.setitem(sys.modules, QFM_MODULE, qfm)
++    manager_block_size = 512
++    kernel_block_size = qfm.QFM_BLOCK
++    kernel_pages_per_manager = manager_block_size // kernel_block_size
++    qfm_payload = manager_block_size * qfm.QFM_WIDTH
++    mamba_payload = qfm_payload + 1
++
++    specs = {
++        "attn": PageSpec(manager_block_size, qfm_payload, cache_qfm_c8=True),
++    }
++    mamba_specs = {
++        "mamba": PageSpec(manager_block_size, mamba_payload),
++    }
++    aligned = _shared_mamba_alignment()(specs, mamba_specs, ["attn"])
++    common_page = qfm.align_qfm_page_bytes(mamba_payload, [manager_block_size])
++
++    assert common_page > mamba_payload
++    assert common_page % (kernel_pages_per_manager * qfm.QFM_TILE) == 0
++    assert aligned["attn"].block_size == manager_block_size
++    assert aligned["attn"].page_size_padded == common_page
++    assert aligned["mamba"].page_size_padded == common_page
++
++    num_manager_pages = 3
++    raw_offset = 64
++    backing = torch.full((raw_offset + num_manager_pages * common_page + 64,), 0x5A, dtype=torch.uint8)
++    raw = backing[raw_offset : raw_offset + num_manager_pages * common_page]
++    group = SimpleNamespace(
++        kv_cache_group_id=0,
++        kv_cache_spec=aligned["attn"],
++        layer_names=["attn"],
++    )
++    config = SimpleNamespace(layer_specs={"attn": aligned["attn"]}, num_blocks=num_manager_pages)
++    reshape, logs = _reshape_qfm_branch()
++    cache = reshape([group], {"attn": raw}, "auto", [kernel_block_size], {}, config)["attn"]
++
++    assert cache.shape == (num_manager_pages * kernel_pages_per_manager, 1, 18, 128, 32)
++    assert cache.stride() == (common_page // kernel_pages_per_manager, 128 * 576, 128 * 32, 32, 1)
++    assert cache.storage_offset() == raw_offset
++    assert logs and logs[0][1:4] == (manager_block_size, kernel_block_size, common_page)
++
++
++def test_shared_mamba_alignment_without_qfm_is_unchanged():
++    common_page = 294_913
++    attention = PageSpec(512, common_page)
++    mamba = PageSpec(512, common_page)
++    specs = {"attn": attention}
++    mamba_specs = {"mamba": mamba}
++
++    aligned = _shared_mamba_alignment()(specs, mamba_specs, ["attn"])
++
++    assert aligned["attn"] == attention
++    assert aligned["mamba"] is mamba
++    assert aligned["attn"].page_size_padded is None
++    assert aligned["mamba"].page_size_padded is None
+--- a/vllm_ascend/ascend_config.py
++++ b/vllm_ascend/ascend_config.py
+@@ -568,8 +568,9 @@
+     # FULL graphs wait on descriptor-specific external events at consumers.
+     # Default to overlap on A5 only; explicit settings override this policy.
+     multistream_engram_overlap: bool = dataclasses.field(
+-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
+-        == DeviceAdaptorFamily.FP8_OPTIMIZED
++        default_factory=lambda: (
++            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
++        )
+     )
+     enable_prefill_mc2: bool = False
+     multistream_overlap_shared_expert: bool = False
+@@ -637,6 +638,8 @@
+     enable_sp_by_pass: bool = False
+     enable_sparse_sfa_turboquant: bool = False
+     enable_sparse_sfa_c8: bool = False
++    # Experimental full576 FP8 QFM cache; distinct from packed656 QSFA C8.
++    enable_kimi_k3_qfm_c8: bool = False
+     enable_sparse_li_c8: bool = False
+     enable_sparse_li_c4: bool = False
+     pd_tp_ratio: int = 1
+--- a/vllm_ascend/attention/context_parallel/mla_cp.py
++++ b/vllm_ascend/attention/context_parallel/mla_cp.py
+@@ -328,6 +328,8 @@
+ 
+     def process_weights_after_loading(self, act_dtype: torch.dtype):
+         super().process_weights_after_loading(act_dtype)
++        if self.use_qfm:
++            return
+         # PCP cannot consume the RoPE PROLOG_V3 workspaces. The legacy no-rope
+         # MLAPO decode buffer still has a consumer with PCP enabled.
+         if self.dcp_enabled and (
+--- /dev/null
++++ b/vllm_ascend/attention/kimi_k3_qfm.py
+@@ -0,0 +1,478 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Opt-in K3 full576 FP8 cache with shared DSL Prolog/QFM for P and D.
++
++KV uses unscaled FP8, matching the pinned CANN K3 recipe's unit descale.
++Caller-owned cache pages and their padding/offset are preserved. Metadata is
++shared across layers in an attention group; only captured capacities are kept.
++"""
++
++import importlib
++import math
++import warnings
++from dataclasses import dataclass, field
++
++import torch
++import torch_npu
++
++QFM_WIDTH = 576
++QFM_VALUE = 512
++QFM_BLOCK = 128
++QFM_TILE = 32
++QFM_MAX_Q = 16
++QFM_MASK = 2048
++QFM_FP8_MAX = 448.0
++# cann-recipes-infer 4447f2f0972cb9287e069e3994b1d46ffe244ebc:
++# KimiMLAAttention.prepare_prolog_weights registers mla_kv_scale=[1.0].
++# This is an identity conversion, not a calibrated model accuracy guarantee.
++QFM_KV_DESCALE = 1.0
++QFM_HEADS = (1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
++
++
++def select_qfm(impl, config) -> bool:
++    """Do not turn on the draft model or unrelated attention layers."""
++    if not config.enable_kimi_k3_qfm_c8 or impl.is_draft_model:
++        return False
++    # MRV2 DSpark retains the target model_config while constructing its
++    # draft. Kimi also sets draft RoPE only AFTER the MLA impl is created.
++    # Neither runner_type nor use_mla_rope identifies that construction
++    # reliably. Read the loader's live tag (never import its value by copy)
++    # before validating/choosing a target-only QFM cache layout.
++    if importlib.import_module("vllm.compilation.backends").model_tag == "dspark_head":
++        return False
++    if not getattr(impl, "enable_mlapo", False):
++        raise ValueError("K3 QFM requires enable_mlapo=true for both Prefill and Decode")
++    if config.enable_sparse_sfa_c8:
++        raise ValueError("Disable enable_sparse_sfa_c8: packed656 and full576 QFM are different cache formats")
++    vcfg = impl.vllm_config
++    if impl.use_mla_rope or impl.kv_lora_rank != QFM_VALUE or impl.qk_rope_head_dim != 64:
++        raise ValueError("K3 QFM requires No-RoPE MLA latent512 + raw64")
++    if not vcfg.use_v2_model_runner or not impl.support_fp8_attention:
++        raise ValueError("K3 QFM requires A5 and ModelRunner V2")
++    if impl.num_kv_heads != 1 or impl.num_heads not in QFM_HEADS:
++        raise ValueError(f"QFM unsupported local query/KV heads: {impl.num_heads}/{impl.num_kv_heads}")
++    kernel_pages_per_manager(vcfg.cache_config.block_size)
++    if vcfg.cache_config.cache_dtype != "auto" or impl.fa_quant_layer:
++        raise ValueError("QFM owns full576 FP8 storage: use --kv-cache-dtype auto and no legacy FA quant scheme")
++    if impl.enable_kv_nz:
++        raise ValueError("QFM owns its PA_NZ layout; use enable_kv_nz=false")
++    if impl.pcp_enabled or impl.is_pcp_decode_sharded:
++        raise ValueError("QFM PCP is not adapted in this candidate")
++    if config.kvpp_config.size != 1:
++        raise ValueError("QFM KV layer parallelism is not adapted in this candidate")
++    if vcfg.kv_transfer_config is not None:
++        transfer = vcfg.kv_transfer_config
++        if (
++            transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector")
++            or getattr(transfer, "kv_connector_module_path", None) is not None
++        ):
++            raise ValueError("QFM PD requires the built-in MooncakeConnectorV2 (not a custom/pool connector)")
++        # Community Mooncake maps DCP ownership at manager-block granularity.
++        # Sub-block token striping cannot be copied as whole PA_NZ pages.
++        if (
++            vcfg.parallel_config.decode_context_parallel_size > 1
++            and vcfg.parallel_config.cp_kv_cache_interleave_size != vcfg.cache_config.block_size
++        ):
++            raise ValueError("QFM PD with DCP requires cp_kv_cache_interleave_size == block_size")
++    if config.sparse_kv_offload_config.enabled:
++        raise ValueError("QFM does not use sparse KV offload")
++    if vcfg.speculative_config is not None and vcfg.speculative_config.method != "dspark":
++        raise ValueError("QFM speculative path is currently scoped to DSpark")
++    size = vcfg.parallel_config.decode_context_parallel_size
++    if impl.num_heads * size not in QFM_HEADS:
++        raise ValueError("QFM does not support this DCP-gathered query head count")
++    return True
++
++
++def kernel_pages_per_manager(manager_block_size):
++    """The KV manager owns large blocks; QFM consumes fixed 128-token pages."""
++    if (
++        isinstance(manager_block_size, bool)
++        or not isinstance(manager_block_size, int)
++        or manager_block_size <= 0
++        or manager_block_size % QFM_BLOCK
++    ):
++        raise ValueError(
++            f"QFM requires --block-size to be a positive multiple of {QFM_BLOCK}; "
++            f"resolved manager block size is {manager_block_size}"
++        )
++    return manager_block_size // QFM_BLOCK
++
++
++def align_qfm_page_bytes(page_bytes, manager_block_sizes):
++    """Align the shared physical page before cache budgeting/allocation."""
++    alignment = math.lcm(*(kernel_pages_per_manager(size) * QFM_TILE for size in manager_block_sizes))
++    return (page_bytes + alignment - 1) // alignment * alignment
++
++
++def cache_view_for_manager(raw, manager_block_size, page_bytes, kernel_block_size=QFM_BLOCK):
++    """Split final allocator pages into uniformly strided QFM kernel pages.
++
++    MRV2 BlockTables already expands manager ID b to b*ratio+[0..ratio-1]
++    and computes slots with kernel size 128. Do not expand either again in
++    QFM metadata. Page padding is distributed between the kernel views, so
++    ratio*kernel_stride is exactly the allocator's physical manager stride.
++    """
++    ratio = kernel_pages_per_manager(manager_block_size)
++    if kernel_block_size != QFM_BLOCK:
++        raise ValueError(f"QFM needs kernel block size {QFM_BLOCK}, got {kernel_block_size}")
++    if page_bytes < manager_block_size * QFM_WIDTH or page_bytes % (ratio * QFM_TILE):
++        raise ValueError(
++            f"QFM physical manager page {page_bytes} bytes must cover {manager_block_size * QFM_WIDTH} "
++            f"payload bytes and divide into {ratio} kernel pages with {QFM_TILE}-byte aligned strides"
++        )
++    if raw.numel() == 0 or raw.numel() % page_bytes:
++        raise ValueError("QFM raw buffer must contain whole physical manager pages")
++    return cache_view(raw, raw.numel() // page_bytes * ratio, page_bytes // ratio)
++
++
++def cache_view(raw, blocks, page_bytes):
++    """One physical page per block, with offset inherited from the allocator."""
++    if raw.dtype not in (torch.uint8, torch.int8) or raw.ndim != 1:
++        raise ValueError("QFM allocator requires a single byte buffer")
++    if page_bytes < QFM_BLOCK * QFM_WIDTH or page_bytes % QFM_TILE:
++        raise ValueError("QFM physical page must hold full576 FP8 and align to 32 bytes")
++    needed = (blocks - 1) * page_bytes + QFM_BLOCK * QFM_WIDTH
++    if blocks <= 0 or needed > raw.numel() or raw.storage_offset() % QFM_TILE:
++        raise ValueError("QFM cache allocation is too small or unaligned")
++    return torch.as_strided(
++        raw.view(torch.float8_e4m3fn),
++        (blocks, 1, QFM_WIDTH // QFM_TILE, QFM_BLOCK, QFM_TILE),
++        (page_bytes, QFM_BLOCK * QFM_WIDTH, QFM_BLOCK * QFM_TILE, QFM_TILE, 1),
++    )
++
++
++@dataclass
++class QFMScatterPlan:
++    slots: torch.Tensor
++    offsets: torch.Tensor
++    stride: int
++    fallback_reported: bool = False
++
++    def slice(self, begin, end):
++        return QFMScatterPlan(self.slots[begin:end], self.offsets[begin:end], self.stride)
++
++
++def build_scatter_offsets(slots, stride, tile=None):
++    """Pure slot arithmetic, shared by every MLA layer in a metadata group."""
++    ids = slots.to(torch.int64)
++    if tile is None:
++        tile = torch.arange(QFM_WIDTH // QFM_TILE, device=slots.device)
++    offsets = ids[:, None].div(QFM_BLOCK, rounding_mode="floor") * (stride // QFM_TILE)
++    offsets = offsets + tile[None, :] * QFM_BLOCK + ids[:, None].remainder(QFM_BLOCK)
++    return torch.where(ids[:, None] >= 0, offsets, -1)
++
++
++def write_cache(rows, slots, cache, scale, scatter_plan=None):
++    values = (rows.float() / scale).clamp(-QFM_FP8_MAX, QFM_FP8_MAX).to(torch.float8_e4m3fn)
++    scatter_fp8_cache(values, slots, cache, scatter_plan=scatter_plan)
++
++
++def scatter_fp8_cache(values, slots, cache, scatter_plan=None):
++    """Scatter 32-byte NZ tiles; native ScatterPaCache skips slot -1.
++
++    An offset-preserving contiguous alias avoids the old DSpark stride bug.
++    Invalid tokens do not alias a live token or depend on duplicate-write order.
++    """
++    if values.dtype != torch.float8_e4m3fn or values.shape != (slots.numel(), QFM_WIDTH):
++        raise ValueError("QFM scatter expects already quantized full576 rows")
++    if cache.dtype != torch.float8_e4m3fn or cache.shape[1:] != (1, 18, 128, 32):
++        raise ValueError("QFM requires full576 FP8 PA_NZ cache, not legacy packed656")
++    stride = cache.stride(0)
++    if cache.stride()[2:] != (4096, 32, 1) or stride % QFM_TILE:
++        raise ValueError("Invalid QFM PA_NZ strides")
++    span = (cache.shape[0] - 1) * stride + QFM_BLOCK * QFM_WIDTH
++    alias = torch.as_strided(cache, (span // QFM_TILE, 1, 1, QFM_TILE), (32, 32, 32, 1))
++    if scatter_plan is None:
++        offsets = build_scatter_offsets(slots, stride)
++    else:
++        offsets = scatter_plan.offsets
++        if (
++            scatter_plan.stride != stride
++            or scatter_plan.slots.data_ptr() != slots.data_ptr()
++            or scatter_plan.slots.shape != slots.shape
++            or offsets.shape != (slots.numel(), QFM_WIDTH // QFM_TILE)
++            or offsets.dtype != torch.int64
++            or offsets.device != cache.device
++            or not offsets.is_contiguous()
++        ):
++            # A shared plan is an optimization, not the address authority.
++            # Recompute from the LIVE slots and physical view. Keep this work
++            # inside the captured graph too: caching the rebuilt addresses in
++            # Python would leave them stale when graph replay updates slots.
++            if not scatter_plan.fallback_reported:
++                mismatches = {
++                    "stride": scatter_plan.stride != stride,
++                    "slots_pointer": scatter_plan.slots.data_ptr() != slots.data_ptr(),
++                    "slots_shape": scatter_plan.slots.shape != slots.shape,
++                    "offsets_shape": offsets.shape != (slots.numel(), QFM_WIDTH // QFM_TILE),
++                    "offsets_dtype": offsets.dtype != torch.int64,
++                    "offsets_device": offsets.device != cache.device,
++                    "offsets_contiguous": not offsets.is_contiguous(),
++                }
++                warnings.warn(
++                    "QFM Scatter plan fallback: "
++                    f"mismatch={[name for name, bad in mismatches.items() if bad]}; "
++                    f"plan_stride={scatter_plan.stride}, cache_stride={stride}; "
++                    f"plan_slots={tuple(scatter_plan.slots.shape)}, live_slots={tuple(slots.shape)}; "
++                    f"offsets={tuple(offsets.shape)}/{offsets.dtype}/{offsets.device}, cache_device={cache.device}. "
++                    "Rebuilding offsets from live slots; no cache layout or quantization change.",
++                    RuntimeWarning,
++                    stacklevel=2,
++                )
++                scatter_plan.fallback_reported = True
++            offsets = build_scatter_offsets(slots, stride)
++    torch_npu.npu_scatter_pa_cache(values.reshape(-1, 1, QFM_TILE).contiguous(), offsets.flatten(), key_cache=alias)
++
++
++def load_ops():
++    """Resolve the existing native runtime after device selection."""
++    try:
++        provider = importlib.import_module("cann_ops_transformer.ops")
++    except (ImportError, OSError) as exc:
++        raise RuntimeError("K3 QFM requires its installed CANN QFM runtime; source its env.sh before workers") from exc
++    try:
++        return torch.ops.cann_ops_transformer.quant_flash_mla, torch.ops.cann_ops_transformer.quant_flash_mla_metadata
++    except AttributeError as exc:
++        source = getattr(provider, "__file__", "<unknown provider>")
++        raise RuntimeError(
++            "K3 QFM/metadata operators are not registered; loaded provider="
++            + str(source)
++            + ". Source the pinned QFM runtime env.sh before starting new workers."
++        ) from exc
++
++
++@dataclass
++class QFMBatch:
++    cu: torch.Tensor
++    used: torch.Tensor
++    lengths: torch.Tensor
++    table: torch.Tensor
++    slots: torch.Tensor
++    live: torch.Tensor
++    visible: torch.Tensor
++    schedule: torch.Tensor
++    mask: torch.Tensor | None
++    mask_mode: int
++    max_q: int
++    max_k: int
++    has_prefill: bool
++    invalid: torch.Tensor | None = None
++    invisible: torch.Tensor | None = None
++    scatter_plan: QFMScatterPlan | None = None
++    prolog_kwargs: dict = field(default_factory=dict)
++
++
++class QFMMetadataBuilder:
++    def __init__(self, impl, device, kv_cache_spec=None):
++        self.device = device
++        self.dcp_size = impl.vllm_config.parallel_config.decode_context_parallel_size
++        self.dcp_rank = getattr(impl, "dcp_rank", 0)
++        self.interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size
++        self.heads = impl.num_heads * self.dcp_size
++        self.max_k = max(1, impl.vllm_config.model_config.max_model_len)
++        _, self.metadata_op = load_ops()
++        self.mask = torch.ones((QFM_MASK, QFM_MASK), dtype=torch.int8, device=device).triu_(1)
++        self.buffers = {}
++        self.cache_stride = None
++        self.scatter_possible = self.staging_required = False
++        self.scatter_tiles = None
++        if kv_cache_spec is not None:
++            ratio = kernel_pages_per_manager(kv_cache_spec.block_size)
++            physical_page = kv_cache_spec.page_size_padded or kv_cache_spec.page_size_bytes
++            if physical_page % ratio:
++                raise ValueError("QFM physical page does not split into equal kernel strides")
++            self.cache_stride = physical_page // ratio
++            gapped = self.cache_stride != QFM_BLOCK * QFM_WIDTH
++            self.scatter_possible = self.staging_required = gapped
++            if self.scatter_possible:
++                self.scatter_tiles = torch.arange(QFM_WIDTH // QFM_TILE, device=device)
++
++    def metadata(self, lengths, cu, used, max_q, mode):
++        return self.metadata_op(
++            lengths,
++            self.heads,
++            1,
++            1,
++            cu_seqlens_q=cu,
++            seqused_q=used,
++            max_seqlen_q=max_q,
++            max_seqlen_kv=self.max_k,
++            head_dim_qk=QFM_WIDTH,
++            head_dim_v=QFM_VALUE,
++            mask_mode=mode,
++            layout_q="TND",
++        )
++
++    def build(self, common, retain_for_graph=False):
++        tokens = max(common.num_actual_tokens, common.num_input_tokens)
++        # These are already KERNEL-page columns from MRV2 BlockTables, even
++        # when the final cache manager uses 256/512/... token blocks.
++        columns = common.block_table_tensor.shape[1]
++        key = tokens, columns, common.causal
++        batch = self.buffers.get(key)
++        flags = common.is_prefilling
++        if flags is not None and flags.device.type != "cpu":
++            raise ValueError("QFM expects scheduler CPU stage flags, not a device-to-host sync")
++        # All decode graph capacities use one physical query per virtual row.
++        # Eager prefill batches use <=16 rows per sequence, NOT small op calls.
++        per_token = retain_for_graph or batch is not None or self.dcp_size > 1
++        if per_token:
++            rows = tokens
++        else:
++            bounds = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens).tolist()
++            cu_cpu = [0]
++            for begin, end in zip(bounds, bounds[1:]):
++                while begin < end:
++                    begin = min(begin + QFM_MAX_Q, end)
++                    cu_cpu.append(begin)
++            while cu_cpu[-1] < tokens:
++                cu_cpu.append(min(cu_cpu[-1] + QFM_MAX_Q, tokens))
++            rows = len(cu_cpu) - 1
++        if not 0 < rows < 65536:
++            raise ValueError("QFM virtual batch must contain 1..65535 rows")
++        mode = 0 if per_token or not common.causal else 3
++        ints = dict(dtype=torch.int32, device=self.device)
++        if batch is None:
++            cu = torch.arange(rows + 1, **ints) if per_token else torch.tensor(cu_cpu, **ints)
++            used, lengths = torch.zeros(rows, **ints), torch.zeros(rows, **ints)
++            # Populate once after device lengths are ready. Do not invoke the
++            # scheduling kernel twice or require a separate Meta registration.
++            schedule = torch.empty(0, **ints)
++            batch = QFMBatch(
++                cu,
++                used,
++                lengths,
++                torch.zeros((rows, columns), **ints),
++                torch.full((tokens,), -1, dtype=torch.int64, device=self.device),
++                torch.zeros(tokens, dtype=torch.bool, device=self.device),
++                torch.zeros(tokens, dtype=torch.bool, device=self.device),
++                schedule,
++                self.mask if mode == 3 else None,
++                mode,
++                1 if per_token else QFM_MAX_Q,
++                self.max_k,
++                False,
++                invalid=torch.empty(tokens, dtype=torch.bool, device=self.device),
++                invisible=torch.empty(tokens, dtype=torch.bool, device=self.device),
++            )
++            if self.scatter_possible:
++                batch.scatter_plan = QFMScatterPlan(
++                    batch.slots,
++                    torch.empty((tokens, QFM_WIDTH // QFM_TILE), dtype=torch.int64, device=self.device),
++                    self.cache_stride,
++                )
++                batch.prolog_kwargs["scatter_plan"] = batch.scatter_plan
++            if self.staging_required:
++                batch.prolog_kwargs["staging_indices"] = torch.arange(tokens, dtype=torch.int64, device=self.device)
++            if retain_for_graph:
++                self.buffers[key] = batch
++        # Only device lengths: DSpark rejection correction may not be mirrored
++        # to CPU. Updates are on the caller's stream before graph replay.
++        boundaries = common.query_start_loc[: common.num_reqs + 1].contiguous()
++        token_ids = batch.cu[:-1] if per_token else torch.arange(tokens, device=self.device, dtype=torch.int32)
++        owners = torch.searchsorted(boundaries[1:], token_ids, right=True).clamp_max(common.num_reqs - 1).long()
++        starts, ends = boundaries[owners], boundaries[owners + 1]
++        seq = common.seq_lens[owners]
++        live = (token_ids < common.num_actual_tokens) & (token_ids < ends) & (seq > 0)
++        batch.live.copy_(live)
++        batch.invalid.copy_(~live)
++        count = min(tokens, common.slot_mapping.numel())
++        if count < tokens:
++            batch.slots[count:].fill_(-1)
++        batch.slots[:count].copy_(common.slot_mapping[:count])
++        batch.slots.masked_fill_(batch.invalid, -1)
++        lengths_per_token = seq - (ends - starts) + token_ids - starts + 1 if common.causal else seq
++        if self.dcp_size > 1:
++            cycle = self.interleave * self.dcp_size
++            lengths_per_token = lengths_per_token.div(cycle, rounding_mode="floor") * self.interleave + (
++                lengths_per_token.remainder(cycle) - self.dcp_rank * self.interleave
++            ).clamp(0, self.interleave)
++        lengths_per_token = torch.where(live, lengths_per_token.clamp_min(0), 0)
++        batch.visible.copy_(live & (lengths_per_token > 0))
++        batch.invisible.copy_(~batch.visible)
++        if per_token:
++            # Each virtual row contains exactly this token. The general
++            # first/last-token gathers reduce to identity, even for padding
++            # and DCP ranks with zero local history.
++            row_owner = owners
++            batch.used.copy_(live)
++            batch.lengths.copy_(lengths_per_token)
++        else:
++            first = batch.cu[:-1].long()
++            row_owner = owners[first]
++            row_used = (ends[first] - batch.cu[:-1]).clamp_min(0)
++            row_used = torch.minimum(row_used, batch.cu[1:] - batch.cu[:-1])
++            row_used = torch.where(live[first], row_used, 0)
++            last = (batch.cu[:-1] + row_used - 1).clamp_min(0).long()
++            batch.used.copy_(row_used)
++            batch.lengths.copy_(torch.where(row_used > 0, lengths_per_token[last], 0))
++        batch.table.copy_(common.block_table_tensor[row_owner])
++        batch.has_prefill = bool(flags[: common.num_reqs].any()) if flags is not None else common.max_query_len > 16
++        if batch.scatter_plan is not None:
++            batch.scatter_plan.offsets.copy_(build_scatter_offsets(batch.slots, self.cache_stride, self.scatter_tiles))
++        schedule = self.metadata(batch.lengths, batch.cu, batch.used, batch.max_q, mode)
++        if batch.schedule.numel() == 0:
++            batch.schedule = schedule
++        else:
++            batch.schedule.copy_(schedule)
++        return batch
++
++
++def forward_qfm(impl, hidden, cache, metadata, output):
++    """Run the same fused FP8 writer and latent reader in both phases."""
++    batch = metadata.qfm
++    if batch is None:
++        raise RuntimeError("QFM selected but QFM metadata is missing")
++    tokens = batch.slots.numel()
++    prolog = getattr(impl, "qfm_prolog", None)
++    if prolog is None:
++        raise RuntimeError("K3 QFM requires initialized DSL Prolog; enable_mlapo=true")
++    q, q_scale = prolog(hidden[:tokens].contiguous(), batch.slots, cache, **batch.prolog_kwargs)
++    if impl.dcp_enabled:
++        # HCCL byte gather preserves FP8 codes; scales follow the same heads.
++        q = impl._dcp_all_gather(q.view(torch.int8), dim=1).view(torch.float8_e4m3fn)
++        q_scale = impl._dcp_all_gather(q_scale, dim=1)
++    latent, lse = run_qfm_reader(impl, q, cache, batch, q_scale=q_scale)
++    if impl.dcp_enabled:
++        latent = impl._merge_dcp_attention_output(latent, lse)
++    projected = impl._v_up_proj_batch_major(latent)
++    invalid = batch.invalid if batch.invalid is not None else ~batch.live
++    projected = projected.masked_fill(invalid[:, None], 0)
++    if impl.use_output_gate:
++        projected = projected * torch.sigmoid(impl.g_proj(hidden.contiguous())[0][:tokens])
++    result = impl.o_proj(projected, is_prefill=batch.has_prefill)[0]
++    output.copy_(result)
++    return output
++
++
++def run_qfm_reader(impl, q, cache, batch, *, q_scale):
++    q8 = q
++    attention, _ = impl.qfm_ops
++    latent, lse = attention(
++        q8,
++        cache,
++        q_scale,
++        impl.qfm_scale,
++        batch.table,
++        batch.lengths,
++        1,
++        cu_seqlens_q=batch.cu,
++        seqused_q=batch.used,
++        metadata=batch.schedule,
++        head_dim_v=QFM_VALUE,
++        attn_mask=batch.mask,
++        softmax_scale=impl.scale,
++        mask_mode=batch.mask_mode,
++        max_seqlen_q=batch.max_q,
++        max_seqlen_kv=batch.max_k,
++        layout_q="TND",
++        layout_kv="PA_NZ",
++        layout_out="TND",
++        return_softmax_lse=impl.dcp_enabled,
++    )
++    invisible = batch.invisible if batch.invisible is not None else ~batch.visible
++    latent = latent.masked_fill(invisible[:, None, None], 0)
++    if impl.dcp_enabled:
++        lse = lse.T.masked_fill(invisible[:, None], -float("inf")).unsqueeze(-1)
++    return latent, lse
+--- /dev/null
++++ b/vllm_ascend/attention/kimi_k3_qfm_prolog.py
+@@ -0,0 +1,126 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Experimental adapter for pinned CANN DSL Prolog, NOT MlaPrologV4.
++
++Upstream documents CANN 9.2.1 / DSL 0.8.0. CANN 9.2.0 needs an explicit
++isolated compile/device probe before this path is enabled in a model server.
++Only the current token batch is staged for padded pages; no BF16 history.
++"""
++
++import hashlib
++import importlib
++import importlib.util
++from pathlib import Path
++
++import torch
++import torch_npu
++
++from vllm_ascend.attention.kimi_k3_qfm import QFM_BLOCK, QFM_WIDTH, scatter_fp8_cache
++
++PROLOG_MODULE = "ops.quant_mla_prolog"
++PROLOG_SHA256 = "ab0876c2fc09b7cc2b0541063dc7bab16414b2046ea9030bc1fecce4020be1bc"
++PROLOG_PA_BSND = 0
++PROLOG_PA_NZ = 1
++
++
++def _validate_staging_indices(indices, tokens, device):
++    """Validate caller-owned immutable 0..T indices without reading device data."""
++    if (
++        not isinstance(indices, torch.Tensor)
++        or indices.dtype != torch.int64
++        or indices.ndim != 1
++        or indices.shape != (tokens,)
++        or not indices.is_contiguous()
++        or indices.device != device
++    ):
++        raise ValueError("Prolog staging_indices must be contiguous INT64 [physical_tokens] on the input device")
++
++
++def load_prolog():
++    try:
++        spec = importlib.util.find_spec(PROLOG_MODULE)
++    except ModuleNotFoundError as exc:
++        raise RuntimeError("Load the private Prolog wheel env.sh before starting workers") from exc
++    if spec is None or spec.origin is None:
++        raise RuntimeError("Pinned Prolog wheel is absent; source its private env.sh first")
++    if hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest() != PROLOG_SHA256:
++        raise RuntimeError("K3 DSL Prolog source differs from pinned 9e01355; refusing an unknown ABI")
++    if not (Path(spec.origin).parent / "_native").is_dir():
++        raise RuntimeError("Prolog wheel has no _native directory; source-only/JIT fallback is not selected")
++    return importlib.import_module(PROLOG_MODULE).quant_mla_prolog
++
++
++class QFMProlog:
++    def __init__(self, weights, kv_scale):
++        self.op = load_prolog()
++        # One initialization-time check, never a device-content read in forward
++        # or graph capture. Upstream needs a multiplier; QFM needs a descale.
++        # Unit scale makes these identical, and is fixed for all cache pages.
++        if kv_scale.dtype != torch.float32 or kv_scale.shape != (1,) or kv_scale.detach().cpu().tolist() != [1.0]:
++            raise ValueError("QFM DSL Prolog requires the internal unit KV scale")
++        self.scale = kv_scale
++        self.weights = weights
++
++    def update_weights(self, weights):
++        """Preserve captured tensor addresses on compatible weight refreshes."""
++        if weights.keys() != self.weights.keys():
++            raise ValueError("QFM Prolog weight keys changed; restart workers and recapture")
++        for name, value in weights.items():
++            old = self.weights[name]
++            if isinstance(value, torch.Tensor):
++                if old.shape != value.shape or old.dtype != value.dtype or old.device != value.device:
++                    raise ValueError(f"QFM Prolog {name} layout changed; restart workers and recapture")
++            elif old != value:
++                raise ValueError(f"QFM Prolog {name} changed; restart workers and recapture")
++        for name, value in weights.items():
++            if isinstance(value, torch.Tensor):
++                self.weights[name].copy_(value)
++
++    def __call__(self, hidden, slots, cache, *, staging_indices=None, scatter_plan=None):
++        tokens = slots.numel()
++        if hidden.ndim != 2 or hidden.shape[0] != tokens or hidden.dtype != torch.bfloat16:
++            raise ValueError("QFM DSL Prolog needs BF16 [physical_tokens, hidden_dim]")
++        if slots.dtype != torch.int64 or slots.ndim != 1 or not slots.is_contiguous():
++            raise ValueError("QFM DSL Prolog slots must be contiguous INT64 [physical_tokens]")
++        if cache.dtype != torch.float8_e4m3fn or cache.shape[1:] != (1, 18, 128, 32):
++            raise ValueError("QFM DSL Prolog requires full576 FP8 PA_NZ cache")
++        if cache.stride()[2:] != (4096, 32, 1) or cache.stride(0) < QFM_BLOCK * QFM_WIDTH:
++            raise ValueError("Invalid QFM cache page layout")
++        if staging_indices is not None:
++            _validate_staging_indices(staging_indices, tokens, hidden.device)
++        x, descale_x = torch_npu.npu_dynamic_mx_quant(hidden, dst_type=torch.float8_e4m3fn, scale_alg=0)
++        descale_x = descale_x.view(torch.float8_e8m0fnu).reshape(tokens, hidden.shape[1] // 32).contiguous()
++        direct = cache.stride(0) == QFM_BLOCK * QFM_WIDTH
++        if direct:
++            # This is a shape-only physical alias, not an NZ-to-ND transpose.
++            # Never call contiguous(): that could silently copy the history.
++            destination = cache.view(cache.shape[0], QFM_BLOCK, 1, QFM_WIDTH)
++            indices, mode = slots, PROLOG_PA_NZ
++        else:
++            # The upstream writer has no page-stride parameter. Generate only
++            # this step's FP8 rows, then scatter bytes to the real strided pages.
++            blocks = max(1, (tokens + QFM_BLOCK - 1) // QFM_BLOCK)
++            destination = torch.empty((blocks, QFM_BLOCK, 1, QFM_WIDTH), dtype=cache.dtype, device=cache.device)
++            indices = staging_indices
++            if indices is None:
++                indices = torch.arange(tokens, dtype=torch.int64, device=slots.device)
++            mode = PROLOG_PA_BSND
++        q, q_scale, _, _ = self.op(
++            x=x,
++            descale_x=descale_x,
++            kv_cache=destination,
++            cache_index=indices,
++            quant_scale_kv=self.scale,
++            w_qr_quant_mode=1,
++            qkv_quant_mode=2,
++            cache_mode=mode,
++            rope_mode=0,
++            return_qr=False,
++            **self.weights,
++        )
++        if not direct:
++            # All scratch rows were written, even when real slots are -1.
++            # The final writer alone applies live slots, preserving draft and
++            # unrelated main-model pages, page padding and storage offsets.
++            scatter_fp8_cache(destination.view(-1, QFM_WIDTH)[:tokens], slots, cache, scatter_plan=scatter_plan)
++        return q, q_scale.squeeze(-1).contiguous()
+--- /dev/null
++++ b/vllm_ascend/attention/kimi_k3_qfm_prolog_weights.py
+@@ -0,0 +1,129 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Private ND projection weights for K3's full576 QFM DSL prolog.
++
++ModelSlim has already transposed weights and paired the MX scales before this
++adapter runs. Never mutate those tensors: the ordinary path still uses them.
++"""
++
++import math
++
++import torch
++import torch_npu
++
++MIN_HIDDEN_SIZE = 1024
++MAX_HIDDEN_SIZE = 8192
++HIDDEN_ALIGNMENT = 256
++Q_RANKS = (640, 1024, 1536, 2048)
++KV_RANK = 512
++Q_NOPE_DIMS = (128, 192)
++RAW_DIM = 64
++MX_GROUP_SIZE = 32
++MX_SCALE_PAIR = 2
++ACL_FORMAT_ND = 2
++
++
++def _projection(layer, name, inputs, outputs):
++    # Lazy import avoids initializing the quantization/attention import cycle
++    # when this independently testable adapter is imported.
++    from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
++
++    method = getattr(layer, "quant_method", None)
++    method = getattr(method, "quant_method", method)
++    if not isinstance(method, AscendW8A8MXFP8DynamicLinearMethod) or method.group_size != MX_GROUP_SIZE:
++        raise ValueError(f"QFM prolog {name} requires ModelSlim W8A8_MXFP8 Group32")
++    if getattr(method, "dynamic_mx_quant_scale_alg", None) != 0:
++        raise ValueError(f"QFM prolog {name} requires dynamic_mx_quant_scale_alg=0 to match the native QR quantizer")
++    if not getattr(layer, "_mxfp8_transformed", False):
++        raise ValueError(f"QFM prolog {name} must be prepared after MXFP8 weight loading")
++    if getattr(layer, "_chunk_size", 0) or getattr(layer, "_mxfp8_gmm_nz_layout", False):
++        raise ValueError(f"QFM prolog {name} does not accept chunked or grouped-GMM projection weights")
++    if getattr(layer, "bias", None) is not None:
++        raise ValueError(f"QFM prolog {name} requires a bias-free projection")
++    if any(getattr(layer, "mxfp8_tp_padding", (0, 0))):
++        raise ValueError(f"QFM prolog {name} does not accept TP-padded MX groups")
++
++    weight, scale = layer.weight, layer.weight_scale
++    if weight.dtype != torch.float8_e4m3fn or tuple(weight.shape) != (inputs, outputs):
++        raise ValueError(f"QFM prolog {name} expects processed E4M3 weight [{inputs}, {outputs}]")
++    expected_scale = (inputs // (MX_GROUP_SIZE * MX_SCALE_PAIR), outputs, MX_SCALE_PAIR)
++    if tuple(scale.shape) != expected_scale or scale.dtype not in (torch.uint8, torch.float8_e8m0fnu):
++        raise ValueError(f"QFM prolog {name} expects paired E8M0 scales {expected_scale}")
++    if weight.device != scale.device:
++        raise ValueError(f"QFM prolog {name} weight and scale must share a device")
++    # Convert the internal NZ format before slicing/transposing. Tensor shape
++    # alone cannot reveal that physical storage is NZ rather than ND.
++    weight_nd = torch_npu.npu_format_cast(weight.detach(), ACL_FORMAT_ND)
++    private_weight = weight_nd.transpose(0, 1).contiguous().clone()
++    private_scale = scale.detach().transpose(0, 1).contiguous().view(torch.float8_e8m0fnu).clone()
++    return private_weight, private_scale
++
++
++def prepare_prolog_weights(impl):
++    """Return DSL kwargs without replacing or modifying any original parameter."""
++    if getattr(impl, "use_mla_rope", True):
++        raise ValueError("QFM prolog requires K3 NoRoPE")
++    q_rank, nope_dim = impl.q_lora_rank, impl.qk_nope_head_dim
++    if q_rank not in Q_RANKS or nope_dim not in Q_NOPE_DIMS:
++        raise ValueError(f"QFM prolog requires q rank in {Q_RANKS} and q_nope dim in {Q_NOPE_DIMS}")
++    if impl.kv_lora_rank != KV_RANK or impl.qk_rope_head_dim != RAW_DIM:
++        raise ValueError("QFM prolog requires latent512 + raw64")
++    heads = impl.num_heads
++    if isinstance(heads, bool) or not isinstance(heads, int) or not 1 <= heads <= 128:
++        raise ValueError("QFM prolog requires 1..128 TP-local heads")
++
++    norm_qa, norm_kva = impl.q_a_layernorm, impl.kv_a_layernorm
++    eps = float(norm_qa.variance_epsilon)
++    if not math.isfinite(eps) or eps <= 0 or eps != float(norm_kva.variance_epsilon):
++        raise ValueError("QFM prolog requires equal positive finite Q/KV RMSNorm epsilon")
++    for name, norm, size in (("q_a", norm_qa, q_rank), ("kv_a", norm_kva, KV_RANK)):
++        # Loading-time check only. The native schema has no norm-bias input;
++        # zero correction is harmless, nonzero/NaN correction must not vanish.
++        bias = getattr(norm, "bias", None)
++        if getattr(norm, "bias_loaded", False) and (bias is None or bool(torch.count_nonzero(bias).item())):
++            raise ValueError(
++                f"QFM DSL Prolog cannot apply loaded nonzero {name} RMSNorm bias; "
++                "disable enable_mlapo or use a bias-aware Prolog implementation"
++            )
++        if norm.weight.dtype not in (torch.bfloat16, torch.float32) or tuple(norm.weight.shape) != (size,):
++            raise ValueError(f"QFM prolog {name} RMSNorm weight must be BF16 or FP32 [{size}]")
++
++    fused = getattr(impl, "fused_qkv_a_proj", None)
++    first_projection = fused if fused is not None else getattr(impl, "q_a_proj", None)
++    hidden_size = getattr(first_projection, "input_size", None)
++    if (
++        not isinstance(hidden_size, int)
++        or not MIN_HIDDEN_SIZE <= hidden_size <= MAX_HIDDEN_SIZE
++        or hidden_size % HIDDEN_ALIGNMENT
++    ):
++        raise ValueError("QFM prolog requires hidden size 1024..8192 aligned to 256")
++    if fused is not None:
++        weight, scale = _projection(fused, "fused_qkv_a_proj", hidden_size, q_rank + KV_RANK + RAW_DIM)
++        wqa, wkva = weight.split((q_rank, KV_RANK + RAW_DIM), dim=0)
++        descale_wqa, descale_wkva = scale.split((q_rank, KV_RANK + RAW_DIM), dim=0)
++    else:
++        q_a = getattr(impl, "q_a_proj", None)
++        kv_a = getattr(impl, "kv_a_proj_with_mqa", None)
++        if q_a is None or kv_a is None:
++            raise ValueError("QFM prolog needs fused_qkv_a_proj or explicit q_a_proj and kv_a_proj_with_mqa")
++        wqa, descale_wqa = _projection(q_a, "q_a_proj", hidden_size, q_rank)
++        wkva, descale_wkva = _projection(kv_a, "kv_a_proj_with_mqa", hidden_size, KV_RANK + RAW_DIM)
++
++    wqb, descale_wqb = _projection(impl.q_proj, "q_b_proj", q_rank, heads * (nope_dim + RAW_DIM))
++    wkb = impl.W_UK_T
++    if wkb.dtype != torch.bfloat16 or tuple(wkb.shape) != (heads, nope_dim, KV_RANK):
++        raise ValueError("QFM prolog W_UK_T must be BF16 [local_heads, q_nope_dim, 512], without padded/global heads")
++    result = {
++        "wqa": wqa,
++        "wqb": wqb,
++        "wkva": wkva,
++        "wkb": torch_npu.npu_format_cast(wkb.detach(), ACL_FORMAT_ND).contiguous().clone(),
++        "descale_wqa": descale_wqa,
++        "descale_wqb": descale_wqb,
++        "descale_wkva": descale_wkva,
++        "norm_weight_qa": norm_qa.weight.detach().float().contiguous().clone(),
++        "norm_weight_kva": norm_kva.weight.detach().float().contiguous().clone(),
++        "norm_eps": eps,
++    }
++    if any(value.device != wqa.device for value in result.values() if isinstance(value, torch.Tensor)):
++        raise ValueError("QFM prolog projections and norms must share a device")
++    return result
+--- a/vllm_ascend/attention/mla_v1.py
++++ b/vllm_ascend/attention/mla_v1.py
+@@ -44,6 +44,14 @@
+     FlashMLAMetadataBuilder,
+     get_flashmla_ops,
+     split_flashmla_requests,
++)
++from vllm_ascend.attention.kimi_k3_qfm import (
++    QFM_KV_DESCALE,
++    QFMBatch,
++    QFMMetadataBuilder,
++    forward_qfm,
++    load_ops,
++    select_qfm,
+ )
+ from vllm_ascend.attention.utils import (
+     ATTENTION_UPDATE_MAX_INPUTS,
+@@ -266,6 +274,7 @@
+     pcp_cos: torch.Tensor | None = None
+     pcp_sin: torch.Tensor | None = None
+     external_flashmla: FlashMLADecode | None = None
++    qfm: QFMBatch | None = None
+ 
+     def __post_init__(self):
+         pass
+@@ -359,6 +368,13 @@
+         self.seq_lens: torch.Tensor = None
+         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+         self.flashmla_state = None
++        self.qfm_state = None
++        qfm_choices = {getattr(static_forward_context[name].impl, "use_qfm", False) for name in layer_names}
++        if len(qfm_choices) > 1:
++            raise ValueError("QFM and other MLA readers must use separate attention metadata groups")
++        if True in qfm_choices:
++            self.qfm_state = QFMMetadataBuilder(static_forward_context[layer_names[0]].impl, device, kv_cache_spec)
++            logger.info("MLA group %s uses full576 FP8 QFM for prefill and decode", layer_names[0])
+         flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
+         if len(flashmla_choices) > 1:
+             raise ValueError("MLA layers in one attention group must use the same decode backend")
+@@ -440,6 +456,24 @@
+             external_flashmla=flash,
+         )
+ 
++    def _build_qfm(self, common, retain_for_graph=False):
++        batch = self.qfm_state.build(common, retain_for_graph=retain_for_graph)
++        return self.metadata_cls(
++            num_actual_tokens=common.num_actual_tokens,
++            num_input_tokens=common.num_input_tokens,
++            slot_mapping=batch.slots,
++            query_start_loc=common.query_start_loc,
++            seq_lens=common.seq_lens,
++            seq_lens_cpu=common._seq_lens_cpu,
++            block_tables=common.block_table_tensor,
++            num_decodes=common.num_reqs,
++            num_decode_tokens=batch.slots.numel(),
++            num_prefills=0,
++            attn_state=common.attn_state,
++            causal=common.causal,
++            qfm=batch,
++        )
++
+     @staticmethod
+     def determine_chunk_alignment(vllm_config: VllmConfig) -> int:
+         # GatherPa starts reads at kernel-block boundaries even when the
+@@ -595,6 +629,8 @@
+     ) -> AscendMLAMetadata:
+         self._pcp_context = pcp_context
+         self._pcp_cache_group_idx = pcp_cache_group_idx
++        if self.qfm_state is not None:
++            return self._build_qfm(common_attn_metadata)
+         if self.flashmla_state is not None:
+             return self._build_external_flashmla(common_prefix_len, common_attn_metadata)
+         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
+@@ -904,6 +940,8 @@
+         common_attn_metadata: AscendCommonAttentionMetadata,
+         **kwargs: Any,
+     ):
++        if self.qfm_state is not None:
++            return self._build_qfm(common_attn_metadata, retain_for_graph=True)
+         # Preserve upstream decode-only validation while forwarding PCP inputs.
+         assert common_attn_metadata.num_reqs <= (
+             common_attn_metadata.num_actual_tokens * self.reorder_batch_threshold
+@@ -1055,10 +1093,13 @@
+         self.mlapo_num_heads = self.num_heads
+         self.mlapo_weight_quant_mode = 3
+         self._mlapo_uses_native_weights = False
++        self.use_qfm = select_qfm(self, ascend_config)
+         self.use_flashmla: bool = self._can_use_flashmla()
+         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+ 
+     def _can_use_flashmla(self) -> bool:
++        if getattr(self, "use_qfm", False):
++            return False
+         config = self.vllm_config
+         if not getattr(config, "use_v2_model_runner", False):
+             return False
+@@ -1312,6 +1353,28 @@
+             W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
+             prefer_copy=True,
+         )
++        if getattr(self, "use_qfm", False):
++            value = QFM_KV_DESCALE
++            if getattr(self, "qfm_scale", None) is None:
++                self.qfm_scale = torch.tensor([value], dtype=torch.float32, device=self.W_UV.device)
++            else:
++                self.qfm_scale.fill_(value)
++            self.qfm_ops = load_ops()
++            from vllm_ascend.attention.kimi_k3_qfm_prolog import QFMProlog
++            from vllm_ascend.attention.kimi_k3_qfm_prolog_weights import prepare_prolog_weights
++
++            weights = prepare_prolog_weights(self)
++            if getattr(self, "qfm_prolog", None) is None:
++                self.qfm_prolog = QFMProlog(weights, self.qfm_scale)
++            else:
++                self.qfm_prolog.update_weights(weights)
++            logger.info(
++                "QFM C8 layer=%s cache=FP8-full576 scale=%s writer=dsl-prolog heads=%s reader=qfm",
++                self.layer_name,
++                value,
++                self.num_heads,
++            )
++            return
+         if self.enable_mlapo:
+             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
+             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
+@@ -3436,6 +3499,15 @@
+             # Profiling run.
+             return output.fill_(0)
+ 
++        if getattr(self, "use_qfm", False):
++            if not isinstance(kv_cache, torch.Tensor):
++                raise RuntimeError("QFM requires a single PA_NZ FP8 cache from MRV2")
++            wait_for_kv_layer_from_connector(layer_name)
++            result = forward_qfm(self, hidden_states, kv_cache, attn_metadata, output)
++            # One tensor, not list(kv_cache), which would split it into pages.
++            maybe_save_kv_layer_to_connector(layer_name, [kv_cache])
++            return result
++
+         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)
+         assert (
+             attn_metadata.num_decodes is not None
+--- a/vllm_ascend/core/kv_cache_interface.py
++++ b/vllm_ascend/core/kv_cache_interface.py
+@@ -136,6 +136,7 @@
+     # main-cache property here; indexer-specific C8 properties belong to the
+     # indexer spec.
+     cache_sparse_sfa_c8: bool = False
++    cache_qfm_c8: bool = False
+     cache_sparse_sfa_turboquant: bool = False
+     store_on_host: bool = False
+     # Ascend kernels consume padded pages through an explicit physical block
+@@ -151,6 +152,8 @@
+     @property
+     def supports_single_raw_backing(self) -> bool:
+         """Whether this geometry can be exposed from one raw MLA backing."""
++        if self.cache_qfm_c8:
++            return True
+         return (
+             get_kv_cache_compression_ratio(self) == 1
+             and self.model_version is None
+@@ -169,6 +172,27 @@
+     @property
+     def unpadded_page_size_bytes(self) -> int:
+         return self.real_page_size_bytes
++
++    def copy_with_new_block_size(self, block_size: int) -> Self:
++        """Keep QFM kernel subpages consistent with their physical manager page.
++
++        MRV2 copies the manager spec with the selected kernel block size
++        before constructing metadata builders. Its default copy retains the
++        full padded manager page, so it would overestimate each subpage's
++        stride. Shrink that padding proportionally, without changing the
++        allocator's original spec. Larger planning blocks keep upstream's
++        padding semantics rather than multiplying a minimum page budget.
++        """
++        if self.cache_qfm_c8 and self.page_size_padded is not None and block_size < self.block_size:
++            scaled_page_bytes = self.page_size_padded * block_size
++            if block_size <= 0 or scaled_page_bytes % self.block_size:
++                raise ValueError("QFM padded manager page must split into whole-byte kernel pages.")
++            page_size_padded = scaled_page_bytes // self.block_size
++            tile_bytes = 32
++            if page_size_padded % tile_bytes:
++                raise ValueError("QFM kernel page stride must remain aligned to 32-byte NZ tiles.")
++            return replace(self, block_size=block_size, page_size_padded=page_size_padded)
++        return super().copy_with_new_block_size(block_size)
+ 
+     @classmethod
+     def merge(cls, specs: list[Self]) -> Self:
+@@ -183,6 +207,7 @@
+                 spec.num_heads,
+                 spec.scale_dtype,
+                 spec.cache_sparse_sfa_c8,
++                spec.cache_qfm_c8,
+                 spec.cache_sparse_sfa_turboquant,
+                 spec.store_on_host,
+                 spec.alignment,
+@@ -205,6 +230,7 @@
+             scale_dim=first_spec.scale_dim,
+             num_heads=first_spec.num_heads,
+             scale_dtype=first_spec.scale_dtype,
++            cache_qfm_c8=first_spec.cache_qfm_c8,
+             alignment=first_spec.alignment,
+             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+             cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
+@@ -36,6 +36,7 @@
+     MooncakeConnectorMetadata,
+     MooncakeTransferMetadata,
+ )
++from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.qfm_contract import QFM_WIRE_FORMAT, validate_qfm_transfer
+ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
+     MooncakeKVConnectorStats,
+ )
+@@ -278,6 +279,7 @@
+         block_lens_per_layer: list[list[int]] = []
+         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
+         block_size_scales_per_layer: list[list[int]] = []
++        cache_formats: list[str] = []
+         configured_layer_names: set[str] = set()
+ 
+         for tensor_config in self.kv_cache_config.kv_cache_tensors:
+@@ -306,10 +308,14 @@
+ 
+                 spec_index = self.layer_name_to_spec_index[layer_name]
+                 spec = self.kv_cache_specs[spec_index]
++                is_qfm = getattr(spec, "cache_qfm_c8", False)
++                cache_formats.append(QFM_WIRE_FORMAT if is_qfm else "")
+                 caches = as_kv_cache_tensors(cache_or_caches)
++                if is_qfm and (len(caches) != 1 or caches[0].dtype != torch.float8_e4m3fn):
++                    raise ValueError("QFM PD registration requires one E4M3FN cache tensor")
+                 shared_page_metadata = (
+                     self._get_shared_page_metadata(caches)
+-                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
++                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) and not is_qfm
+                     else None
+                 )
+                 if shared_page_metadata is not None and _is_component_major_mla_binding(spec, caches):
+@@ -382,7 +388,11 @@
+             block_size_scales=block_size_scales_per_layer,
+             local_ip=self.side_channel_host,
+             handshake_port=self.handshake_port,
+-        )
++            cache_formats=cache_formats,
++        )
++        for index, wire_format in enumerate(cache_formats):
++            if wire_format:
++                validate_qfm_transfer(transfer_metadata, transfer_metadata, index, index)
+         self.transfer_metadata = transfer_metadata
+         self.xfer_handshake_metadata = transfer_metadata
+ 
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/metadata.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/metadata.py
+@@ -35,9 +35,12 @@
+     block_size_scales: list[list[int]]
+     local_ip: str = ""
+     handshake_port: int = 0
++    cache_formats: list[str] | None = None
+ 
+     def __post_init__(self) -> None:
+         num_layers = len(self.layer_names)
++        if self.cache_formats is not None and len(self.cache_formats) != num_layers:
++            raise ValueError("Mooncake cache_formats must align with layer_names")
+         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
+             ("layer_block_sizes", self.layer_block_sizes),
+             ("group_indices", self.group_indices),
+@@ -105,6 +108,7 @@
+     block_shapes: list[list[tuple[int, ...]]]
+     block_size_scales: list[list[int]]
+     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
++    cache_formats: list[str] | None = None
+ 
+ 
+ @dataclass(frozen=True)
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/pull_scheduler.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/pull_scheduler.py
+@@ -34,6 +34,7 @@
+     MooncakeTransferMetadata,
+     MooncakeTransferMetadataGroups,
+ )
++from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.qfm_contract import layer_wire_format
+ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+     ensure_zmq_recv,
+     ensure_zmq_send,
+@@ -232,6 +233,7 @@
+                             worker_metadata.block_lens[local_layer_index],
+                             worker_metadata.block_shapes[local_layer_index],
+                             worker_metadata.block_size_scales[local_layer_index],
++                            layer_wire_format(worker_metadata, local_layer_index),
+                         )
+                         previous_signature = layer_signature_by_name.get(layer_name)
+                         if previous_signature is not None and previous_signature != layer_signature:
+@@ -242,6 +244,7 @@
+                                 "block_lens",
+                                 "block_shapes",
+                                 "block_size_scales",
++                                "cache_formats",
+                             )
+                             mismatched_layer_fields = [
+                                 field_name
+@@ -264,6 +267,7 @@
+             block_lens: list[list[int]] = []
+             block_shapes: list[list[tuple[int, ...]]] = []
+             block_size_scales: list[list[int]] = []
++            cache_formats: list[str] = []
+             for layer_name in layer_names:
+                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
+                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
+@@ -272,6 +276,7 @@
+                 block_lens.append(worker_metadata.block_lens[local_layer_index])
+                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
+                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
++                cache_formats.append(layer_wire_format(worker_metadata, local_layer_index))
+ 
+             layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
+             metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
+@@ -307,6 +312,7 @@
+                 block_shapes=block_shapes,
+                 block_size_scales=block_size_scales,
+                 metadata_by_pcp_rank=metadata_by_pcp_rank,
++                cache_formats=cache_formats,
+             )
+         return merged
+ 
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/pull_worker.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/pull_worker.py
+@@ -40,6 +40,7 @@
+     MooncakeTransferMetadataGroups,
+     ReqMeta,
+ )
++from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.qfm_contract import validate_qfm_transfer
+ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+     SizedDict,
+     ensure_zmq_recv,
+@@ -99,6 +100,7 @@
+         self.block_lens = local_metadata.block_lens
+         self.block_shapes = local_metadata.block_shapes
+         self.block_size_scales = local_metadata.block_size_scales
++        self.cache_formats = getattr(local_metadata, "cache_formats", None)
+ 
+         self.use_mla = self.model_config.is_deepseek_mla
+         hf_text_config = self.model_config.hf_text_config
+@@ -266,6 +268,8 @@
+                 remote_layer_index = remote_layer_index_by_name.get(layer_name)
+                 if remote_layer_index is None:
+                     continue
++
++                validate_qfm_transfer(self, pp_metadata, local_layer_index, remote_layer_index)
+ 
+                 layer_pair = (local_layer_index, remote_layer_index)
+                 layer_index_pairs.append(layer_pair)
+--- /dev/null
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/qfm_contract.py
+@@ -0,0 +1,37 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
++"""Versioned wire contract for raw QFM pages; no device operations."""
++
++QFM_WIRE_FORMAT = "k3-qfm-v1:fp8_e4m3fn:pa_nz:128x576:descale=1"
++QFM_BLOCK_SHAPE = (1, 18, 128, 32)
++QFM_BLOCK_BYTES = 128 * 576
++
++
++def layer_wire_format(metadata, index):
++    formats = getattr(metadata, "cache_formats", None)
++    return formats[index] if formats is not None else ""
++
++
++def validate_qfm_transfer(local, remote, local_index, remote_index):
++    """Reject mixed versions/formats before any transfer is submitted.
++
++    Padding/strides may differ across P/D; transfer only the contiguous
++    128-token payload. KDA/draft layers keep the existing connector protocol.
++    """
++    local_format = layer_wire_format(local, local_index)
++    remote_format = layer_wire_format(remote, remote_index)
++    if not (local_format or remote_format):
++        return
++    if local_format != QFM_WIRE_FORMAT or remote_format != QFM_WIRE_FORMAT:
++        raise ValueError("QFM P/D cache format mismatch; install the same QFM PD patch on both endpoints")
++    for metadata, index in ((local, local_index), (remote, remote_index)):
++        if metadata.block_shapes[index] != [QFM_BLOCK_SHAPE]:
++            raise ValueError("QFM PD requires one PA_NZ full576 cache per MLA layer")
++        if metadata.block_lens[index] != [QFM_BLOCK_BYTES]:
++            raise ValueError("QFM PD cache payload must be 128 * 576 FP8 bytes")
++        scales = metadata.block_size_scales[index]
++        if len(scales) != 1 or scales[0] <= 0 or metadata.layer_block_sizes[index] != 128 * scales[0]:
++            raise ValueError("QFM PD manager/kernel page mapping is inconsistent")
++        strides = metadata.block_strides[index]
++        if len(strides) != 1 or strides[0] < QFM_BLOCK_BYTES or strides[0] % 32:
++            raise ValueError("QFM PD kernel stride must preserve payload and 32-byte alignment")
+--- a/vllm_ascend/worker/utils.py
++++ b/vllm_ascend/worker/utils.py
+@@ -36,7 +36,9 @@
+         if entry is None:
+             continue
+         if isinstance(entry, torch.Tensor):
+-            tensors = entry.unbind(0) if entry.ndim == 5 and entry.shape[0] == 2 else (entry,)
++            # A two-page FP8 MLA pool is not the legacy leading K/V axis.
++            fused_kv = entry.ndim == 5 and entry.shape[0] == 2 and not getattr(entry, "_qfm_fp8_cache", False)
++            tensors = entry.unbind(0) if fused_kv else (entry,)
+         else:
+             tensors = entry
+         for tensor in tensors:
+--- a/vllm_ascend/worker/v2/attn_utils.py
++++ b/vllm_ascend/worker/v2/attn_utils.py
+@@ -241,7 +241,10 @@
+         if isinstance(attn_module, MLAAttention):
+             cache_sparse_sfa_c8 = False
+             cache_sparse_sfa_turboquant = False
+-            if getattr(attn_module.impl, "fa_quant_layer", False):
++            cache_qfm_c8 = getattr(attn_module.impl, "use_qfm", False)
++            if cache_qfm_c8:
++                head_size, dtype, cache_dtype_str = 576, torch.float8_e4m3fn, "fp8"
++            elif getattr(attn_module.impl, "fa_quant_layer", False):
+                 head_size = attn_module.head_size + attn_module.qk_rope_head_dim
+                 dtype, cache_dtype_str = attn_module.impl.dtype, None
+             elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_turboquant", False)):
+@@ -286,6 +289,7 @@
+                 dtype=dtype,
+                 cache_dtype_str=cache_dtype_str,
+                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
++                cache_qfm_c8=cache_qfm_c8,
+                 store_on_host=enable_sfa(vllm_config) and get_ascend_config().sparse_kv_offload_config.enabled,
+                 cache_sparse_sfa_turboquant=cache_sparse_sfa_turboquant,
+                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
+@@ -341,6 +345,17 @@
+     if mamba_specs:
+         _align_hybrid_attention_page_sizes(kv_cache_spec)
+         common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
++        qfm_block_sizes = [
++            kv_cache_spec[name].block_size
++            for name in attention_layer_names
++            if getattr(kv_cache_spec[name], "cache_qfm_c8", False)
++        ]
++        if qfm_block_sizes:
++            from vllm_ascend.attention.kimi_k3_qfm import align_qfm_page_bytes
++
++            # Every kernel subpage needs an aligned stride. Apply this to the
++            # common pool BEFORE budgeting, never just to an allocated view.
++            common_page_size = align_qfm_page_bytes(common_page_size, qfm_block_sizes)
+         for layer_name in attention_layer_names:
+             spec = kv_cache_spec[layer_name]
+             page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
+@@ -949,6 +964,8 @@
+         return False
+     if not kv_cache_spec.supports_single_raw_backing:
+         return False
++    if kv_cache_spec.cache_qfm_c8:
++        return True
+     if not supports_component_major_mla_pd(vllm_config) or enable_sfa(vllm_config):
+         return False
+ 
+@@ -1672,6 +1689,29 @@
+                 continue
+ 
+             raw_cache = kv_cache_raw_tensors[layer_name]
++            if getattr(kv_cache_spec, "cache_qfm_c8", False):
++                from vllm_ascend.attention.kimi_k3_qfm import cache_view_for_manager
++
++                raw_single = get_single_raw_mla_backing(raw_cache)
++                if raw_single is None:
++                    raise ValueError("QFM requires one raw backing, not a K/V tuple")
++                physical_page = kv_cache_spec.page_size_padded or kv_cache_spec.page_size_bytes
++                kv_caches[layer_name] = cache_view_for_manager(
++                    raw_single, kv_cache_spec.block_size, physical_page, kernel_block_size
++                )
++                # Distinguish two physical pages from a legacy leading K/V
++                # axis in generic COW hooks. This marker owns no extra storage.
++                kv_caches[layer_name]._qfm_fp8_cache = True
++                logger.info_once(
++                    "QFM cache geometry: manager_block=%d kernel_block=%d physical_manager_bytes=%d "
++                    "kernel_stride_bytes=%d kernel_pages=%d",
++                    kv_cache_spec.block_size,
++                    kernel_block_size,
++                    physical_page,
++                    kv_caches[layer_name].stride(0),
++                    kv_caches[layer_name].shape[0],
++                )
++                continue
+             if getattr(kv_cache_spec, "store_on_host", False):
+                 kv_caches[layer_name] = reshape_kv_cache_tensors_for_sparse_kv_offload(
+                     raw_cache,
+--- a/vllm_ascend/worker/v2/model_runner.py
++++ b/vllm_ascend/worker/v2/model_runner.py
+@@ -460,6 +460,7 @@
+             )
+             self._uses_flashmla = any(
+                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
++                or getattr(group.get_metadata_builder(0), "qfm_state", None) is not None
+                 for groups in self.attn_groups
+                 for group in groups
+             )
