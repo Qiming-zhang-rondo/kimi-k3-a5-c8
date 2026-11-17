@@ -51,6 +51,47 @@ def diagnostic_compare(actual, reference, present=None):
     return dict(result, status="COMPARED", metrics=compare_outputs(actual, reference))
 
 
+def diagnostic_signed_error(actual, reference, present=None):
+    """Absolute errors and signed offsets, suitable for log-partitions/weights.
+
+    Relative L2 of a log-partition can hide an additive bias that changes the
+    relative mass of two readers. Keep finite subsets separate from validity.
+    """
+    actual, reference = np.asarray(actual, np.float64), np.asarray(reference, np.float64)
+    if present is not None:
+        actual, reference = actual[np.asarray(present, bool)], reference[np.asarray(present, bool)]
+    result = {"actual": tensor_diagnostic(actual), "reference": tensor_diagnostic(reference)}
+    if actual.shape != reference.shape:
+        return dict(result, status="SHAPE_MISMATCH")
+    finite = np.isfinite(actual) & np.isfinite(reference)
+    delta = actual[finite]-reference[finite]
+    result.update(compared_elements=int(delta.size), excluded_nonfinite_elements=int((~finite).sum()))
+    if not delta.size:
+        return dict(result, status="NO_FINITE_PAIRS")
+    result.update(status="COMPARED" if finite.all() else "PARTIAL_NONFINITE",
+                  max_abs_error=float(np.max(np.abs(delta))), mean_abs_error=float(np.mean(np.abs(delta))),
+                  signed_offset={"min": float(delta.min()), "p01": float(np.quantile(delta,.01)),
+                                 "median": float(np.median(delta)), "mean": float(delta.mean()),
+                                 "p99": float(np.quantile(delta,.99)), "max": float(delta.max()),
+                                 "std": float(delta.std())})
+    return result
+
+
+def diagnostic_merge_log_partitions(left_output, left_lse, right_output, right_lse,
+                                   left_present, right_present):
+    """Untimed FP64 counterfactual only; never replaces a benchmark output."""
+    left_mask, right_mask = (np.asarray(p, bool)[:,None,None] for p in (left_present, right_present))
+    left_output = np.where(left_mask, np.asarray(left_output, np.float64), 0.)
+    right_output = np.where(right_mask, np.asarray(right_output, np.float64), 0.)
+    left_lse = np.where(left_mask, np.asarray(left_lse, np.float64), -np.inf)
+    right_lse = np.where(right_mask, np.asarray(right_lse, np.float64), -np.inf)
+    with np.errstate(invalid="ignore", over="ignore"):
+        combined = np.logaddexp(left_lse, right_lse)
+        left_weight = np.where(left_mask, np.exp(left_lse-combined), 0.)
+        right_weight = np.where(right_mask, np.exp(right_lse-combined), 0.)
+    return left_output*left_weight+right_output*right_weight, right_weight
+
+
 def bf16_subset_state_reference(data, indices, present):
     """FP64 output and log-partition for a named original-BF16 sparse subset.
 
@@ -263,7 +304,7 @@ class NPUWindowCase:
                             "quantizers": {name: identity(getattr(torch_npu,name)) for name in ("npu_dynamic_mx_quant", "npu_dynamic_block_quant")},
                             "c4_format": "E2M1 + E8M0 scale/32; RoPE BF16; raw packed bytes",
                             "c8_format": "FP8 E4M3FN + FP32 scale/128; RoPE BF16 (not INT8 C8)",
-                            "softmax_statistics_contract": "TND MLA [N2=1,T,H] max and sum; natural exponent",
+                            "softmax_statistics_contract": "assumption under test: TND MLA [N2=1,T,H] max/sum; natural logZ=max+ln(sum); --diagnose compares against FP64",
                             "benchmark_limit": "single-layer fixed-input microbenchmark; no model throughput claim"}
         for name in ("cloud-ops-turbo", "cann-ops-transformer", "torch-npu"):
             try:
@@ -481,7 +522,7 @@ class WindowRunner:
         return ((lo.float()*lw+ro.float()*rw)/safe).to(lo.dtype)
 
     def diagnose(self):
-        """Inspect BF16 subset reads/statistics/ring contents outside all timing.
+        """Inspect actual C4/hot readers, statistics and merge outside timing.
 
         Returns (JSON-safe summary, raw NumPy arrays). Nonfinite observations
         are preserved and named, never repaired, clamped or hidden by a
@@ -489,11 +530,14 @@ class WindowRunner:
         """
         c = self.case
         summary = {"window": self.window, "high_precision": self.high_precision,
-                   "scope": "untimed BF16 diagnostics; no fallback or kernel substitution",
+                   "scope": "untimed reader/merge diagnostics; no fallback or kernel substitution",
                    "statistics_array_layout": "normalized [T,H,1]; values unchanged from operator",
-                   "states": {}, "comparisons": {}, "errors": {}}
+                   "assumed_statistics_contract": "natural logZ = returned max + ln(returned sum); checked against FP64, not inferred from finiteness",
+                   "capture": "raw host arrays captured immediately; device states cloned before subsequent reader calls",
+                   "states": {}, "comparisons": {}, "log_partition_errors": {}, "errors": {}}
         arrays, states = {}, {}
         parts = partition_indices(c.indices_cpu, c.positions_cpu, self.window, self.capacity)
+        summary["selected_counts"] = {"old": parts["old_counts"].tolist(), "hot": parts["recent_counts"].tolist()}
         all_present = np.ones(c.rows, dtype=bool)
         references = {}
 
@@ -507,10 +551,16 @@ class WindowRunner:
         def compare(name, actual, reference, present=None):
             summary["comparisons"][name] = diagnostic_compare(actual, reference, present)
 
+        def compare_log_partition(name, actual, reference, present):
+            compare(name, actual, reference, present)
+            summary["log_partition_errors"][name] = diagnostic_signed_error(actual, reference, present)
+            with np.errstate(invalid="ignore"):
+                arrays[name+"_signed_error"] = np.asarray(actual, np.float64)-np.asarray(reference, np.float64)
+
         def capture_state(name, function, present):
             state = function()
-            states[name] = state
             output, maximum, total = (c.host(x) for x in state)
+            states[name] = tuple(x.clone() for x in state)
             arrays[name+"_output"] = output
             arrays[name+"_max"] = maximum
             arrays[name+"_sum"] = total
@@ -531,8 +581,9 @@ class WindowRunner:
             arrays[name+"_output"] = output
             summary["states"][name] = {"output": tensor_diagnostic(output)}
 
-        def make_reference(name, ids, present):
-            reference = bf16_subset_state_reference(c.data, ids, present)
+        def make_reference(name, ids, present, kind="bf16"):
+            data = c.data if kind == "bf16" else dict(c.data, kv=c.decoded_kv(kind))
+            reference = bf16_subset_state_reference(data, ids, present)
             references[name] = reference
             for component, value in reference.items():
                 arrays[name+"_reference_"+component] = value
@@ -546,6 +597,7 @@ class WindowRunner:
         if self.window > 0:
             attempt("hot_reference", lambda: make_reference("hot", parts["recent_global"], parts["recent_present"]))
             attempt("old_reference", lambda: make_reference("old", parts["old"], parts["old_present"]))
+            attempt("old_c4_reference", lambda: make_reference("old_c4", parts["old"], parts["old_present"], "c4"))
             attempt("hot_global_stats_on", lambda: capture_state(
                 "hot_global_stats_on", lambda: c._read("bf16", self.prepared["recent_global"]), parts["recent_present"]))
             attempt("hot_global_stats_off", lambda: capture_output(
@@ -560,6 +612,24 @@ class WindowRunner:
                     lengths=self.ring_lengths, statistics=False)))
             attempt("old_global_stats_on", lambda: capture_state(
                 "old_global_stats_on", lambda: c._read("bf16", self.prepared["old"]), parts["old_present"]))
+            attempt("old_c4_stats_on", lambda: capture_state(
+                "old_c4_stats_on", lambda: c._read("c4", self.prepared["old"]), parts["old_present"]))
+            attempt("old_c4_stats_off", lambda: capture_output(
+                "old_c4_stats_off", lambda: c._read("c4", self.prepared["old"], statistics=False)))
+
+            if self.high_precision == "c8":
+                attempt("hot_c8_reference", lambda: make_reference(
+                    "hot_c8", parts["recent_global"], parts["recent_present"], "c8"))
+                attempt("hot_c8_global_stats_on", lambda: capture_state(
+                    "hot_c8_global_stats_on", lambda: c._read("c8", self.prepared["recent_global"]), parts["recent_present"]))
+                attempt("hot_c8_global_stats_off", lambda: capture_output(
+                    "hot_c8_global_stats_off", lambda: c._read("c8", self.prepared["recent_global"], statistics=False)))
+                attempt("hot_c8_ring_stats_on", lambda: capture_state(
+                    "hot_c8_ring_stats_on", lambda: c._read("c8", self.prepared["recent_ring"],
+                        cache=self.hot_c8, table=self.ring_table, lengths=self.ring_lengths), parts["recent_present"]))
+                attempt("hot_c8_ring_stats_off", lambda: capture_output(
+                    "hot_c8_ring_stats_off", lambda: c._read("c8", self.prepared["recent_ring"],
+                        cache=self.hot_c8, table=self.ring_table, lengths=self.ring_lengths, statistics=False)))
 
             def check_ring_contents():
                 ring_kv, ring_rope = c.host(self.hot_kv), c.host(self.hot_rope)
@@ -590,6 +660,33 @@ class WindowRunner:
                     "latent": diagnostic_compare(observed_kv, original_kv)}
             attempt("ring_contents", check_ring_contents)
 
+            if self.high_precision == "c8":
+                def check_c8_ring_contents():
+                    ring_bytes = c.bytes_host(self.hot_c8)
+                    observed, expected, locations = [], [], []
+                    for row, (b, r) in enumerate(c.mapping):
+                        count = int(parts["recent_counts"][row])
+                        for position in parts["recent_global"][row, 0, :count]:
+                            slot = int(position) % self.capacity
+                            page, offset = int(self.ring_table_cpu[b,slot//c.page]), slot%c.page
+                            observed.append(ring_bytes[page,offset,0])
+                            expected.append(c.c8_logical[b,position,0])
+                            locations.append((int(b), int(r), int(position), slot))
+                    arrays["c8_ring_checked_locations_b_q_global_slot"] = np.asarray(locations,np.int64).reshape(-1,4)
+                    if not locations:
+                        summary["c8_ring_contents"] = {"status": "NO_SELECTED_RECENT_TOKENS"}
+                        return
+                    observed, expected = np.stack(observed), np.stack(expected)
+                    arrays["c8_ring_selected_packed_bytes_observed"] = observed
+                    arrays["c8_ring_selected_packed_bytes_expected"] = expected
+                    summary["c8_ring_contents"] = {
+                        "checked_entries": len(locations), "packed_bytes_exact_match": bool(np.array_equal(observed,expected)),
+                        "different_bytes": int(np.count_nonzero(observed != expected))}
+                attempt("c8_ring_contents", check_c8_ring_contents)
+                summary["ring_contents_role"] = "BF16 control ring; actual C8 ring is checked separately in c8_ring_contents"
+            else:
+                summary["ring_contents_role"] = "actual BF16 hot ring"
+
             def compare_full_bf16_split():
                 old = self._masked(states["old_global_stats_on"], self.prepared["old_present"])
                 hot = self._masked(states["hot_global_stats_on"], self.prepared["recent_present"])
@@ -598,25 +695,81 @@ class WindowRunner:
                 compare("full_bf16_split_global_vs_unsplit", merged, arrays["full_bf16_stats_off_output"])
             attempt("full_bf16_split_global", compare_full_bf16_split)
 
+            def inspect_mixed_merge():
+                hot_name = "hot_ring_stats_on" if self.high_precision == "bf16" else "hot_c8_ring_stats_on"
+                hot_ref_name = "hot" if self.high_precision == "bf16" else "hot_c8"
+                old_ref, hot_ref = references["old_c4"], references[hot_ref_name]
+                old_present, hot_present = parts["old_present"], parts["recent_present"]
+                old_output, hot_output = arrays["old_c4_stats_on_output"], arrays[hot_name+"_output"]
+                old_lse, hot_lse = arrays["old_c4_stats_on_lse"], arrays[hot_name+"_lse"]
+                def merge(lo, lm, ro, rm):
+                    return diagnostic_merge_log_partitions(lo,lm,ro,rm,old_present,hot_present)
+
+                reference, reference_mass = merge(old_ref["output"],old_ref["lse"],hot_ref["output"],hot_ref["lse"])
+                observed, observed_mass = merge(old_output,old_lse,hot_output,hot_lse)
+                corrected_stats, _ = merge(old_output,old_ref["lse"],hot_output,hot_ref["lse"])
+                corrected_outputs, _ = merge(old_ref["output"],old_lse,hot_ref["output"],hot_lse)
+                device = c.host(self._merge(
+                    self._masked(states["old_c4_stats_on"], self.prepared["old_present"]),
+                    self._masked(states[hot_name], self.prepared["recent_present"])))
+                arrays.update(mixed_matching_reference_output=reference,
+                              mixed_host_observed_statistics_output=observed,
+                              mixed_device_captured_states_output=device,
+                              mixed_actual_outputs_mathematical_logz_output=corrected_stats,
+                              mixed_mathematical_outputs_observed_logz_output=corrected_outputs,
+                              mixed_observed_hot_mass=observed_mass,
+                              mixed_mathematical_hot_mass=reference_mass)
+                compare("mixed_host_vs_device_merge", observed, device)
+                compare("mixed_device_vs_matching_reference", device, reference)
+                compare("mixed_host_vs_matching_reference", observed, reference)
+                compare("mixed_actual_outputs_mathematical_logz_vs_reference", corrected_stats, reference)
+                compare("mixed_mathematical_outputs_observed_logz_vs_reference", corrected_outputs, reference)
+                summary["hot_mass_error"] = diagnostic_signed_error(observed_mass, reference_mass)
+                summary["mixed_merge"] = {
+                    "old_reader": "c4", "hot_reader": self.high_precision,
+                    "actual_old_state": "old_c4_stats_on", "actual_hot_state": hot_name,
+                    "counterfactuals": "diagnosis only; mathematical values never replace benchmark outputs",
+                    "observed_hot_mass": tensor_diagnostic(observed_mass),
+                    "mathematical_hot_mass": tensor_diagnostic(reference_mass)}
+                with np.errstate(invalid="ignore"):
+                    observed_ratio = hot_lse-old_lse
+                    reference_ratio = hot_ref["lse"]-old_ref["lse"]
+                arrays["mixed_observed_log_hot_to_old_mass_ratio"] = observed_ratio
+                arrays["mixed_mathematical_log_hot_to_old_mass_ratio"] = reference_ratio
+                summary["log_hot_to_old_mass_ratio_error"] = diagnostic_signed_error(
+                    observed_ratio, reference_ratio, old_present & hot_present)
+            attempt("mixed_merge", inspect_mixed_merge)
+
         for state_name, subset, present in (
             ("full_bf16_stats_on", "full", all_present),
             ("hot_global_stats_on", "hot", parts["recent_present"]),
             ("hot_ring_stats_on", "hot", parts["recent_present"]),
-            ("old_global_stats_on", "old", parts["old_present"])):
+            ("old_global_stats_on", "old", parts["old_present"]),
+            ("old_c4_stats_on", "old_c4", parts["old_present"]),
+            ("hot_c8_global_stats_on", "hot_c8", parts["recent_present"]),
+            ("hot_c8_ring_stats_on", "hot_c8", parts["recent_present"])):
             if state_name+"_output" in arrays and subset in references:
                 compare(state_name+"_output_vs_reference", arrays[state_name+"_output"], references[subset]["output"], present)
-                compare(state_name+"_lse_vs_reference", arrays[state_name+"_lse"], references[subset]["lse"], present)
+                compare_log_partition(state_name+"_lse_vs_reference", arrays[state_name+"_lse"], references[subset]["lse"], present)
         for left, right, present in (
             ("full_bf16_stats_on", "full_bf16_stats_off", all_present),
             ("hot_global_stats_on", "hot_global_stats_off", parts["recent_present"]),
             ("hot_ring_stats_on", "hot_ring_stats_off", parts["recent_present"]),
             ("hot_ring_stats_on", "hot_global_stats_on", parts["recent_present"]),
-            ("hot_ring_stats_off", "hot_global_stats_off", parts["recent_present"])):
+            ("hot_ring_stats_off", "hot_global_stats_off", parts["recent_present"]),
+            ("old_c4_stats_on", "old_c4_stats_off", parts["old_present"]),
+            ("hot_c8_global_stats_on", "hot_c8_global_stats_off", parts["recent_present"]),
+            ("hot_c8_ring_stats_on", "hot_c8_ring_stats_off", parts["recent_present"]),
+            ("hot_c8_ring_stats_on", "hot_c8_global_stats_on", parts["recent_present"]),
+            ("hot_c8_ring_stats_off", "hot_c8_global_stats_off", parts["recent_present"])):
             if left+"_output" in arrays and right+"_output" in arrays:
                 compare(left+"_vs_"+right, arrays[left+"_output"], arrays[right+"_output"], present)
         if "hot_ring_stats_on_lse" in arrays and "hot_global_stats_on_lse" in arrays:
-            compare("hot_ring_vs_global_lse", arrays["hot_ring_stats_on_lse"],
+            compare_log_partition("hot_ring_vs_global_lse", arrays["hot_ring_stats_on_lse"],
                     arrays["hot_global_stats_on_lse"], parts["recent_present"])
+        if "hot_c8_ring_stats_on_lse" in arrays and "hot_c8_global_stats_on_lse" in arrays:
+            compare_log_partition("hot_c8_ring_vs_global_lse", arrays["hot_c8_ring_stats_on_lse"],
+                    arrays["hot_c8_global_stats_on_lse"], parts["recent_present"])
         summary["status"] = "DIAGNOSTICS_CAPTURED" if not summary["errors"] else "DIAGNOSTICS_PARTIAL"
         return summary, arrays
 

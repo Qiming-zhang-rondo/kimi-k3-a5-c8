@@ -22,7 +22,7 @@ from kv_window_common import (attention_reference, compare_outputs, load_case,
                               window_selection_stats)
 
 
-VERSION = "main-kv-window-a5-v2-diagnostics"
+VERSION = "main-kv-window-a5-v3-merge-diagnostics"
 
 
 def integers(value, minimum=0):
@@ -206,6 +206,16 @@ def run_case(data, args, directory, backend_class=None, bench=None):
                         details, diagnostic_arrays = runner.diagnose()
                         item["diagnostics"] = details
                         arrays.update({name+"_diagnostic_"+k: v for k,v in diagnostic_arrays.items()})
+                        print(f"    diagnostics: {details.get('status', 'UNKNOWN')}", flush=True)
+                        for key in ("mixed_host_vs_device_merge",
+                                    "mixed_actual_outputs_mathematical_logz_vs_reference",
+                                    "mixed_mathematical_outputs_observed_logz_vs_reference"):
+                            metric = details.get("comparisons", {}).get(key, {})
+                            value = metric.get("metrics", {}).get("relative_l2")
+                            if value is not None:
+                                print(f"    {key}: relative L2 = {value:.6g}", flush=True)
+                        for key in details.get("errors", {}):
+                            print(f"    diagnostic error: {key}; see results.json", flush=True)
                     except Exception:
                         item["diagnostics"] = {"status": "ERROR", "traceback": traceback.format_exc()}
                 report["windows"].append(item)

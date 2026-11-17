@@ -1,8 +1,43 @@
 Main MLA KV recent-precision experiment for Ascend A5
 ===================================================
 
-V2 diagnostic update
-  This release fixes error reporting/evidence preservation. It DOES NOT claim
+V3 merge/statistics investigation
+  This release adds evidence for the reported mixed C4/BF16 discrepancy.
+  The timed reader and merge implementations are unchanged: no empirical
+  rescaling, inferred log base, fallback, or reference output is substituted.
+  A finite max/sum pair alone does not prove a correct softmax partition.
+  Merge requires each reader's max + ln(sum) to describe the same logZ domain.
+  Different stabilizing maxima are harmless if their matching sums preserve
+  logZ. Statistics errors must be measured as absolute logZ differences too;
+  relative L2 of LSE can obscure an additive bias that changes segment weights.
+
+  Run both actual hot reader types together, outside performance timing:
+    python test_kv_window_a5.py --keys 32768 --queries 4 \
+      --windows 128,512 --hot-dtypes bf16,c8 --timing none --diagnose
+
+  V2's additional diagnostics always used BF16 readers, including when the
+  measured hot dtype was C8. V3 adds the actual C4 old segment and actual hot
+  BF16/C8 global/ring segments, with matching dequantized mathematical states.
+  Counterfactual merges use mathematical segment logZ with observed segment
+  outputs (and vice versa), strictly as untimed diagnostics. They do not repair
+  the measured output and must not be reported as optimized operator accuracy.
+  Compare the host merge and device merge, per-segment output and logZ errors,
+  and observed versus mathematical hot softmax mass to locate the discrepancy.
+  Raw per-row/per-head arrays remain available in outputs.npz.
+  Key comparisons (all diagnostic-only):
+    mixed_host_vs_device_merge
+    mixed_actual_outputs_mathematical_logz_vs_reference
+    mixed_mathematical_outputs_observed_logz_vs_reference
+  If observed segment outputs merged with mathematical LSE recover the normal
+  numerical error while the reverse counterfactual retains the large error,
+  statistics/relative segment mass are implicated. This is evidence to inspect
+  the installed binary's contract, not permission to fit a correction constant.
+  Accurate unsplit reads alone do not prove padded hot-subset reads correct.
+  A common additive LSE offset cancels in same-reader split controls, so those
+  controls cannot independently establish cross-reader statistics compatibility.
+
+V2 evidence-preservation update (retained)
+  V2 fixed error reporting/evidence preservation. It DID NOT claim
   to fix the reported BF16 mixed-window numerical failure on A5.
   NaN in an observed kernel output used as a comparison baseline is now named
   explicitly; it is not reported as a generic mathematical-reference NaN.
@@ -14,7 +49,7 @@ V2 diagnostic update
     python test_kv_window_a5.py --keys 32768 --queries 4 \
       --windows 128,512 --hot-dtypes bf16 --timing none --diagnose
 
-  Per-window diagnostics compare:
+  Retained BF16 control diagnostics compare:
     * full BF16 output with softmax-statistics return on/off;
     * the same hot subset read from global and ring caches, stats on/off;
     * individual outputs and LSE against a named FP64 subset reference;
