@@ -15,10 +15,77 @@ import platform
 import statistics
 import sys
 import time
+import traceback
 
 import numpy as np
 
-from kv_window_common import dequantize_mxfp4, flatten_queries, paged_array, query_positions, row_map, validate_case
+from kv_window_common import compare_outputs, dequantize_mxfp4, flatten_queries, paged_array, query_positions, row_map, validate_case
+
+
+def tensor_diagnostic(value):
+    """JSON-safe finite/range information; retain raw nonfinites in NPZ only."""
+    value = np.asarray(value)
+    finite = np.isfinite(value)
+    return {"shape": list(value.shape), "finite_count": int(finite.sum()),
+            "nonfinite_count": int((~finite).sum()),
+            "nan_count": int(np.isnan(value).sum()),
+            "positive_inf_count": int(np.isposinf(value).sum()),
+            "negative_inf_count": int(np.isneginf(value).sum()),
+            "finite_min": float(value[finite].min()) if finite.any() else None,
+            "finite_max": float(value[finite].max()) if finite.any() else None}
+
+
+def diagnostic_compare(actual, reference, present=None):
+    """A diagnostic comparison never mislabels a nonfinite observed baseline."""
+    actual, reference = np.asarray(actual), np.asarray(reference)
+    if present is not None:
+        present = np.asarray(present, dtype=bool)
+        actual, reference = actual[present], reference[present]
+    result = {"actual": tensor_diagnostic(actual), "reference": tensor_diagnostic(reference)}
+    if actual.shape != reference.shape:
+        return dict(result, status="SHAPE_MISMATCH")
+    if actual.shape[0] == 0:
+        return dict(result, status="NO_NONEMPTY_ROWS")
+    if not np.isfinite(actual).all() or not np.isfinite(reference).all():
+        return dict(result, status="NONFINITE_INPUT_TO_COMPARISON")
+    return dict(result, status="COMPARED", metrics=compare_outputs(actual, reference))
+
+
+def bf16_subset_state_reference(data, indices, present):
+    """FP64 output and log-partition for a named original-BF16 sparse subset.
+
+    The maximum/sum decomposition is diagnostic: different kernels may choose
+    different stabilizing maxima, but m+log(sum) must represent the same LSE.
+    Empty rows have (output=0, max=-inf, sum=0, LSE=-inf).
+    """
+    mapping = row_map(data)
+    indices = np.asarray(indices)
+    present = np.asarray(present, dtype=bool)
+    if indices.shape[:2] != (len(mapping), 1) or present.shape != (len(mapping),):
+        raise ValueError("Subset reference expects [T,1,S] indices and [T] presence")
+    heads, dim = data["q_nope"].shape[2:]
+    output = np.zeros((len(mapping), heads, dim), np.float64)
+    maximum = np.full((len(mapping), heads, 1), -np.inf, np.float64)
+    total = np.zeros_like(maximum)
+    lse = np.full_like(maximum, -np.inf)
+    for row, (b, r) in enumerate(mapping):
+        if not present[row]:
+            continue
+        ids = indices[row, 0]
+        ids = ids[ids >= 0]
+        if not len(ids) or np.any(ids >= data["k_lengths"][b]):
+            raise ValueError("Nonempty subset contains missing or out-of-range indices")
+        values = data["kv"][b, ids, 0].astype(np.float64)
+        score = data["q_nope"][b, r].astype(np.float64) @ values.T
+        if data["q_rope"].shape[-1]:
+            score += data["q_rope"][b, r].astype(np.float64) @ data["k_rope"][b, ids, 0].astype(np.float64).T
+        score *= data["scale"]
+        maximum[row] = score.max(axis=-1, keepdims=True)
+        weights = np.exp(score-maximum[row])
+        total[row] = weights.sum(axis=-1, keepdims=True)
+        output[row] = (weights @ values)/total[row]
+        lse[row] = maximum[row]+np.log(total[row])
+    return dict(output=output, maximum=maximum, total=total, lse=lse)
 
 
 def identity(function):
@@ -412,6 +479,146 @@ class WindowRunner:
         denominator = lw+rw
         safe = t.where(denominator>0,denominator,t.ones_like(denominator))
         return ((lo.float()*lw+ro.float()*rw)/safe).to(lo.dtype)
+
+    def diagnose(self):
+        """Inspect BF16 subset reads/statistics/ring contents outside all timing.
+
+        Returns (JSON-safe summary, raw NumPy arrays). Nonfinite observations
+        are preserved and named, never repaired, clamped or hidden by a
+        replacement operator. This method does not establish a kernel bug.
+        """
+        c = self.case
+        summary = {"window": self.window, "high_precision": self.high_precision,
+                   "scope": "untimed BF16 diagnostics; no fallback or kernel substitution",
+                   "statistics_array_layout": "normalized [T,H,1]; values unchanged from operator",
+                   "states": {}, "comparisons": {}, "errors": {}}
+        arrays, states = {}, {}
+        parts = partition_indices(c.indices_cpu, c.positions_cpu, self.window, self.capacity)
+        all_present = np.ones(c.rows, dtype=bool)
+        references = {}
+
+        def attempt(name, function):
+            try:
+                return function()
+            except Exception:
+                summary["errors"][name] = traceback.format_exc()
+                return None
+
+        def compare(name, actual, reference, present=None):
+            summary["comparisons"][name] = diagnostic_compare(actual, reference, present)
+
+        def capture_state(name, function, present):
+            state = function()
+            states[name] = state
+            output, maximum, total = (c.host(x) for x in state)
+            arrays[name+"_output"] = output
+            arrays[name+"_max"] = maximum
+            arrays[name+"_sum"] = total
+            valid = np.isfinite(maximum) & np.isfinite(total) & (total > 0)
+            lse = np.full(maximum.shape, np.nan, np.float64)
+            lse[valid] = maximum[valid].astype(np.float64)+np.log(total[valid].astype(np.float64))
+            arrays[name+"_lse"] = lse
+            nonempty = np.broadcast_to(np.asarray(present)[:,None,None], maximum.shape)
+            summary["states"][name] = {
+                "output": tensor_diagnostic(output), "max": tensor_diagnostic(maximum),
+                "sum": tensor_diagnostic(total),
+                "nonempty_invalid_lse_elements": int((nonempty & ~valid).sum()),
+                "nonempty_nonpositive_sum_elements": int((nonempty & (total <= 0)).sum()),
+                "present_rows": np.asarray(present).astype(bool).tolist()}
+
+        def capture_output(name, function):
+            output = c.host(function()[0])
+            arrays[name+"_output"] = output
+            summary["states"][name] = {"output": tensor_diagnostic(output)}
+
+        def make_reference(name, ids, present):
+            reference = bf16_subset_state_reference(c.data, ids, present)
+            references[name] = reference
+            for component, value in reference.items():
+                arrays[name+"_reference_"+component] = value
+
+        attempt("full_reference", lambda: make_reference("full", c.indices_cpu, all_present))
+        attempt("full_bf16_stats_on", lambda: capture_state(
+            "full_bf16_stats_on", lambda: c._read("bf16", c.indices), all_present))
+        attempt("full_bf16_stats_off", lambda: capture_output(
+            "full_bf16_stats_off", lambda: c._read("bf16", c.indices, statistics=False)))
+
+        if self.window > 0:
+            attempt("hot_reference", lambda: make_reference("hot", parts["recent_global"], parts["recent_present"]))
+            attempt("old_reference", lambda: make_reference("old", parts["old"], parts["old_present"]))
+            attempt("hot_global_stats_on", lambda: capture_state(
+                "hot_global_stats_on", lambda: c._read("bf16", self.prepared["recent_global"]), parts["recent_present"]))
+            attempt("hot_global_stats_off", lambda: capture_output(
+                "hot_global_stats_off", lambda: c._read("bf16", self.prepared["recent_global"], statistics=False)))
+            attempt("hot_ring_stats_on", lambda: capture_state(
+                "hot_ring_stats_on", lambda: c._read("bf16", self.prepared["recent_ring"],
+                    cache=self.hot_kv, rope=self.hot_rope, table=self.ring_table, lengths=self.ring_lengths),
+                parts["recent_present"]))
+            attempt("hot_ring_stats_off", lambda: capture_output(
+                "hot_ring_stats_off", lambda: c._read("bf16", self.prepared["recent_ring"],
+                    cache=self.hot_kv, rope=self.hot_rope, table=self.ring_table,
+                    lengths=self.ring_lengths, statistics=False)))
+            attempt("old_global_stats_on", lambda: capture_state(
+                "old_global_stats_on", lambda: c._read("bf16", self.prepared["old"]), parts["old_present"]))
+
+            def check_ring_contents():
+                ring_kv, ring_rope = c.host(self.hot_kv), c.host(self.hot_rope)
+                observed_kv, original_kv, observed_rope, original_rope, locations = [], [], [], [], []
+                for row, (b, r) in enumerate(c.mapping):
+                    count = int(parts["recent_counts"][row])
+                    for position in parts["recent_global"][row, 0, :count]:
+                        slot = int(position) % self.capacity
+                        physical_page = int(self.ring_table_cpu[b, slot//c.page])
+                        offset = slot % c.page
+                        observed_kv.append(ring_kv[physical_page, offset, 0])
+                        original_kv.append(c.data["kv"][b, position, 0])
+                        observed_rope.append(ring_rope[physical_page, offset, 0])
+                        original_rope.append(c.data["k_rope"][b, position, 0])
+                        locations.append((int(b), int(r), int(position), slot))
+                arrays["ring_checked_locations_b_q_global_slot"] = np.asarray(locations, np.int64).reshape(-1,4)
+                if not locations:
+                    summary["ring_contents"] = {"status": "NO_SELECTED_RECENT_TOKENS"}
+                    return
+                observed_kv, original_kv = np.stack(observed_kv), np.stack(original_kv)
+                observed_rope, original_rope = np.stack(observed_rope), np.stack(original_rope)
+                arrays["ring_selected_kv_observed"], arrays["ring_selected_kv_original"] = observed_kv, original_kv
+                arrays["ring_selected_rope_observed"], arrays["ring_selected_rope_original"] = observed_rope, original_rope
+                summary["ring_contents"] = {
+                    "checked_entries": len(locations),
+                    "latent_exact_match": bool(np.array_equal(observed_kv, original_kv)),
+                    "rope_exact_match": bool(np.array_equal(observed_rope, original_rope)),
+                    "latent": diagnostic_compare(observed_kv, original_kv)}
+            attempt("ring_contents", check_ring_contents)
+
+            def compare_full_bf16_split():
+                old = self._masked(states["old_global_stats_on"], self.prepared["old_present"])
+                hot = self._masked(states["hot_global_stats_on"], self.prepared["recent_present"])
+                merged = c.host(self._merge(old, hot))
+                arrays["full_bf16_split_global_output"] = merged
+                compare("full_bf16_split_global_vs_unsplit", merged, arrays["full_bf16_stats_off_output"])
+            attempt("full_bf16_split_global", compare_full_bf16_split)
+
+        for state_name, subset, present in (
+            ("full_bf16_stats_on", "full", all_present),
+            ("hot_global_stats_on", "hot", parts["recent_present"]),
+            ("hot_ring_stats_on", "hot", parts["recent_present"]),
+            ("old_global_stats_on", "old", parts["old_present"])):
+            if state_name+"_output" in arrays and subset in references:
+                compare(state_name+"_output_vs_reference", arrays[state_name+"_output"], references[subset]["output"], present)
+                compare(state_name+"_lse_vs_reference", arrays[state_name+"_lse"], references[subset]["lse"], present)
+        for left, right, present in (
+            ("full_bf16_stats_on", "full_bf16_stats_off", all_present),
+            ("hot_global_stats_on", "hot_global_stats_off", parts["recent_present"]),
+            ("hot_ring_stats_on", "hot_ring_stats_off", parts["recent_present"]),
+            ("hot_ring_stats_on", "hot_global_stats_on", parts["recent_present"]),
+            ("hot_ring_stats_off", "hot_global_stats_off", parts["recent_present"])):
+            if left+"_output" in arrays and right+"_output" in arrays:
+                compare(left+"_vs_"+right, arrays[left+"_output"], arrays[right+"_output"], present)
+        if "hot_ring_stats_on_lse" in arrays and "hot_global_stats_on_lse" in arrays:
+            compare("hot_ring_vs_global_lse", arrays["hot_ring_stats_on_lse"],
+                    arrays["hot_global_stats_on_lse"], parts["recent_present"])
+        summary["status"] = "DIAGNOSTICS_CAPTURED" if not summary["errors"] else "DIAGNOSTICS_PARTIAL"
+        return summary, arrays
 
     def run(self, mode="mixed", dynamic=False, write=False):
         if mode not in ("mixed", "split_c4"):

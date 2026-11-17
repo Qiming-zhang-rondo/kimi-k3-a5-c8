@@ -22,7 +22,7 @@ from kv_window_common import (attention_reference, compare_outputs, load_case,
                               window_selection_stats)
 
 
-VERSION = "main-kv-window-a5-v1"
+VERSION = "main-kv-window-a5-v2-diagnostics"
 
 
 def integers(value, minimum=0):
@@ -39,6 +39,28 @@ def json_write(path, obj):
 def check_metric(metric, limit):
     return bool(metric.get("finite") and metric["relative_l2"] <= limit
                 and metric["max_row_relative_l2"] <= limit)
+
+
+def compare_named(actual, reference, actual_name, reference_name):
+    """Describe both sides before computing metrics; a kernel control is not
+    automatically a mathematical reference. Never discard nonfinite evidence.
+    """
+    actual, reference = np.asarray(actual), np.asarray(reference)
+    if actual.shape != reference.shape:
+        raise ValueError(f"Shape mismatch: {actual_name} {actual.shape}; {reference_name} {reference.shape}")
+    def finite_summary(value):
+        invalid = ~np.isfinite(value)
+        return dict(finite=not bool(invalid.any()), nonfinite_count=int(invalid.sum()),
+                    nan_count=int(np.isnan(value).sum()), positive_inf_count=int(np.isposinf(value).sum()),
+                    negative_inf_count=int(np.isneginf(value).sum()),
+                    first_nonfinite_indices=np.argwhere(invalid)[:8].tolist())
+    a, r = finite_summary(actual), finite_summary(reference)
+    labels = dict(actual_name=actual_name, reference_name=reference_name,
+                  actual_finiteness=a, reference_finiteness=r)
+    if not a["finite"] or not r["finite"]:
+        return dict(finite=False, nonfinite_count=a["nonfinite_count"], rows=[],
+                    invalid_reason="nonfinite_comparison_input", **labels)
+    return dict(compare_outputs(actual, reference), **labels)
 
 
 def time_call(fn, args, bench):
@@ -63,7 +85,8 @@ def summarize(report, directory):
         for mode in ("eager", "graph"):
             read = event_median(item, "timing_prepared_read", mode)
             pipeline = event_median(item, "timing_write_read", mode)
-            rows.append(dict(path=name, timing=mode, relative_l2=item.get("vs_bf16_operator", {}).get("relative_l2"),
+            rows.append(dict(path=name, status="MEASURED" if item.get("control_passed") else "CONTROL_FAILED", timing=mode,
+                             relative_l2=item.get("vs_bf16_operator", {}).get("relative_l2"),
                              read_us=read, write_partition_read_us=pipeline,
                              pipeline_ratio_vs_c4=None, pipeline_ratio_vs_c8=None, extra_ring_bytes=0))
     for item in report["windows"]:
@@ -76,7 +99,7 @@ def summarize(report, directory):
                 base = event_median(report["baselines"].get(kind, {}), "timing_write_read", mode)
                 ratios[kind] = pipeline/base if pipeline is not None and base is not None and base > 0 else None
             item["pipeline_ratios"][mode] = ratios
-            rows.append(dict(path=f"c4+{item['high_precision']}_w{item['window']}", timing=mode,
+            rows.append(dict(path=f"c4+{item['high_precision']}_w{item['window']}", status=item.get("status"), timing=mode,
                              relative_l2=item.get("vs_bf16_operator", {}).get("relative_l2"), read_us=read,
                              write_partition_read_us=pipeline, pipeline_ratio_vs_c4=ratios["c4"],
                              pipeline_ratio_vs_c8=ratios["c8"],
@@ -113,12 +136,12 @@ def run_case(data, args, directory, backend_class=None, bench=None):
         outputs = {kind: npu.host(npu.call(kind)) for kind in ("bf16", "c4", "c8")}
         valid = True
         for kind in ("bf16", "c4", "c8"):
-            matched = compare_outputs(outputs[kind], references[kind])
+            matched = compare_named(outputs[kind], references[kind], f"{kind}_operator", f"{kind}_mathematical_reference")
             updated = npu.host(npu.run(kind, write=True))
             item = dict(kernel_vs_matching_reference=matched,
-                        write_vs_prepared=compare_outputs(updated, outputs[kind]),
-                        vs_bf16_operator=compare_outputs(outputs[kind], outputs["bf16"]),
-                        vs_original_mathematical_reference=compare_outputs(outputs[kind], original_ref))
+                        write_vs_prepared=compare_named(updated, outputs[kind], f"{kind}_write_then_read", f"{kind}_prepared_operator"),
+                        vs_bf16_operator=compare_named(outputs[kind], outputs["bf16"], f"{kind}_operator", "bf16_operator"),
+                        vs_original_mathematical_reference=compare_named(outputs[kind], original_ref, f"{kind}_operator", "original_mathematical_reference"))
             item["control_passed"] = (check_metric(matched, args.kernel_rel_l2_max)
                                       and check_metric(item["write_vs_prepared"], args.split_rel_l2_max))
             valid = valid and item["control_passed"]
@@ -131,20 +154,33 @@ def run_case(data, args, directory, backend_class=None, bench=None):
                 name = f"{hot}_w{window}"
                 print(f"  {name}: accuracy", flush=True)
                 item = dict(window=window, high_precision=hot)
+                runner = None
                 try:
+                    item["stage"] = "prepare"
                     runner = npu.prepare(window, high_precision=hot)
+                    item.update(selection=window_selection_stats(data, window),
+                                partition=runner.partition_summary, memory=runner.memory)
+                    item["stage"] = "prepared_mixed_read"
                     mixed = npu.host(runner.run("mixed"))
+                    arrays[name] = mixed
+                    item["stage"] = "split_c4_control"
                     split = npu.host(runner.run("split_c4"))
+                    arrays[name+"_split_c4"] = split
+                    item["stage"] = "write_partition_read"
                     dynamic = npu.host(runner.run("mixed", dynamic=True, write=True))
+                    arrays[name+"_pipeline"] = dynamic
+                    item["stage"] = "mathematical_reference"
                     reference = attention_reference(data, kv_c4=decoded["c4"], window=window,
                                                     hot_kv=decoded["c8"] if hot == "c8" else None)
-                    item.update(kernel_vs_matching_reference=compare_outputs(mixed, reference),
-                                split_c4_vs_unsplit_c4=compare_outputs(split, outputs["c4"]),
-                                pipeline_vs_prepared=compare_outputs(dynamic, mixed),
-                                vs_bf16_operator=compare_outputs(mixed, outputs["bf16"]),
-                                vs_original_mathematical_reference=compare_outputs(mixed, original_ref),
-                                selection=window_selection_stats(data, window),
-                                partition=runner.partition_summary, memory=runner.memory)
+                    arrays[name+"_mathematical_reference"] = reference
+                    item["stage"] = "comparison"
+                    for metric, a, r, an, rn in (
+                        ("kernel_vs_matching_reference", mixed, reference, name+"_prepared_operator", name+"_mathematical_reference"),
+                        ("split_c4_vs_unsplit_c4", split, outputs["c4"], name+"_split_c4_operator", "c4_unsplit_operator"),
+                        ("pipeline_vs_prepared", dynamic, mixed, name+"_pipeline_operator", name+"_prepared_operator"),
+                        ("vs_bf16_operator", mixed, outputs["bf16"], name+"_prepared_operator", "bf16_operator"),
+                        ("vs_original_mathematical_reference", mixed, original_ref, name+"_prepared_operator", "original_mathematical_reference")):
+                        item[metric] = compare_named(a, r, an, rn)
                     item["control_passed"] = (
                         check_metric(item["kernel_vs_matching_reference"], args.kernel_rel_l2_max)
                         and check_metric(item["split_c4_vs_unsplit_c4"], args.split_rel_l2_max)
@@ -153,7 +189,6 @@ def run_case(data, args, directory, backend_class=None, bench=None):
                     new_error = item["vs_bf16_operator"].get("relative_l2")
                     item["relative_l2_reduction_vs_c4"] = (1-new_error/base_error
                         if base_error is not None and new_error is not None and base_error > 0 else None)
-                    arrays[name], arrays[name+"_split_c4"], arrays[name+"_pipeline"] = mixed, split, dynamic
                     if args.timing != "none" and valid and item["control_passed"]:
                         item["timing_prepared_read"] = time_call(lambda: runner.run("mixed"), args, bench)
                         item["timing_write_partition_read"] = time_call(
@@ -161,8 +196,18 @@ def run_case(data, args, directory, backend_class=None, bench=None):
                     elif args.timing != "none":
                         item["timing_skipped"] = "Matching-reference/control failure"
                     item["status"] = "MEASURED" if item["control_passed"] else "CONTROL_FAILED"
+                    item["stage"] = "completed"
                 except Exception:
                     item.update(status="ERROR", control_passed=False, traceback=traceback.format_exc())
+                # Diagnostic calls are opt-in and never included in benchmark
+                # timing. Preserve raw outputs/stats even when NaN was found.
+                if runner is not None and getattr(args, "diagnose", False):
+                    try:
+                        details, diagnostic_arrays = runner.diagnose()
+                        item["diagnostics"] = details
+                        arrays.update({name+"_diagnostic_"+k: v for k,v in diagnostic_arrays.items()})
+                    except Exception:
+                        item["diagnostics"] = {"status": "ERROR", "traceback": traceback.format_exc()}
                 report["windows"].append(item)
                 json_write(directory/"results.json", report)
                 print(f"  {name}: {item['status']}; relative L2 vs BF16 = "
@@ -210,6 +255,7 @@ def main(argv=None):
                    help="Matching mathematical-reference guard, NOT a C4 quality target")
     p.add_argument("--split-rel-l2-max", type=float, default=0.01)
     p.add_argument("--save-inputs", action="store_true")
+    p.add_argument("--diagnose", action="store_true", help="Record individual reader outputs, softmax statistics and ring/global controls outside timing")
     p.add_argument("--self-test", action="store_true", help="CPU format/reference checks; no NPU claim")
     p.add_argument("--output", default=None)
     args = p.parse_args(argv)

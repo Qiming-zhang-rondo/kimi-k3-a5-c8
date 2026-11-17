@@ -1,6 +1,39 @@
 Main MLA KV recent-precision experiment for Ascend A5
 ===================================================
 
+V2 diagnostic update
+  This release fixes error reporting/evidence preservation. It DOES NOT claim
+  to fix the reported BF16 mixed-window numerical failure on A5.
+  NaN in an observed kernel output used as a comparison baseline is now named
+  explicitly; it is not reported as a generic mathematical-reference NaN.
+  Partial outputs are saved before later comparisons can fail. summary.csv
+  includes the control status, so failed paths are not accepted quality results.
+
+  Targeted untimed investigation, using an already validated operator/toolkit
+  combination (do not recreate a combination that has caused device faults):
+    python test_kv_window_a5.py --keys 32768 --queries 4 \
+      --windows 128,512 --hot-dtypes bf16 --timing none --diagnose
+
+  Per-window diagnostics compare:
+    * full BF16 output with softmax-statistics return on/off;
+    * the same hot subset read from global and ring caches, stats on/off;
+    * individual outputs and LSE against a named FP64 subset reference;
+    * two BF16 global partitions merged vs one unsplit BF16 read;
+    * selected ring latent/RoPE values against the original BF16 values.
+  The raw output/max/sum/LSE arrays, including nonfinites, stay in outputs.npz.
+  These extra calls are opt-in and outside all performance measurements.
+
+  Synthetic selection caveat: the generator deliberately includes the most
+  recent 256 tokens, then samples history. Extending W=256 to512 therefore
+  adds only the selected historical entries that fall in that band; saturation
+  here is not evidence of the optimal window on model-generated TopK.
+
+  Compatibility caveat: a user reported device faults using an operator build
+  labelled 9.1.0 inside a CANN9.2.1 container. We have not reproduced that
+  report or established a version-wide incompatibility. Keep the exact build,
+  toolkit, driver and firmware identities with any fault report; this program
+  neither installs a replacement wheel nor changes the environment.
+
 Goal
   Keep fixed sparse indices and compare full BF16, full C4 (MXFP4), full C8
   (FP8 E4M3, block128), and historical C4 + recent BF16/C8. The recent window

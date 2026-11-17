@@ -240,11 +240,14 @@ def window_selection_stats(data, window):
     """Count selected recent entries; window does not add new selected tokens."""
     data = validate_case(data)
     window = _integer(window, "window")
-    counts = []
+    counts, selected_counts = [], []
     for (b, r), position in zip(row_map(data), query_positions(data)):
         ids = data["indices"][b, r, 0]
         counts.append(int(np.sum((ids >= 0) & (ids >= position - window + 1))))
+        selected_counts.append(int(np.sum(ids >= 0)))
     return {"window": window, "recent_selected_per_row": counts,
+            "selected_per_row": selected_counts,
+            "recent_fraction_of_selected_per_row": [hot/total for hot,total in zip(counts,selected_counts)],
             "recent_selected_mean": float(np.mean(counts)), "recent_selected_min": min(counts), "recent_selected_max": max(counts)}
 
 
