@@ -12,14 +12,14 @@ import tempfile
 import traceback
 import urllib.request
 
-PAYLOAD_COMMIT = "db60dd57b7e9af0437d2f3b9fa819d8f2baa1341"
+PAYLOAD_COMMIT = "d2fcd69362788775b59a61b011cb8de712760d41"
 REPOSITORY = "Qiming-zhang-rondo/kimi-k3-a5-c8"
 FILES = {
-    "test_kv_window_a5.py": "28bbd2b39faf46d804c112be7b86a4f29493c62aafa3fdf26e366eda8c689875",
-    "kv_window_backend.py": "d5fa4b074080946fba4755446d8d46d24f4fef525431092d36e7bf055512c03d",
+    "test_kv_window_a5.py": "2473340ac4222331a46ca4c6d3ec586363baf4a3458eeb160cc06d2d5efcc790",
+    "kv_window_backend.py": "20c33c19612da73484ea7c57e05b2a78eba68e7bc886db6daf0997976a530bc4",
     "kv_window_common.py": "7357ca29ee22f71445b1d9a3d5eddf8c2d6c0a0dab134b0e2e4d42c36e3dd724",
     "kv_window_capture.py": "b872f9a378a22a27c3ff970426c33718d3c20958724ee018d383b4bb51216bb7",
-    "KV_WINDOW_README.txt": "595acd1751ed55e96389bd95fc7084fe7967a3fc51d04d9d278a9a4efee20160"
+    "KV_WINDOW_README.txt": "944065efa08858fb8728fb4a5a08f2bb3cde2606d89c78581179ec420e40d309"
 }
 
 
