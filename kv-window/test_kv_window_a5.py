@@ -22,7 +22,7 @@ from kv_window_common import (attention_reference, compare_outputs, load_case,
                               window_selection_stats)
 
 
-VERSION = "main-kv-window-a5-v3-merge-diagnostics"
+VERSION = "main-kv-window-a5-v4-compact-bf16"
 
 
 def integers(value, minimum=0):
@@ -86,11 +86,17 @@ def summarize(report, directory):
             read = event_median(item, "timing_prepared_read", mode)
             pipeline = event_median(item, "timing_write_read", mode)
             rows.append(dict(path=name, status="MEASURED" if item.get("control_passed") else "CONTROL_FAILED", timing=mode,
+                             bf16_indices=report["bf16_indices"],
+                             attention_calls_per_read=(report.get("environment", {}).get("bf16_full_read_plan", {}).get("operator_calls")
+                                                       if name == "bf16" else 1),
                              relative_l2=item.get("vs_bf16_operator", {}).get("relative_l2"),
                              read_us=read, write_partition_read_us=pipeline,
                              pipeline_ratio_vs_c4=None, pipeline_ratio_vs_c8=None, extra_ring_bytes=0))
     for item in report["windows"]:
         item["pipeline_ratios"] = {}
+        parts = item.get("partition", {})
+        calls = (parts["old_attention_calls"] + parts["recent_attention_calls"]
+                 if "old_attention_calls" in parts and "recent_attention_calls" in parts else None)
         for mode in ("eager", "graph"):
             read = event_median(item, "timing_prepared_read", mode)
             pipeline = event_median(item, "timing_write_partition_read", mode)
@@ -100,6 +106,8 @@ def summarize(report, directory):
                 ratios[kind] = pipeline/base if pipeline is not None and base is not None and base > 0 else None
             item["pipeline_ratios"][mode] = ratios
             rows.append(dict(path=f"c4+{item['high_precision']}_w{item['window']}", status=item.get("status"), timing=mode,
+                             bf16_indices=report["bf16_indices"],
+                             attention_calls_per_read=calls,
                              relative_l2=item.get("vs_bf16_operator", {}).get("relative_l2"), read_us=read,
                              write_partition_read_us=pipeline, pipeline_ratio_vs_c4=ratios["c4"],
                              pipeline_ratio_vs_c8=ratios["c8"],
@@ -119,6 +127,7 @@ def run_case(data, args, directory, backend_class=None, bench=None):
     data = validate_case(data)
     directory.mkdir()
     report = dict(label=data["label"], source_kind=data["source_kind"],
+                  bf16_indices=getattr(args, "bf16_indices", "compact"),
                   selection_source=data["selection_source"], scale=data["scale"],
                   shapes={k: list(data[k].shape) for k in ("q_nope", "q_rope", "kv", "indices")},
                   q_lengths=data["q_lengths"].tolist(), k_lengths=data["k_lengths"].tolist(),
@@ -127,7 +136,7 @@ def run_case(data, args, directory, backend_class=None, bench=None):
         save_case(directory/"input.npz", data)
     arrays = {}
     try:
-        npu = backend_class(data, device=args.device)
+        npu = backend_class(data, device=args.device, bf16_indices=report["bf16_indices"])
         report["environment"] = npu.environment
         original_ref = attention_reference(data)
         arrays["bf16_mathematical_reference"] = original_ref
@@ -255,6 +264,8 @@ def main(argv=None):
     p.add_argument("--page", type=int, default=128)
     p.add_argument("--windows", type=integers, default=[0, 128, 256, 512])
     p.add_argument("--hot-dtypes", default="bf16,c8")
+    p.add_argument("--bf16-indices", choices=("compact", "padded"), default="compact",
+                   help="compact groups rows by exact valid count to avoid BF16 -1-tail defects; padded explicitly reproduces the original calls")
     p.add_argument("--device", default="npu:0")
     p.add_argument("--seed", type=int, default=20261117)
     p.add_argument("--timing", default="eager", help="eager, graph, eager,graph, or none")
@@ -289,7 +300,7 @@ def main(argv=None):
     root.mkdir(parents=True, exist_ok=False)
     report = dict(version=VERSION, args=vars(args), status="RUNNING", cases=[],
                   scope="single-attention main KV; fixed indices; no QLI execution or full-model accuracy/throughput",
-                  timing_scope="steady-state repeated positions; excludes model projections/RMSNorm/RoPE/QLI, scheduler and distributed collectives",
+                  timing_scope="steady-state fixed selection/count schedule; compact BF16 gathers, operator calls and result assembly included; group planning excluded; excludes model projections/RMSNorm/RoPE/QLI, scheduler and distributed collectives",
                   quality_note="High-precision windows do not guarantee monotonic output error or task-score improvement",
                   scripts={f.name: hashlib.sha256(f.read_bytes()).hexdigest()
                            for f in Path(__file__).parent.glob("*kv_window*.py")})
@@ -301,7 +312,7 @@ def main(argv=None):
                                     topk=args.topk, page=args.page, seed=args.seed)
                      for k in args.keys for q in args.queries)
         for i, data in enumerate(cases):
-            print(f"[{i}] {data['label']} ({data['source_kind']})", flush=True)
+            print(f"[{i}] {data['label']} ({data['source_kind']}); BF16 indices: {args.bf16_indices}", flush=True)
             item = run_case(data, args, root/f"case_{i:03d}")
             report["cases"].append(item)
             json_write(root/"results.json", report)

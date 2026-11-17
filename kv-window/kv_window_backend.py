@@ -171,6 +171,56 @@ def partition_indices(indices, positions, window, capacity):
             "old_counts": old.sum(axis=(1, 2)), "recent_counts": hot.sum(axis=(1, 2))}
 
 
+class CompactBF16Plan:
+    """Fixed-count call schedule built on CPU before timing/graph capture.
+
+    Runtime indices are still read on device, including device-partitioned
+    indices. Only the count/group schedule is fixed for this microbenchmark.
+    A group presents each query as its own batch while retaining the original
+    batch's page table and logical KV length. No KV cache is copied/remapped.
+    """
+    def __init__(self, case, indices, counts=None, label="full"):
+        indices = np.asarray(indices)
+        if indices.ndim != 3 or indices.shape[:2] != (case.rows, 1) or indices.shape[-1] < 1:
+            raise ValueError("Compact BF16 indices must have shape [T,1,S]")
+        actual = np.sum(indices >= 0, axis=(1,2))
+        counts = actual if counts is None else np.asarray(counts)
+        if counts.shape != (case.rows,) or not np.issubdtype(counts.dtype, np.integer):
+            raise ValueError("Compact BF16 counts must be integer [T]")
+        if np.any(counts < 0) or np.any(counts > indices.shape[-1]):
+            raise ValueError("Compact BF16 count exceeds index capacity")
+        for row, count in enumerate(counts):
+            values = indices[row,0]
+            if count:
+                if np.any(values[:count] < 0) or np.any(values[count:] != -1):
+                    raise ValueError("Compact BF16 requires a valid prefix and -1 tail")
+            elif not (np.all(values == -1) or (values[0] == 0 and np.all(values[1:] == -1))):
+                raise ValueError("Empty BF16 rows may contain only a safe dummy or -1 padding")
+        self.rows, self.capacity, self.label = case.rows, indices.shape[-1], label
+        self.counts = counts.astype(np.int64, copy=True)
+        positive = sorted(int(n) for n in np.unique(counts) if n > 0)
+        self.uniform_count = positive[0] if len(positive) == 1 and np.all(counts > 0) else None
+        self.groups = []
+        # Fast uniform calls preserve the original query/batch metadata.
+        if self.uniform_count is None:
+            for count in positive:
+                rows = np.flatnonzero(counts == count).astype(np.int64)
+                batches = np.asarray([case.mapping[int(r)][0] for r in rows], np.int64)
+                self.groups.append(dict(count=count, size=len(rows),
+                    rows=case.tensor(rows, case.torch.int64),
+                    batches=case.tensor(batches, case.torch.int64),
+                    cu=case.tensor(np.arange(1,len(rows)+1,dtype=np.int32),case.torch.int32)))
+        policy = case.bf16_indices
+        self.summary = {
+            "label": label, "policy": policy, "valid_counts": self.counts.tolist(),
+            "source_capacity": self.capacity, "compact_widths": positive,
+            "operator_calls": len(positive) if policy == "compact" else 1,
+            "empty_rows": int(np.count_nonzero(counts == 0)),
+            "schedule": ("original_padded_call" if policy == "padded" else
+                         "uniform_batched_call" if self.uniform_count is not None else "equal_count_groups"),
+            "scope": "fixed-input count schedule prepared outside timing; runtime gathers/copies/scatters are timed"}
+
+
 def benchmark(call, warmup=20, iterations=100, repeats=5, graph=False):
     """Device event and synchronized host latency, including every op in call.
 
@@ -230,7 +280,10 @@ def benchmark(call, warmup=20, iterations=100, repeats=5, graph=False):
 
 class NPUWindowCase:
     """One fixed-query, fixed-TopK MLA case with three real cache readers."""
-    def __init__(self, data, device="npu:0"):
+    def __init__(self, data, device="npu:0", bf16_indices="compact"):
+        if bf16_indices not in ("compact", "padded"):
+            raise ValueError("bf16_indices must be compact or padded")
+        self.bf16_indices = bf16_indices
         self.data = validate_case(data)
         import torch
         import torch_npu
@@ -270,6 +323,7 @@ class NPUWindowCase:
         self.table_cpu = np.random.default_rng(int(data.get("seed", 0))).permutation(self.batch*self.pages_per_batch).astype(np.int32).reshape(self.batch, self.pages_per_batch)
         self.table = self.tensor(self.table_cpu, torch.int32)
         self.one_scale = torch.ones(1, dtype=torch.float32, device=device)
+        self.full_bf16_plan = self.make_bf16_plan(self.indices_cpu, label="full")
         self.kv = self.tensor(paged_array(data["kv"], self.page, self.table_cpu), torch.bfloat16)
         self.rope = self.tensor(paged_array(data["k_rope"], self.page, self.table_cpu), torch.bfloat16)
         logical_kv = self.tensor(data["kv"], torch.bfloat16)
@@ -305,6 +359,9 @@ class NPUWindowCase:
                             "c4_format": "E2M1 + E8M0 scale/32; RoPE BF16; raw packed bytes",
                             "c8_format": "FP8 E4M3FN + FP32 scale/128; RoPE BF16 (not INT8 C8)",
                             "softmax_statistics_contract": "assumption under test: TND MLA [N2=1,T,H] max/sum; natural logZ=max+ln(sum); --diagnose compares against FP64",
+                            "bf16_indices": self.bf16_indices,
+                            "bf16_full_read_plan": self.full_bf16_plan.summary,
+                            "bf16_timing_scope": "fixed-input valid-count schedule; device index/query/metadata gathers and output scatter included when groups are needed",
                             "benchmark_limit": "single-layer fixed-input microbenchmark; no model throughput claim"}
         for name in ("cloud-ops-turbo", "cann-ops-transformer", "torch-npu"):
             try:
@@ -350,7 +407,69 @@ class NPUWindowCase:
             raise ValueError(kind)
         return (self._decoded_c4 if kind == "c4" else self._decoded_c8).copy()
 
-    def _read(self, kind, indices, *, cache=None, rope=None, table=None, lengths=None, statistics=True):
+    def make_bf16_plan(self, indices, counts=None, label="full"):
+        return CompactBF16Plan(self, indices, counts, label)
+
+    def _normalize_read_result(self, kind, result, rows, statistics):
+        if not statistics:
+            output = result[0] if isinstance(result,(tuple,list)) else result
+            if tuple(output.shape) != (rows,self.heads,self.dim):
+                raise RuntimeError(f"{kind} output shape {tuple(output.shape)} != {(rows,self.heads,self.dim)}")
+            self.raw_result_shapes[kind+"_stats_off"] = [list(output.shape)]
+            return output,None,None
+        if not isinstance(result, (tuple, list)) or len(result) != 3:
+            raise RuntimeError(f"{kind} must return (output, softmax_max, softmax_sum); got {type(result)}")
+        output, maximum, total = result
+        self.raw_result_shapes[kind] = [list(x.shape) for x in result]
+        if tuple(output.shape) != (rows,self.heads,self.dim):
+            raise RuntimeError(f"{kind} output shape {tuple(output.shape)} != {(rows,self.heads,self.dim)}")
+        expected = (1,rows,self.heads)
+        if tuple(maximum.shape) != expected or tuple(total.shape) != expected:
+            raise RuntimeError(f"{kind} softmax stats expected MLA [N2,T,H/N2] {expected}, got {tuple(maximum.shape)}, {tuple(total.shape)}; refusing an inferred permutation")
+        return output, maximum.permute(1,0,2).reshape(rows,self.heads,1).float(), total.permute(1,0,2).reshape(rows,self.heads,1).float()
+
+    def _read(self, kind, indices, *, cache=None, rope=None, table=None, lengths=None, statistics=True, bf16_plan=None):
+        if kind == "bf16" and self.bf16_indices == "compact":
+            if bf16_plan is None:
+                if indices is not self.indices:
+                    raise ValueError("Compact BF16 subset reads require a precomputed count plan")
+                bf16_plan = self.full_bf16_plan
+            return self._read_bf16_compact(indices, bf16_plan, cache=cache, rope=rope,
+                                           table=table, lengths=lengths, statistics=statistics)
+        return self._read_padded(kind, indices, cache=cache, rope=rope, table=table,
+                                 lengths=lengths, statistics=statistics)
+
+    def _read_bf16_compact(self, indices, plan, *, cache=None, rope=None, table=None, lengths=None, statistics=True):
+        if plan.rows != self.rows or tuple(indices.shape[:2]) != (self.rows,1) or indices.shape[-1] != plan.capacity:
+            raise ValueError("Runtime indices do not match the fixed compact BF16 plan")
+        if plan.uniform_count is not None:
+            return self._read_padded("bf16", indices[:,:,:plan.uniform_count].contiguous(),
+                                    cache=cache, rope=rope, table=table, lengths=lengths, statistics=statistics)
+        t = self.torch
+        cache, rope = self.kv if cache is None else cache, self.rope if rope is None else rope
+        table, lengths = self.table if table is None else table, self.lengths if lengths is None else lengths
+        output = t.zeros((self.rows,self.heads,self.dim), dtype=self.q_nope.dtype, device=self.device)
+        maximum = t.full((self.rows,self.heads,1), -float("inf"), dtype=t.float32, device=self.device) if statistics else None
+        total = t.zeros((self.rows,self.heads,1), dtype=t.float32, device=self.device) if statistics else None
+        for group in plan.groups:
+            rows, batches = group["rows"], group["batches"]
+            result = self.ops.cloud_sparse_flash_attention(
+                query=self.q_nope.index_select(0,rows).contiguous(), key=cache, value=cache,
+                query_rope=self.q_rope.index_select(0,rows).contiguous(), key_rope=rope,
+                sparse_indices=indices.index_select(0,rows)[:,:,:group["count"]].contiguous(),
+                block_table=table.index_select(0,batches).contiguous(),
+                actual_seq_lengths_query=group["cu"],
+                actual_seq_lengths_kv=lengths.index_select(0,batches).contiguous(),
+                scale_value=self.scale, sparse_block_size=1, layout_query="TND", layout_kv="PA_BSND",
+                sparse_mode=0, attention_mode=2, return_softmax_lse=statistics)
+            values = self._normalize_read_result("bf16",result,group["size"],statistics)
+            output.index_copy_(0,rows,values[0])
+            if statistics:
+                maximum.index_copy_(0,rows,values[1])
+                total.index_copy_(0,rows,values[2])
+        return output,maximum,total
+
+    def _read_padded(self, kind, indices, *, cache=None, rope=None, table=None, lengths=None, statistics=True):
         t = self.torch
         table = self.table if table is None else table
         lengths = self.lengths if lengths is None else lengths
@@ -369,22 +488,7 @@ class NPUWindowCase:
             result = self.ops.cloud_kv_quant_sparse_flash_attention(query=self.query, key=cache, value=cache,
                          key_dequant_scale=scale, value_dequant_scale=scale, key_quant_mode=2, value_quant_mode=2,
                          quant_scale_repo_mode=1, tile_size=128, rope_head_dim=self.rope_dim, **common)
-        if not statistics:
-            output = result[0] if isinstance(result,(tuple,list)) else result
-            if tuple(output.shape) != (self.rows,self.heads,self.dim):
-                raise RuntimeError(f"{kind} output shape {tuple(output.shape)} != {(self.rows,self.heads,self.dim)}")
-            self.raw_result_shapes[kind+"_stats_off"] = [list(output.shape)]
-            return output,None,None
-        if not isinstance(result, (tuple, list)) or len(result) != 3:
-            raise RuntimeError(f"{kind} must return (output, softmax_max, softmax_sum); got {type(result)}")
-        output, maximum, total = result
-        self.raw_result_shapes[kind] = [list(x.shape) for x in result]
-        if tuple(output.shape) != (self.rows,self.heads,self.dim):
-            raise RuntimeError(f"{kind} output shape {tuple(output.shape)} != {(self.rows,self.heads,self.dim)}")
-        expected = (1,self.rows,self.heads)
-        if tuple(maximum.shape) != expected or tuple(total.shape) != expected:
-            raise RuntimeError(f"{kind} softmax stats expected MLA [N2,T,H/N2] {expected}, got {tuple(maximum.shape)}, {tuple(total.shape)}; refusing an inferred permutation")
-        return output, maximum.permute(1,0,2).reshape(self.rows,self.heads,1).float(), total.permute(1,0,2).reshape(self.rows,self.heads,1).float()
+        return self._normalize_read_result(kind,result,self.rows,statistics)
 
     def write(self, kind="c4"):
         """Rewrite current query-token slots; repeats measure fixed-input cost."""
@@ -426,6 +530,9 @@ class WindowRunner:
         # Multiple trailing causal queries need history for the earliest query.
         self.capacity = max(case.page, math.ceil((window+int(np.max(data["q_lengths"]))-1)/case.page)*case.page)
         parts = partition_indices(case.indices_cpu,case.positions_cpu,window,self.capacity)
+        self.bf16_plans = {
+            "old": case.make_bf16_plan(parts["old"],parts["old_counts"],"old"),
+            "recent": case.make_bf16_plan(parts["recent_global"],parts["recent_counts"],"recent")}
         self.any_old, self.any_recent = bool(parts["old_present"].any()), bool(parts["recent_present"].any())
         self.prepared = {name:case.tensor(parts[name], t.bool if "present" in name else t.int32)
                          for name in ("old","recent_global","recent_ring","old_present","recent_present")}
@@ -453,9 +560,12 @@ class WindowRunner:
         self.hot_slots = case.tensor(hot_slots,t.int64)
         self.partition_summary = {"window":window,"recent_precision":high_precision,"ring_capacity":self.capacity,
             "recent_counts":parts["recent_counts"].tolist(),"old_counts":parts["old_counts"].tolist(),
-            "recent_attention_calls":int(self.any_recent),"old_attention_calls":int(self.any_old),
+            "recent_attention_calls":(self.bf16_plans["recent"].summary["operator_calls"]
+                                      if self.any_recent and high_precision == "bf16" else int(self.any_recent)),
+            "old_attention_calls":int(self.any_old),
+            "bf16_read_plans":{name:plan.summary for name,plan in self.bf16_plans.items()},
             "selection": "same fixed TopK; no forced recent-token inclusion",
-            "empty_rows": "one safe dummy slot; output/statistics masked before merge",
+            "empty_rows": "compact BF16 skips empty rows; padded readers use one safe dummy and mask before merge",
             "window_definition":"query_position-W+1 <= logical KV position <= query_position"}
         per_slot = 2*(case.dim+case.rope_dim) if high_precision=="bf16" else byte_width
         self.memory = {"global_c4_bytes":case.c4.numel()*case.c4.element_size(),
@@ -538,6 +648,15 @@ class WindowRunner:
         arrays, states = {}, {}
         parts = partition_indices(c.indices_cpu, c.positions_cpu, self.window, self.capacity)
         summary["selected_counts"] = {"old": parts["old_counts"].tolist(), "hot": parts["recent_counts"].tolist()}
+        summary["bf16_indices"] = c.bf16_indices
+        summary["bf16_read_plans"] = {name:plan.summary for name,plan in self.bf16_plans.items()}
+        summary["reader_inputs"] = {
+            "old_global_stats_on": {"reader":"bf16", "indices":"old subset", "counts":parts["old_counts"].tolist()},
+            "old_c4_stats_on": {"reader":"c4", "indices":"same old subset", "counts":parts["old_counts"].tolist()},
+            "hot_global_stats_on": {"reader":"bf16", "indices":"recent_global subset", "counts":parts["recent_counts"].tolist()},
+            "hot_ring_stats_on": {"reader":"bf16", "indices":"recent_ring subset", "counts":parts["recent_counts"].tolist()}}
+        for name in ("old", "recent_global", "recent_ring", "old_counts", "recent_counts"):
+            arrays["input_"+name] = parts[name].copy()
         all_present = np.ones(c.rows, dtype=bool)
         references = {}
 
@@ -599,19 +718,23 @@ class WindowRunner:
             attempt("old_reference", lambda: make_reference("old", parts["old"], parts["old_present"]))
             attempt("old_c4_reference", lambda: make_reference("old_c4", parts["old"], parts["old_present"], "c4"))
             attempt("hot_global_stats_on", lambda: capture_state(
-                "hot_global_stats_on", lambda: c._read("bf16", self.prepared["recent_global"]), parts["recent_present"]))
+                "hot_global_stats_on", lambda: c._read("bf16", self.prepared["recent_global"],
+                    bf16_plan=self.bf16_plans["recent"]), parts["recent_present"]))
             attempt("hot_global_stats_off", lambda: capture_output(
-                "hot_global_stats_off", lambda: c._read("bf16", self.prepared["recent_global"], statistics=False)))
+                "hot_global_stats_off", lambda: c._read("bf16", self.prepared["recent_global"],
+                    bf16_plan=self.bf16_plans["recent"], statistics=False)))
             attempt("hot_ring_stats_on", lambda: capture_state(
                 "hot_ring_stats_on", lambda: c._read("bf16", self.prepared["recent_ring"],
-                    cache=self.hot_kv, rope=self.hot_rope, table=self.ring_table, lengths=self.ring_lengths),
+                    cache=self.hot_kv, rope=self.hot_rope, table=self.ring_table, lengths=self.ring_lengths,
+                    bf16_plan=self.bf16_plans["recent"]),
                 parts["recent_present"]))
             attempt("hot_ring_stats_off", lambda: capture_output(
                 "hot_ring_stats_off", lambda: c._read("bf16", self.prepared["recent_ring"],
                     cache=self.hot_kv, rope=self.hot_rope, table=self.ring_table,
-                    lengths=self.ring_lengths, statistics=False)))
+                    lengths=self.ring_lengths, bf16_plan=self.bf16_plans["recent"], statistics=False)))
             attempt("old_global_stats_on", lambda: capture_state(
-                "old_global_stats_on", lambda: c._read("bf16", self.prepared["old"]), parts["old_present"]))
+                "old_global_stats_on", lambda: c._read("bf16", self.prepared["old"],
+                    bf16_plan=self.bf16_plans["old"]), parts["old_present"]))
             attempt("old_c4_stats_on", lambda: capture_state(
                 "old_c4_stats_on", lambda: c._read("c4", self.prepared["old"]), parts["old_present"]))
             attempt("old_c4_stats_off", lambda: capture_output(
@@ -793,7 +916,8 @@ class WindowRunner:
             if mode=="split_c4":
                 state = c._read("c4",parts["recent_global"])
             elif self.high_precision=="bf16":
-                state = c._read("bf16",parts["recent_ring"],cache=self.hot_kv,rope=self.hot_rope,table=self.ring_table,lengths=self.ring_lengths)
+                state = c._read("bf16",parts["recent_ring"],cache=self.hot_kv,rope=self.hot_rope,table=self.ring_table,
+                                lengths=self.ring_lengths,bf16_plan=self.bf16_plans["recent"])
             else:
                 state = c._read("c8",parts["recent_ring"],cache=self.hot_c8,table=self.ring_table,lengths=self.ring_lengths)
             recent = self._masked(state,parts["recent_present"])

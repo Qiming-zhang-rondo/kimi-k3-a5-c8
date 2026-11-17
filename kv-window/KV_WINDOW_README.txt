@@ -1,9 +1,51 @@
 Main MLA KV recent-precision experiment for Ascend A5
 ===================================================
 
-V3 merge/statistics investigation
-  This release adds evidence for the reported mixed C4/BF16 discrepancy.
-  The timed reader and merge implementations are unchanged: no empirical
+V4 compact BF16 index workaround (default)
+  A5 A/B results supplied by the user confirmed that the deployed BF16 reader
+  produces incorrect outputs and LSE for valid-prefix indices followed by -1.
+  Exact-size indices (including sizes 128 and257) passed on that deployment.
+  Invalid whole tiles can participate even if a partially valid tile is masked;
+  the erroneous effective count is NOT universally min(KV length, capacity).
+  This is a caller workaround, not a rebuild or repair of the Cloud kernel.
+
+  --bf16-indices compact is now the default. Every BF16 full/subset read uses
+  exact valid index capacity. Equal positive counts share a call; differing
+  counts require separate groups. Zero-count rows skip the kernel and return
+  neutral output/max/sum. Uniform positive counts preserve original query and
+  batch metadata and trim once. Nonuniform groups preserve physical page IDs
+  and the true KV length for each original row; they never replace KV lengths
+  with selection counts. C4/C8 keep their original padded reader paths.
+  The same workaround applies to BF16 baseline, old/global/ring diagnostics
+  and the measured mixed path, including device-partitioned indices.
+
+  First verify the complete mixed path on A5:
+    python test_kv_window_a5.py --keys 32768 --queries 1,4 \
+      --windows 0,128,512 --hot-dtypes bf16,c8 \
+      --bf16-indices compact --timing none --diagnose
+  --bf16-indices padded explicitly reproduces the previous reader calls.
+  There is no silent fallback if compact calls fail on an installed build.
+  New grouped calls still require A5 validation; local tests are CPU/mocks.
+
+  Performance scope: count-group plans are built once for the fixed selection,
+  outside timing. Required runtime gathers, compact index copies, BF16 calls
+  and output assembly are timed. More distinct valid counts mean more reader
+  calls. Graph replay uses this fixed count schedule and is not a dynamic
+  serving measurement. Do not combine old padded timings with new compact
+  quality results, or present compact grouping as zero-cost. The JSON records
+  the policy and plans; summary.csv includes bf16_indices and
+  attention_calls_per_read (attention calls only, excluding writes/quantizers).
+
+  Diagnostic naming clarification: old_global_stats_on is BF16 reading the
+  old subset; old_c4_stats_on is the separate C4 old-subset control. Neither
+  intentionally substitutes the complete TopK for the old subset. Raw subset
+  indices/counts and reader identities are retained to make this auditable.
+  Related public fix (not proof of the installed binary revision):
+  https://github.com/vllm-project/vllm-ascend/commit/aff1b74b66467a7805cde69ef0728b7e32c0f990
+
+V3 merge/statistics investigation (retained)
+  V3 added evidence for the reported mixed C4/BF16 discrepancy.
+  V3 left timed reader and merge implementations unchanged: no empirical
   rescaling, inferred log base, fallback, or reference output is substituted.
   A finite max/sum pair alone does not prove a correct softmax partition.
   Merge requires each reader's max + ln(sum) to describe the same logZ domain.
