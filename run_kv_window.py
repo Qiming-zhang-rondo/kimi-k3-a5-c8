@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import ssl
 import subprocess
 import sys
@@ -40,10 +41,42 @@ def download_payload(directory, insecure=False):
     return records
 
 
+def test_environment(run, cloudops_root="/tmp/cloudops", torch_extensions_dir=None):
+    """Configure the child process only; preserve existing tool/proxy choices.
+
+    The validated Cloud deployment keeps ninja in bin and its writable JIT
+    cache in torch_ext. Other deployments can override these locations. This
+    does not source a vendor environment, install dependencies or clear caches.
+    """
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    cloud_root = Path(cloudops_root).expanduser().resolve()
+    ninja = shutil.which("ninja", path=env.get("PATH", os.defpath))
+    ninja_source = "existing_PATH" if ninja else "not_found"
+    candidate = cloud_root/"bin"/"ninja"
+    if ninja is None and candidate.is_file() and os.access(candidate, os.X_OK):
+        previous = env.get("PATH", os.defpath)
+        env["PATH"] = str(candidate.parent) + (os.pathsep+previous if previous else "")
+        ninja, ninja_source = str(candidate), "cloudops_bin"
+    if torch_extensions_dir is not None:
+        cache, cache_source = Path(torch_extensions_dir).expanduser().resolve(), "launcher_argument"
+        env["TORCH_EXTENSIONS_DIR"] = str(cache)
+    elif env.get("TORCH_EXTENSIONS_DIR"):
+        cache, cache_source = Path(env["TORCH_EXTENSIONS_DIR"]).expanduser(), "existing_environment"
+    else:
+        cache = cloud_root/"torch_ext" if cloud_root.is_dir() else Path(run)/"torch_extensions"
+        cache_source = "cloudops_root" if cloud_root.is_dir() else "isolated_run"
+        env["TORCH_EXTENSIONS_DIR"] = str(cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    return env, dict(ninja=ninja, ninja_source=ninja_source,
+                     torch_extensions_dir=env["TORCH_EXTENSIONS_DIR"], cache_source=cache_source)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--insecure", action="store_true")
     p.add_argument("--work-dir", default="/mnt")
+    p.add_argument("--cloudops-root", default="/tmp/cloudops")
+    p.add_argument("--torch-extensions-dir", default=None)
     args, forwarded = p.parse_known_args(argv)
     if any(x == "--output" or x.startswith("--output=") for x in forwarded):
         p.error("Launcher creates an isolated results directory; use --work-dir for its parent")
@@ -55,6 +88,11 @@ def main(argv=None):
                   status="RUNNING", stage="download")
     try:
         report["files"] = download_payload(run, args.insecure)
+        report["stage"] = "environment"
+        child_env, report["test_environment"] = test_environment(
+            run, args.cloudops_root, args.torch_extensions_dir)
+        print(f"Ninja: {report['test_environment']['ninja'] or 'not found in PATH'}\n"
+              f"JIT cache: {report['test_environment']['torch_extensions_dir']}", flush=True)
         report["stage"] = "test"
         print("SHA256 verified. No installs, upgrades or model changes.", flush=True)
         command = [sys.executable, str(run/"test_kv_window_a5.py"), *forwarded,
@@ -62,7 +100,7 @@ def main(argv=None):
         with (run/"run.log").open("x", encoding="utf-8") as log:
             with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, encoding="utf-8", errors="replace", bufsize=1,
-                                  env=dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")) as process:
+                                  env=child_env) as process:
                 for line in process.stdout:
                     print(line, end="", flush=True)
                     log.write(line)
