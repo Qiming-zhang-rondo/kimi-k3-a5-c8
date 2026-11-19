@@ -226,12 +226,21 @@ def run_cloud(torch, op, common, args, mode, report):
             buffers = [kv, kr]
         else:
             kv = cache(PACKED_BYTES, torch.int8)
-            kr = torch.empty(0, device=args.device, dtype=torch.bfloat16)
+            # Combined mode writes RoPE inside kv. Cloud still validates the
+            # rank of the empty kr argument against the PA_BSND layout.
+            if args.empty_kr_axis == "pages":
+                kr_shape = (0, kv.shape[1], kv.shape[2], ROPE_DIM)
+            else:
+                kr_shape = (*kv.shape[:3], 0)
+            kr = torch.empty(kr_shape, device=kv.device, dtype=torch.bfloat16)
             kw = dict(kv_cache_quant_mode=4, ckvkr_repo_mode=1, quant_scale_repo_mode=1,
                       tile_size=args.tile_size)
             buffers = [kv]
-        emit("call", mode=mode, sentinel=sentinel, cache_shape=list(kv.shape),
-             cache_dtype=str(kv.dtype), kr_cache_dtype=str(kr.dtype), options=kw)
+        call = dict(mode=mode, sentinel=sentinel, cache_shape=list(kv.shape),
+                    cache_dtype=str(kv.dtype), kr_cache_shape=list(kr.shape),
+                    kr_cache_dtype=str(kr.dtype), kr_cache_numel=kr.numel(), options=kw)
+        report["last_call"] = call
+        emit("call", **call)
         output = op(**common, kv_cache=kv, kr_cache=kr, **kw)
         torch.npu.synchronize()
         if not isinstance(output, (tuple, list)) or len(output) < 2:
@@ -338,6 +347,8 @@ def main():
     p.add_argument("--seed", type=int, default=119)
     p.add_argument("--tile-size", type=int, choices=(32, 64, 128), default=128,
                    help="vendor mode4 tile_size. Independent of native MX group size (32)")
+    p.add_argument("--empty-kr-axis", choices=("width", "pages"), default="width",
+                   help="mode4 empty 4-D KR placeholder: zero width (default), or zero pages with RoPE width 64")
     p.add_argument("--output", type=Path, help="also write final JSON to this file")
     args = p.parse_args()
     if not 1 <= args.tokens <= 128:
