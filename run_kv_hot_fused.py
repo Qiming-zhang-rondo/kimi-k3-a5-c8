@@ -13,18 +13,18 @@ import tempfile
 import traceback
 import urllib.request
 
-PAYLOAD_COMMIT = "8de4f472761ed3cd11c090b02bfa88be578f2de0"
+PAYLOAD_COMMIT = "d2c58ee57a5d55dc4122a868a0f9746ae45dcb4e"
 REPOSITORY = "Qiming-zhang-rondo/kimi-k3-a5-c8"
 FILES = {
-    "README.txt": "75194fcc7b02224c2333b8b4e4046a087768a2f812fe5826dbe06f1b11f5ff8b",
+    "README.txt": "9233a036155ca7c8d63202ebcafa121585e87456384570c328408e55cd7cd603",
     "kv_c4_scale_backend.py": "5002af47b6f7394f84f6b5d2d65eeeaf4de8097df279f9cf0328b252f87149a5",
-    "kv_hot_backend.py": "159c94946560964f42cf04522c153c0209855a7f6d49560844075c92ef996261",
-    "kv_hot_fused.py": "b42429b1333611b59418538e3ef6806fde3b8a80aac8fc945545e7dd0804de3a",
+    "kv_hot_backend.py": "4e3bdbc732bd584aa38c48d97009cd52c52f8f1b21ce636820cb1e6e9b016718",
+    "kv_hot_fused.py": "0b1b33f668d5dbc655b406f047f8f231567b50a0125b3b22afc22203f9d30c79",
     "kv_hot_state.py": "633ad5333f441ca070f7415a2ad35dd6243cc4e0e19d481fdcc655989518fc66",
     "kv_window_backend.py": "20c33c19612da73484ea7c57e05b2a78eba68e7bc886db6daf0997976a530bc4",
     "kv_window_capture.py": "b872f9a378a22a27c3ff970426c33718d3c20958724ee018d383b4bb51216bb7",
     "kv_window_common.py": "7357ca29ee22f71445b1d9a3d5eddf8c2d6c0a0dab134b0e2e4d42c36e3dd724",
-    "test_kv_hot_fused_a5.py": "a953930dad8ed83d13c2281b7a3883d311692b2bb6a077cc44640fdbdb444216"
+    "test_kv_hot_fused_a5.py": "c8ff0124612d3cf4fe72cfb051730003b7c63a475f1867b9ff7ea565a49caaf0"
 }
 
 
@@ -48,8 +48,8 @@ def download_payload(directory, insecure=False):
 def test_environment(run, cloudops_root="/tmp/cloudops", torch_extensions_dir=None):
     """Configure the child process only; preserve existing tool/proxy choices.
 
-    The validated Cloud deployment keeps ninja in bin and its writable JIT
-    cache in torch_ext. Other deployments can override these locations. This
+    A reported Cloud deployment keeps ninja in bin. A new run gets its own JIT
+    cache unless the caller explicitly supplies an existing location. This
     does not source a vendor environment, install dependencies or clear caches.
     """
     env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
@@ -67,8 +67,8 @@ def test_environment(run, cloudops_root="/tmp/cloudops", torch_extensions_dir=No
     elif env.get("TORCH_EXTENSIONS_DIR"):
         cache, cache_source = Path(env["TORCH_EXTENSIONS_DIR"]).expanduser(), "existing_environment"
     else:
-        cache = cloud_root/"torch_ext" if cloud_root.is_dir() else Path(run)/"torch_extensions"
-        cache_source = "cloudops_root" if cloud_root.is_dir() else "isolated_run"
+        cache = Path(run)/"torch_extensions"
+        cache_source = "isolated_run"
         env["TORCH_EXTENSIONS_DIR"] = str(cache)
     cache.mkdir(parents=True, exist_ok=True)
     return env, dict(ninja=ninja, ninja_source=ninja_source,
