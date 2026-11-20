@@ -39,7 +39,7 @@ def fixed_ring_plan(data, window):
 
 class HotWindowBackend:
     def __init__(self, data, device="npu:0", *, scale_backend=None, reader_factory=None,
-                 block_keys=32, block_heads=16):
+                 block_keys=16, block_heads=16):
         if scale_backend is None:
             from kv_c4_scale_backend import C4ScaleBackend
             scale_backend = C4ScaleBackend(data, device=device)

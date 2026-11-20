@@ -3,11 +3,17 @@ GLM-5.3 main-KV recent-window experiment — executable prototype
 
 Status
 ------
-This delivery contains an actual Ascend Triton attention kernel, a native
+This v2 delivery contains an actual Ascend Triton attention kernel, a native
 quantization/write adapter, an A5 experiment runner, and a separately tested
 request-lifecycle metadata core. It has NOT been compiled or run on A5 by the
 author. It is NOT installed into GLM-5.3, mxllm, vLLM, or a PD connector.
 Production correctness, task accuracy, and performance are NOT_VALIDATED.
+
+The latest supplied v1 log from the new container reports BF16, C8, baseline
+C4 W0 and alg2_max7 C4 W0 as MEASURED. The remaining failure is Triton UB
+overflow: 10,799,872 bits requested versus 1,769,472 bits available. V2 reduces
+the fused kernel's working set. Both native backend files remain byte-identical
+to the v1 payload used in that run. V2 A5 compilation/execution is still pending.
 
 The acceptance requirement is no performance regression. One attention launch
 is a design choice, not evidence that this kernel is fast. In particular, the
@@ -18,6 +24,10 @@ What runs
 ---------
 kv_hot_fused.py reads existing packed C4 history and a C8 recent-token ring
 inside ONE kernel, with one online softmax and no separate merge kernel.
+V2 streams 64-feature tiles through QK and PV rather than materializing
+full-width 512-feature decode intermediates. Default key tiles are 16 and
+compiler multibuffering is disabled. KV is decoded in both passes; this can
+change latency and must be measured. QK is not recomputed per output tile.
 The original TopK is unchanged. For query position p, an already-selected
 token uses C8 only if p-W < token <= p. Missing required ring tags produce
 NaN, never a silent C4 fallback. Padding and future tokens are masked.
@@ -45,26 +55,34 @@ kv_hot_backend.py           Native quantize/scatter + reader adapter.
 test_kv_hot_fused_a5.py      Controls, diagnostics, paired performance runs.
 kv_hot_state.py             CPU request/ring/speculation metadata state core.
 kv_c4_scale_backend.py      Existing native C4 recipe adapter (unchanged).
-kv_window_backend.py        Existing native Cloud reader/writer (unchanged).
+kv_window_backend.py        Existing Cloud reader and native writers (unchanged).
 kv_window_common.py         Existing BF16 input/reference/metrics (unchanged).
 kv_window_capture.py        Existing original-activation capture helper.
 
 Environment
 -----------
-Use the already-validated A5 / Cloud operator environment. No package or CANN
-upgrade is performed. This prototype additionally requires an Ascend-compatible
+Use the new container environment in which BF16/C8/C4 controls passed, with
+the container's matching native operator package and Python wrapper. Do not
+assume that a package version label proves CANN compatibility. No package or
+CANN upgrade is performed. This prototype requires an Ascend-compatible
 Triton build in that same Python environment. Imports alone do not prove kernel
 compiler support. A compilation failure is an ERROR with full traceback; there
 is no slower substitute presented as the fused kernel.
 
-For the previously validated /tmp/cloudops deployment:
+The wheel may be present at /tmp/cloudops/pylib. In that case:
 
-  source /tmp/cloudops/cann_pkg/vendors/custom_cot/bin/set_env.bash
   export PYTHONPATH="/tmp/cloudops/pylib${PYTHONPATH:+:$PYTHONPATH}"
+
+The launcher does NOT source /tmp/cloudops/cann_pkg's vendor script. Retain
+the container operator environment that passed BF16. If an old vendor was
+previously sourced, skipping source does not remove its paths: clear only that
+vendor's entries from ASCEND_CUSTOM_OPP_PATH and LD_LIBRARY_PATH, then use a
+new Python process. Keep the matching container libraries and other vendors.
+Use a fresh TORCH_EXTENSIONS_DIR when switching native packages.
 
 The launcher inherits your working proxy and Python. It adds cloudops/bin when
 ninja is otherwise absent, and preserves an existing TORCH_EXTENSIONS_DIR or
-uses cloudops/torch_ext. It downloads fixed-commit files, verifies SHA256, logs
+uses an isolated cache in the new run directory. It downloads fixed-commit files, verifies SHA256, logs
 everything, and creates a fresh output directory. It never edits model files.
 
 Commands after downloading the payload
@@ -81,15 +99,19 @@ First A5 compilation, accuracy and timing experiment:
 
   python test_kv_hot_fused_a5.py --keys 8192 --queries 4 \
     --windows 0,128 --cold-recipes baseline,alg2_max7 \
+    --block-keys 16 \
     --timing eager,graph --output /tmp/kv-hot-first-run
 
 After the first run passes, expand the existing experiment:
 
   python test_kv_hot_fused_a5.py --keys 8192,32768 --queries 1,4 \
     --windows 0,128,256,512 --cold-recipes baseline,alg2_max7 \
+    --block-keys 16 \
     --timing eager,graph --output /tmp/kv-hot-matrix
 
-Use --block-keys 32 (default), 64, or 128 to evaluate kernel tile choices.
+Use --block-keys 16 (default), 32, 64, or 128 to evaluate kernel tile choices.
+Larger tiles can exceed compiler/device resources; no tile is asserted to
+compile on your installed Ascend Triton until the actual A5 run succeeds.
 Only --block-heads 16 is currently supported. All compilation is outside timed
 events; graph capture and warmup are also outside timed events. Default timing
 uses warmup=20, iterations=100, repeats=5. Cold and hot are measured in AB/BA
@@ -110,6 +132,9 @@ native-quantized bytes after dequantization; a reduction in quantization error
 cannot excuse a reader implementation mismatch. The default matching-reference
 limit is 1% for both total and worst-query relative L2. Pipeline-vs-prepared
 limit is 0.1%. These are experiment controls, not a model acceptance threshold.
+Errors distinguish NATIVE_OPERATOR_CONTRACT, TRITON_UB_OVERFLOW and device
+execution faults. A 507015 device execution fault stops all remaining work in
+that process, preserving the original traceback instead of timing later calls.
 
 MEASURED means controls passed and requested measurements completed.
 VALIDATED_ONLY means controls passed with --timing none; no speed was measured.

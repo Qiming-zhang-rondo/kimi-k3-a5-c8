@@ -1,5 +1,6 @@
 """CPU contracts only: these tests do NOT establish A5 kernel correctness."""
 
+import ast
 import importlib.util
 import math
 from pathlib import Path
@@ -8,6 +9,8 @@ import subprocess
 import sys
 import unittest
 from unittest import mock
+
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +120,7 @@ class TestStaticPreparationContract(unittest.TestCase):
         self.assertEqual(layout.sparse_capacity, 2048)
         self.assertEqual(layout.ring_capacity, 640)
         self.assertEqual(layout.rows, 4)
+        self.assertEqual(layout.block_keys, 16)
         r0 = validate(inputs(rope=0))
         self.assertEqual((r0.cold_width, r0.hot_width), (272, 528))
 
@@ -143,7 +147,7 @@ class TestStaticPreparationContract(unittest.TestCase):
 
     def test_invalid_static_options_rejected(self):
         for kwargs in (dict(window=True), dict(window=641), dict(scale=math.nan),
-                       dict(scale=0), dict(page=64), dict(block_keys=16), dict(block_heads=32)):
+                       dict(scale=0), dict(page=64), dict(block_keys=8), dict(block_heads=32)):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 validate(inputs(), **kwargs)
 
@@ -177,6 +181,8 @@ class TestStaticPreparationContract(unittest.TestCase):
             self.assertIs(args[-1], output)
             self.assertEqual(constants["WINDOW"], 512)
             self.assertEqual(constants["CAP"], 640)
+            self.assertFalse(constants["multibuffer"])
+            self.assertEqual(constants["BK"], 16)
         self.assertEqual(runner.metadata["attention_launches_per_call"], 1)
         self.assertIsNone(runner.metadata["fallback"])
 
@@ -194,6 +200,220 @@ assert kv_hot_fused._KERNEL is None
 """
         subprocess.run([sys.executable, "-c", code, str(ROOT / "hotkv")], check=True,
                        capture_output=True, text=True)
+
+
+# Execute the ACTUAL helper/kernel AST with a tiny numerical implementation of
+# the used TL primitives. This validates feature-loop arithmetic and masked
+# pointer addressing; it is not a Triton interpreter or a compiler/resource test.
+def _bf16(value):
+    value = np.asarray(value, np.float32)
+    bits = value.view(np.uint32)
+    rounded = bits + np.uint32(0x7FFF) + ((bits >> 16) & 1)
+    return (rounded & np.uint32(0xFFFF0000)).view(np.float32)
+
+
+class _Tensor(np.ndarray):
+    def __new__(cls, value):
+        return np.asarray(value).view(cls)
+
+    def to(self, dtype, bitcast=False):
+        value = np.asarray(self)
+        if dtype == "bf16":
+            result = ((value.astype(np.uint16).astype(np.uint32) << 16).view(np.float32)
+                      if bitcast else _bf16(value))
+        else:
+            result = value.view(dtype) if bitcast else value.astype(dtype)
+        return _Tensor(result)
+
+
+class _Pointer:
+    def __init__(self, values, offset=0):
+        self.values = values.reshape(-1)
+        self.offset = np.asarray(offset)
+
+    def __add__(self, offset):
+        return _Pointer(self.values, self.offset + offset)
+
+
+class _TL:
+    constexpr = object
+    float32, int32, int64 = np.float32, np.int32, np.int64
+    uint8, uint16, uint32 = np.uint8, np.uint16, np.uint32
+    bfloat16 = "bf16"
+    range = staticmethod(range)
+
+    def __init__(self):
+        self.pid = (0, 0)
+        self.load_shapes = []
+
+    def program_id(self, axis):
+        return _Tensor(np.int32(self.pid[axis]))
+
+    @staticmethod
+    def arange(start, end):
+        return _Tensor(np.arange(start, end, dtype=np.int32))
+
+    @staticmethod
+    def full(shape, fill, dtype):
+        return _Tensor(np.full(shape, fill, dtype))
+
+    def load(self, pointer, mask=True, other=0):
+        indices = np.asarray(pointer.offset)
+        self.load_shapes.append(indices.shape)
+        active = np.broadcast_to(mask, indices.shape)
+        if np.any(indices[active] < 0) or np.any(indices[active] >= pointer.values.size):
+            raise AssertionError("Unmasked out-of-range kernel load")
+        result = np.full(indices.shape, other, dtype=pointer.values.dtype)
+        result[active] = pointer.values[indices[active]]
+        return _Tensor(result)
+
+    @staticmethod
+    def store(pointer, value, mask=True):
+        indices = np.asarray(pointer.offset)
+        active = np.broadcast_to(mask, indices.shape)
+        if np.any(indices[active] < 0) or np.any(indices[active] >= pointer.values.size):
+            raise AssertionError("Unmasked out-of-range kernel store")
+        pointer.values[indices[active]] = np.broadcast_to(value, indices.shape)[active]
+
+    @staticmethod
+    def where(mask, yes, no):
+        return _Tensor(np.where(mask, yes, no))
+
+    @staticmethod
+    def maximum(a, b):
+        return _Tensor(np.maximum(a, b))
+
+    @staticmethod
+    def exp2(value):
+        return _Tensor(np.exp2(value))
+
+    @staticmethod
+    def exp(value):
+        return _Tensor(np.exp(value))
+
+    @staticmethod
+    def sum(value, axis):
+        return _Tensor(np.sum(value, axis=axis))
+
+    @staticmethod
+    def max(value, axis):
+        return _Tensor(np.max(value, axis=axis))
+
+    @staticmethod
+    def dot(a, b):
+        return _Tensor(np.matmul(a, b))
+
+    @staticmethod
+    def trans(value):
+        return _Tensor(np.transpose(value))
+
+    @staticmethod
+    def reshape(value, shape):
+        return _Tensor(np.reshape(value, shape))
+
+def _kernel_body():
+    tree = ast.parse(Path(fused.__file__).read_text())
+    loader = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == "_load_kernel")
+    functions = [x for x in loader.body if isinstance(x, ast.FunctionDef)]
+    for function in functions:
+        function.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
+    language = _TL()
+    scope = {"tl": language}
+    exec(compile(module, fused.__file__, "exec"), scope)
+    return language, scope["_mixed_sparse_mla"]
+
+
+class TestFeatureStreamedKernelBody(unittest.TestCase):
+    def fixture(self, rope=64, zero_query=False):
+        rng = np.random.default_rng(23)
+        keys, heads, page, capacity, window = 47, 17, 16, 16, 9
+        q = _bf16(rng.normal(0, .15, (1, heads, 512)))
+        qr = _bf16(rng.normal(0, .1, (1, heads, rope)))
+        if zero_query:
+            q.fill(0)
+            qr.fill(0)
+        kr = _bf16(rng.normal(0, .1, (keys, rope)))
+        cold_tokens, hot_tokens = [], []
+        for token in range(keys):
+            packed = rng.integers(0, 256, size=256, dtype=np.uint8).tobytes()
+            rbytes = b"".join(bf16_bytes(x) for x in kr[token])
+            cold_tokens.append(packed + rbytes + rng.integers(123, 127, size=16, dtype=np.uint8).tobytes())
+            # Finite E4M3 codes, distinct scale/128 groups and original RoPE.
+            fp8 = rng.integers(0, 126, size=512, dtype=np.uint8)
+            fp8 |= (rng.integers(0, 2, size=512, dtype=np.uint8) << 7)
+            hot_tokens.append(fp8.tobytes() + rbytes + struct.pack("<4f", .01, .025, .05, .1))
+        cold_width, hot_width = len(cold_tokens[0]), len(hot_tokens[0])
+        table = np.array([[2, 0, 1]], np.int32)
+        cold = np.zeros((3, page, 1, cold_width), np.uint8)
+        for token in range(keys):
+            cold[table[0, token // page], token % page, 0] = np.frombuffer(cold_tokens[token], np.uint8)
+        hot = np.zeros((1, capacity, 1, hot_width), np.uint8)
+        tags = np.full((1, capacity), -1, np.int64)
+        position = 43
+        for token in range(position-window+1, position+1):
+            hot[0, token % capacity, 0] = np.frombuffer(hot_tokens[token], np.uint8)
+            tags[0, token % capacity] = token
+        # Padding, a future token, and >BK keys exercise empty and mixed tiles.
+        ids = np.array([0, 1, 2, 3, 7, 8, 12, 15, 16, 17, 19, 20, 21, 25, 29,
+                        30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+                        44, -1, -1, -1], np.int32).reshape(1, 1, -1)
+        values = [q, qr, ids, cold, table, hot, tags, np.array([0], np.int32),
+                  np.array([position], np.int64), np.array([keys], np.int32)]
+        constants = dict(H=heads, S=ids.shape[-1], R=rope, B=1, PAGES=3, TABLE_PAGES=3,
+                         PAGE=page, CAP=capacity, CW=cold_width, HW=hot_width,
+                         WINDOW=window, SCALE=.04, BK=16, BH=16)
+        active = [int(i) for i in ids.reshape(-1) if 0 <= i <= position]
+        kv = np.array([fused.decode_c8_token(hot_tokens[i], rope)[0] if i > position-window
+                       else fused.decode_c4_token(cold_tokens[i], rope)[0] for i in active])
+        # Match BF16 dot operands while keeping reference reductions in FP64.
+        kv = _bf16(kv).astype(np.float64)
+        scores = (q[0].astype(np.float64) @ kv.T + qr[0].astype(np.float64) @ kr[active].T) * constants["SCALE"]
+        probs = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        reference = ((probs / probs.sum(axis=-1, keepdims=True)) @ kv)[None]
+        return values, constants, reference
+
+    def execute(self, values, constants):
+        language, kernel = _kernel_body()
+        output = np.zeros((1, constants["H"], 512), np.float32)
+        pointers = [_Pointer(x) for x in values] + [_Pointer(output)]
+        with np.errstate(invalid="ignore", over="ignore"):
+            for group in range((constants["H"] + constants["BH"] - 1) // constants["BH"]):
+                language.pid = (0, group)
+                kernel(*pointers, **constants)
+        # Source-level transfer bound only; the actual compiler can still
+        # allocate extra buffers. Catch accidental full-512 decode loads.
+        self.assertTrue(all(len(shape) < 2 or shape[-1] <= 64 for shape in language.load_shapes))
+        return output
+
+    def test_streamed_qk_pv_agree_with_independent_reference(self):
+        for rope in (0, 64):
+            for bk in (16, 32):
+                for zero_query in (False, True):
+                    with self.subTest(rope=rope, keys=bk, zero_query=zero_query):
+                        values, constants, reference = self.fixture(rope, zero_query)
+                        constants["BK"] = bk
+                        output = self.execute(values, constants)
+                        relative_l2 = np.linalg.norm(output-reference) / np.linalg.norm(reference)
+                        self.assertLess(relative_l2, .004)
+                        self.assertTrue(np.isfinite(output).all())
+
+    def test_missing_hot_tag_and_invalid_page_surface_as_nan(self):
+        for bad in ("tag", "page", "batch"):
+            with self.subTest(bad=bad):
+                values, constants, _ = self.fixture()
+                if bad == "tag":
+                    values[6][0, 43 % constants["CAP"]] = -1
+                elif bad == "page":
+                    values[4][0, 0] = 99
+                else:
+                    values[7][0] = -1
+                self.assertTrue(np.isnan(self.execute(values, constants)).all())
+
+    def test_all_invalid_selection_is_zero_and_safe(self):
+        values, constants, _ = self.fixture()
+        values[2].fill(-1)
+        self.assertTrue(np.array_equal(self.execute(values, constants), np.zeros((1, 17, 512))))
 
 
 if __name__ == "__main__":

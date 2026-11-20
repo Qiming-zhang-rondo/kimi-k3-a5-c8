@@ -197,6 +197,30 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("ACTUAL_KERNEL_COMPILATION_FAILURE_FOR_TEST", errors.getvalue())
             self.assertTrue(all(x["status"] == "VALIDATED_ONLY" for x in report["variants"] if x["window"] != 8))
 
+    def test_device_fault_stops_before_any_other_operator(self):
+        calls = []
+        class FaultyBackend(FakeBackend):
+            def baseline(self, kind):
+                calls.append(kind)
+                raise RuntimeError("error code is 507015; The address for scalar to access GM is invalid")
+            def prepare(self, *args):
+                raise AssertionError("No more operators after a device fault")
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            report = harness.run_case(tiny_case(), self.args(), Path(tmp)/"case", backend_factory=FaultyBackend)
+            self.assertEqual(report["status"], "DEVICE_ERROR")
+            self.assertEqual(report["stopped_after_device_fault"], "bf16")
+            self.assertEqual(report["baselines"]["bf16"]["failure_kind"], "DEVICE_EXECUTION_FAULT")
+            self.assertIn("507015", report["baselines"]["bf16"]["traceback"])
+            self.assertEqual(report["variants"], [])
+            self.assertEqual(calls, ["bf16"])
+            saved = json.loads((Path(tmp)/"case"/"results.json").read_text())
+            self.assertEqual(saved["status"], "DEVICE_ERROR")
+
+    def test_distinct_failures(self):
+        self.assertEqual(harness.failure_kind("EZ1009: operator prototype OpDef"), "NATIVE_OPERATOR_CONTRACT")
+        self.assertEqual(harness.failure_kind("ub overflow, requires 10799872 bits"), "TRITON_UB_OVERFLOW")
+        self.assertEqual(harness.failure_kind("GRAPH_CAPTURE_FAILURE"), "OTHER")
+
     def test_wrong_output_never_timed(self):
         class WrongBackend(FakeBackend):
             corrupt_window = 8

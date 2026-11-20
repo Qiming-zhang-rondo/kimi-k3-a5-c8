@@ -78,6 +78,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(Path(info["torch_extensions_dir"]), (self.root/"cache").resolve())
         self.assertNotIn("proxy", str(info))
 
+    def test_default_cache_is_isolated_even_with_old_cloud_root(self):
+        cloud = self.root / "cloudops"
+        cloud.mkdir()
+        (cloud / "torch_ext").mkdir()
+        with mock.patch.dict(launcher.os.environ, {"PATH": str(self.root / "empty")}, clear=True):
+            env, info = launcher.test_environment(self.root / "new-run", cloud)
+        self.assertEqual(info["cache_source"], "isolated_run")
+        self.assertEqual(Path(env["TORCH_EXTENSIONS_DIR"]), self.root / "new-run" / "torch_extensions")
+
 
 if __name__ == "__main__":
     unittest.main()

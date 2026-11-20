@@ -22,8 +22,23 @@ from kv_window_common import (ARRAY_KEYS, attention_reference, compare_outputs,
                               load_case, query_positions, save_case, synthetic_case,
                               validate_case, window_selection_stats)
 
-VERSION = "kv-hot-fused-a5-v1"
+VERSION = "kv-hot-fused-a5-v2"
 RECIPES = ("baseline", "alg2_max7")
+
+
+class DeviceExecutionAborted(RuntimeError):
+    """A device execution fault makes later work in this process unreliable."""
+
+
+def failure_kind(message):
+    if any(x in message for x in ("507015", "ACL_ERROR_RT_AICORE_EXCEPTION",
+                                  "The address for scalar to access GM is invalid")):
+        return "DEVICE_EXECUTION_FAULT"
+    if "ub overflow" in message.lower():
+        return "TRITON_UB_OVERFLOW"
+    if "EZ1009" in message or "operator prototype OpDef" in message:
+        return "NATIVE_OPERATOR_CONTRACT"
+    return "OTHER"
 SUCCESS_STATUSES = ("MEASURED", "VALIDATED_ONLY")
 
 
@@ -80,7 +95,7 @@ def acceptable(metric, limit):
 def error_record():
     message = traceback.format_exc()
     print(message, file=sys.stderr, flush=True)
-    return {"status": "ERROR", "traceback": message}
+    return {"status": "ERROR", "failure_kind": failure_kind(message), "traceback": message}
 
 
 def paired_benchmark(baseline, candidate, args, benchmark):
@@ -112,6 +127,8 @@ def paired_benchmark(baseline, candidate, args, benchmark):
             except Exception:
                 pair.update(error_record())
                 item["status"] = "ERROR"
+                if pair["failure_kind"] == "DEVICE_EXECUTION_FAULT":
+                    raise
                 break
         complete = [r for r in item["rounds"] if "event_us_ratio" in r and "wall_us_ratio" in r]
         if complete:
@@ -137,6 +154,8 @@ def standalone_benchmark(call, args, benchmark):
                                      repeats=args.repeats, graph=mode == "graph")
         except Exception:
             result[mode] = error_record()
+            if result[mode]["failure_kind"] == "DEVICE_EXECUTION_FAULT":
+                raise
     return result
 
 
@@ -217,6 +236,9 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
             controls_ok &= entry.get("control_passed", False)
             print(f"  {kind}: {entry['status']}", flush=True)
             flush()
+            if entry.get("failure_kind") == "DEVICE_EXECUTION_FAULT":
+                report["stopped_after_device_fault"] = kind
+                raise DeviceExecutionAborted(kind)
         for recipe in args.cold_recipes:
             native_runner, native_entry = None, None
             cold_decoded = None
@@ -265,11 +287,18 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                 metric = entry.get("vs_bf16_math", {}).get("relative_l2")
                 print(f"  {name}: {entry['status']} L2_vs_bf16_math={metric}", flush=True)
                 flush()
+                if entry.get("failure_kind") == "DEVICE_EXECUTION_FAULT":
+                    report["stopped_after_device_fault"] = name
+                    raise DeviceExecutionAborted(name)
         entries = list(report["baselines"].values()) + report["variants"]
         report["status"] = success_status(args) if all(e["status"] in SUCCESS_STATUSES for e in entries) else "FAILED"
         report["host_input_unchanged"] = identity(data) == report["input_sha256"]
         if not report["host_input_unchanged"]:
             report["status"] = "FAILED"
+    except DeviceExecutionAborted:
+        report["status"] = "DEVICE_ERROR"
+        print("Device execution fault: stopped this case and all remaining cases; see the original entry traceback.",
+              file=sys.stderr, flush=True)
     except Exception:
         report.update(error_record())
     finally:
@@ -366,7 +395,7 @@ def parser():
     p.add_argument("--repeats", type=int, default=5, help="AB/BA rounds for each hot candidate")
     p.add_argument("--control-l2", type=float, default=.01, help="Global AND worst-row relative L2 vs matching mathematical reference")
     p.add_argument("--pipeline-l2", type=float, default=.001)
-    p.add_argument("--block-keys", type=int, default=32)
+    p.add_argument("--block-keys", type=int, default=16)
     p.add_argument("--block-heads", type=int, default=16)
     p.add_argument("--output", type=Path)
     return p
@@ -407,8 +436,12 @@ def main(argv=None):
                                     dim=512, rope_dim=args.rope_dim, topk=args.topk,
                                     page=args.page, seed=args.seed) for k in args.keys for q in args.queries)
         for index, data in enumerate(cases):
-            run_case(data, args, directory / f"case_{index:03d}", progress=persist)
-        report["status"] = success_status(args) if report["cases"] and all(c["status"] in SUCCESS_STATUSES for c in report["cases"]) else "FAILED"
+            current = run_case(data, args, directory / f"case_{index:03d}", progress=persist)
+            if current["status"] == "DEVICE_ERROR":
+                report["stopped_after_device_fault"] = current["label"]
+                break
+        report["status"] = ("DEVICE_ERROR" if report.get("stopped_after_device_fault") else
+                            success_status(args) if report["cases"] and all(c["status"] in SUCCESS_STATUSES for c in report["cases"]) else "FAILED")
     except Exception:
         report.update(error_record())
     finally:

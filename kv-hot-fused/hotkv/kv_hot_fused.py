@@ -4,6 +4,14 @@ This is a real kernel, not a wrapper around two attention calls. It consumes
 the existing packed caches directly and maintains one online softmax across
 all selected keys. No A5 performance or compiler support is asserted here.
 
+The feature-streamed revision addresses the reported 10,799,872-bit UB
+overflow: decode/address temporaries are BK x 64, not BK x 512, scale loads
+are compact, feature loops are dynamic and multi-buffering is disabled.
+The full FP32 online accumulator is retained. Packed KV is decoded twice
+(QK then PV), and Q tiles are reloaded per key tile, so performance must be
+remeasured; there is no promise of zero overhead or successful A5 compilation.
+The compiler may insert additional buffers beyond the source-level tile sizes.
+
 Contract: D=512, RoPE D=0/64, one shared KV head, unique fixed sparse indices.
 The complete C4 history remains available. A recent key is read from the C8
 ring iff ``query_position-window < key <= query_position``. Ring position
@@ -61,12 +69,12 @@ def _integer(value, name, minimum=1):
 def validate_inputs(q_nope, q_rope, indices, cold_cache, cold_table,
                     hot_cache, hot_positions, row_batch, query_positions,
                     kv_lengths, *, window, page, scale,
-                    block_keys=32, block_heads=16):
+                    block_keys=16, block_heads=16):
     """Shape/dtype/device validation; never examines device tensor values."""
     window = _integer(window, "window")
     page = _integer(page, "page")
-    if block_keys not in (32, 64, 128) or isinstance(block_keys, bool):
-        raise ValueError("block_keys must be 32, 64 or 128")
+    if block_keys not in (16, 32, 64, 128) or isinstance(block_keys, bool):
+        raise ValueError("block_keys must be 16, 32, 64 or 128")
     if block_heads != 16 or isinstance(block_heads, bool):
         raise ValueError("block_heads must be 16 for this experimental kernel")
     if isinstance(scale, bool) or not isinstance(scale, (float, int)) or not math.isfinite(scale) or scale <= 0:
@@ -181,6 +189,48 @@ def _load_kernel():
         raise RuntimeError("Install the Triton build matching this Ascend environment; no fallback is used") from exc
 
     @triton.jit
+    def _decode_mixed_tile(COLD, HOT, cold_base, hot_base, use_cold, use_hot,
+                           feature_start, R: tl.constexpr, BK: tl.constexpr):
+        # Keep every expensive address/bitwise/float temporary at BK x 64.
+        # A dynamic feature loop calls this helper; do not statically unroll
+        # all eight tiles or construct a BK x 512 intermediate again.
+        dd = feature_start + tl.arange(0, 64)
+        packed4 = tl.load(COLD + cold_base[:, None] + dd[None, :] // 2,
+                          mask=use_cold[:, None], other=0).to(tl.uint8).to(tl.int32)
+        code = (packed4 >> ((dd[None, :] & 1) * 4)) & 15
+        mag = code & 7
+        c4val = tl.where(mag < 2, mag * 0.5,
+                         tl.exp2(((mag >> 1) - 1).to(tl.float32)) * (1.0 + (mag & 1) * 0.5))
+        c4val = tl.where((code & 8) != 0, -c4val, c4val)
+        # A 64-feature tile has only two E8M0 scales. Load these once per
+        # key, not once per decoded scalar, then broadcast within each group.
+        groups = feature_start // 32 + tl.arange(0, 2)
+        e8 = tl.load(COLD + cold_base[:, None] + 256 + 2 * R + groups[None, :],
+                     mask=use_cold[:, None], other=127).to(tl.uint8).to(tl.int32)
+        scales4 = tl.exp2((e8 - 127).to(tl.float32))
+        scales4 = tl.where(e8 == 255, float("nan"), scales4)
+        c4val = (tl.reshape(c4val, (BK, 2, 32)) * scales4[:, :, None]).reshape((BK, 64))
+
+        packed8 = tl.load(HOT + hot_base[:, None] + dd[None, :],
+                          mask=use_hot[:, None], other=0).to(tl.uint8).to(tl.int32)
+        exp8 = (packed8 >> 3) & 15
+        mant8 = packed8 & 7
+        c8val = tl.where(exp8 == 0, mant8 * (1.0 / 512.0),
+                         (1.0 + mant8 * 0.125) * tl.exp2((exp8 - 7).to(tl.float32)))
+        c8val = tl.where((packed8 & 128) != 0, -c8val, c8val)
+        c8val = tl.where((exp8 == 15) & (mant8 == 7), float("nan"), c8val)
+        # Every aligned 64-feature tile lies inside ONE 128-feature C8 scale
+        # group. Its four raw bytes are BK-vectors, not BK x 64 matrices.
+        scale_ptr = HOT + hot_base + 512 + 2 * R + (feature_start // 128) * 4
+        s0 = tl.load(scale_ptr, mask=use_hot, other=0).to(tl.uint8).to(tl.uint32)
+        s1 = tl.load(scale_ptr + 1, mask=use_hot, other=0).to(tl.uint8).to(tl.uint32)
+        s2 = tl.load(scale_ptr + 2, mask=use_hot, other=0).to(tl.uint8).to(tl.uint32)
+        s3 = tl.load(scale_ptr + 3, mask=use_hot, other=0).to(tl.uint8).to(tl.uint32)
+        scale8 = (s0 | (s1 << 8) | (s2 << 16) | (s3 << 24)).to(tl.float32, bitcast=True)
+        c8val = c8val * scale8[:, None]
+        return tl.where(use_hot[:, None], c8val, c4val).to(tl.bfloat16)
+
+    @triton.jit
     def _mixed_sparse_mla(Q, QR, IDX, COLD, TABLE, HOT, TAGS, ROW_BATCH,
                           POS, LENGTHS, OUT,
                           H: tl.constexpr, S: tl.constexpr, R: tl.constexpr,
@@ -192,26 +242,27 @@ def _load_kernel():
         row = tl.program_id(0)
         hh = tl.program_id(1) * BH + tl.arange(0, BH)
         dd = tl.arange(0, 512)
+        fd = tl.arange(0, 64)
         kk = tl.arange(0, BK)
         batch = tl.load(ROW_BATCH + row).to(tl.int64)
         pos = tl.load(POS + row).to(tl.int64)
         batch_ok = (batch >= 0) & (batch < B)
         length = tl.load(LENGTHS + batch, mask=batch_ok, other=0).to(tl.int64)
         row_ok = batch_ok & (pos >= 0) & (pos < length) & (length <= TABLE_PAGES * PAGE)
-        q = tl.load(Q + (row.to(tl.int64) * H + hh[:, None]) * 512 + dd[None, :],
-                    mask=hh[:, None] < H, other=0)
         if R > 0:
             rr = tl.arange(0, R)
             qr = tl.load(QR + (row.to(tl.int64) * H + hh[:, None]) * R + rr[None, :],
                          mask=hh[:, None] < H, other=0)
-        acc = tl.full((BH, 512), 0, tl.float32)
+        # The only full feature-width numerical state is the 32 KiB FP32
+        # accumulator (BH=16). No full-width KV decode/address matrix exists.
+        acc = tl.full((BH, 8, 64), 0, tl.float32)
+        feature_tiles = tl.arange(0, 8)
         normalizer = tl.full((BH,), 0, tl.float32)
         maximum = tl.full((BH,), float("-inf"), tl.float32)
         bad = ~row_ok
-        for start in range(0, S, BK):
+        for start in tl.range(0, S, BK):
             ids = tl.load(IDX + row.to(tl.int64) * S + start + kk,
                           mask=start + kk < S, other=-1).to(tl.int64)
-            # Future/padded indices never reach QK, softmax or PV.
             valid = row_ok & (ids >= 0) & (ids <= pos) & (ids < length)
             wanted_hot = valid & (ids > pos - WINDOW)
             slot = tl.maximum(ids, 0) % CAP
@@ -229,39 +280,19 @@ def _load_kernel():
             cold_base = (physical * PAGE + tl.maximum(ids, 0) % PAGE) * CW
             hot_base = (batch * CAP + slot) * HW
 
-            packed4 = tl.load(COLD + cold_base[:, None] + dd[None, :] // 2,
-                              mask=use_cold[:, None], other=0).to(tl.uint8).to(tl.int32)
-            code = (packed4 >> ((dd[None, :] & 1) * 4)) & 15
-            mag = code & 7
-            # E2M1 levels 0,.5,1,1.5,2,3,4,6, with a separate sign bit.
-            c4val = tl.where(mag < 2, mag * 0.5,
-                             tl.exp2(((mag >> 1) - 1).to(tl.float32)) * (1.0 + (mag & 1) * 0.5))
-            c4val = tl.where((code & 8) != 0, -c4val, c4val)
-            e8 = tl.load(COLD + cold_base[:, None] + 256 + 2 * R + dd[None, :] // 32,
-                         mask=use_cold[:, None], other=127).to(tl.uint8).to(tl.int32)
-            c4val = c4val * tl.exp2((e8 - 127).to(tl.float32))
-            c4val = tl.where(e8 == 255, float("nan"), c4val)
-
-            packed8 = tl.load(HOT + hot_base[:, None] + dd[None, :],
-                              mask=use_hot[:, None], other=0).to(tl.uint8).to(tl.int32)
-            exp8 = (packed8 >> 3) & 15
-            mant8 = packed8 & 7
-            c8val = tl.where(exp8 == 0, mant8 * (1.0 / 512.0),
-                             (1.0 + mant8 * 0.125) * tl.exp2((exp8 - 7).to(tl.float32)))
-            c8val = tl.where((packed8 & 128) != 0, -c8val, c8val)
-            c8val = tl.where((exp8 == 15) & (mant8 == 7), float("nan"), c8val)
-            scale_ptr = HOT + hot_base[:, None] + 512 + 2 * R + (dd[None, :] // 128) * 4
-            s0 = tl.load(scale_ptr, mask=use_hot[:, None], other=0).to(tl.uint8).to(tl.uint32)
-            s1 = tl.load(scale_ptr + 1, mask=use_hot[:, None], other=0).to(tl.uint8).to(tl.uint32)
-            s2 = tl.load(scale_ptr + 2, mask=use_hot[:, None], other=0).to(tl.uint8).to(tl.uint32)
-            s3 = tl.load(scale_ptr + 3, mask=use_hot[:, None], other=0).to(tl.uint8).to(tl.uint32)
-            scale8 = (s0 | (s1 << 8) | (s2 << 16) | (s3 << 24)).to(tl.float32, bitcast=True)
-            c8val = c8val * scale8
-            latent = tl.where(use_hot[:, None], c8val, c4val).to(tl.bfloat16)
-            scores = tl.dot(q, tl.trans(latent))
+            # Dynamic loops bound live decode temporaries. This computes QK
+            # once across all 512 features; it does NOT recompute attention
+            # independently for every output feature tile.
+            scores = tl.full((BH, BK), 0, tl.float32)
+            for feature_start in tl.range(0, 512, 64):
+                latent = _decode_mixed_tile(COLD, HOT, cold_base, hot_base,
+                                            use_cold, use_hot, feature_start, R, BK)
+                q = tl.load(Q + (row.to(tl.int64) * H + hh[:, None]) * 512
+                             + feature_start + fd[None, :],
+                             mask=hh[:, None] < H, other=0)
+                scores = scores + tl.dot(q, tl.trans(latent))
             if R > 0:
-                # RoPE is unquantized in both formats; complete C4 history is
-                # retained, so its identical RoPE bytes serve every key.
+                # Both copies retain the same unquantized RoPE bytes.
                 rp = COLD + cold_base[:, None] + 256 + 2 * rr[None, :]
                 r0 = tl.load(rp, mask=valid[:, None], other=0).to(tl.uint8).to(tl.uint16)
                 r1 = tl.load(rp + 1, mask=valid[:, None], other=0).to(tl.uint8).to(tl.uint16)
@@ -270,15 +301,26 @@ def _load_kernel():
             scores = scores * SCALE
             scores = tl.where(valid[None, :] & (hh[:, None] < H), scores, float("-inf"))
             new_max = tl.maximum(maximum, tl.max(scores, 1))
-            # Empty tiles/rows must not evaluate an effective -inf - -inf.
             safe_max = tl.where(new_max == float("-inf"), 0.0, new_max)
             alpha = tl.where(normalizer > 0, tl.exp(maximum - safe_max), 0.0)
             prob = tl.where(valid[None, :] & (hh[:, None] < H),
                             tl.exp(scores - safe_max[:, None]), 0.0)
-            acc = acc * alpha[:, None] + tl.dot(prob.to(tl.bfloat16), latent)
+            acc = acc * alpha[:, None, None]
+            probability = prob.to(tl.bfloat16)
+            # A second decode pass avoids retaining all 512 KV features until
+            # PV. Only this decode is repeated; QK and softmax are not repeated.
+            # The accumulator is viewed as [heads, feature_tile, feature].
+            # Broadcast the one PV tile into its destination tile. This avoids
+            # a full-width gather, index matrix or static decoder unrolling.
+            for feature_start in tl.range(0, 512, 64):
+                latent = _decode_mixed_tile(COLD, HOT, cold_base, hot_base,
+                                            use_cold, use_hot, feature_start, R, BK)
+                partial = tl.dot(probability, latent)
+                acc = acc + tl.where((feature_tiles == feature_start // 64)[None, :, None],
+                                    partial[:, None, :], 0.0)
             normalizer = normalizer * alpha + tl.sum(prob, 1)
             maximum = new_max
-        result = acc / tl.where(normalizer > 0, normalizer, 1.0)[:, None]
+        result = tl.reshape(acc, (BH, 512)) / tl.where(normalizer > 0, normalizer, 1.0)[:, None]
         result = tl.where(bad, float("nan"), result)
         tl.store(OUT + (row.to(tl.int64) * H + hh[:, None]) * 512 + dd[None, :],
                  result.to(tl.bfloat16), mask=hh[:, None] < H)
@@ -297,7 +339,7 @@ class FusedHotKVReader:
 
     def __init__(self, q_nope, q_rope, indices, cold_cache, cold_table,
                  hot_cache, hot_positions, row_batch, query_positions,
-                 kv_lengths, *, window, page, scale, block_keys=32, block_heads=16):
+                 kv_lengths, *, window, page, scale, block_keys=16, block_heads=16):
         self.layout = validate_inputs(q_nope, q_rope, indices, cold_cache,
                                       cold_table, hot_cache, hot_positions,
                                       row_batch, query_positions, kv_lengths,
@@ -320,6 +362,11 @@ class FusedHotKVReader:
                          "status": "EXPERIMENTAL_REQUIRES_A5_VALIDATION",
                          "attention_launches_per_call": 1,
                          "separate_merge_launches": 0,
+                         "feature_tile": 64, "multibuffer": False,
+                         "kv_decode_passes_per_key_tile": 2,
+                         "qk_passes_per_key_tile": 1,
+                         "resource_fix": "dynamic feature tiles; compact scale loads; tiled accumulator update; no BKx512 decode",
+                         "resource_validation": "A5 compile required; source-level bounds are not compiler UB accounting",
                          "block_keys": block_keys, "block_heads": block_heads,
                          "window": window, "ring_capacity": self.layout.ring_capacity,
                          "missing_hot_policy": "NaN", "fallback": None,
@@ -327,5 +374,5 @@ class FusedHotKVReader:
 
     def call(self):
         """Enqueue exactly one attention kernel, with preallocated output."""
-        self._kernel[self._grid](*self._inputs, self.output, **self._constants)
+        self._kernel[self._grid](*self._inputs, self.output, **self._constants, multibuffer=False)
         return self.output
