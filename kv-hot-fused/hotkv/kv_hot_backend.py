@@ -56,6 +56,7 @@ class HotWindowBackend:
         self.reader_factory = reader_factory
         self.block_keys, self.block_heads = block_keys, block_heads
         self._runners = {}
+        self._cold_controls = {}
 
     def host(self, tensor):
         return self.base.host(tensor)
@@ -79,12 +80,35 @@ class HotWindowBackend:
             self._runners[key] = HotWindowRunner(self, self.scales.prepare(recipe), int(window))
         return self._runners[key]
 
+    def prepare_cold_control(self, recipe, window):
+        """Read-only custom C4 diagnostic; never substitutes for native W0.
+
+        Keep the requested hot runner's positive-window layout, but select a
+        separate compiled kernel that reads every selected key from C4. This
+        is a diagnostic of the custom reader itself, not a production window
+        or a write+read performance baseline.
+        """
+        if recipe not in RECIPES:
+            raise ValueError(f"Unknown cold C4 recipe: {recipe}")
+        if isinstance(window, (bool, np.bool_)) or not isinstance(window, (int, np.integer)) or window <= 0:
+            raise ValueError("Cold-control layout window must be an integer > 0")
+        key = (recipe, int(window))
+        if key not in self._cold_controls:
+            self._cold_controls[key] = HotWindowRunner(
+                self, self.scales.prepare(recipe), int(window), diagnostic_cold_only=True)
+        return self._cold_controls[key]
+
 
 class HotWindowRunner:
-    def __init__(self, backend, variant, window):
+    def __init__(self, backend, variant, window, diagnostic_cold_only=False):
         self.backend, self.base, self.variant, self.window = backend, backend.base, variant, window
+        self.diagnostic_cold_only = bool(diagnostic_cold_only)
+        if self.diagnostic_cold_only and window == 0:
+            raise ValueError("The diagnostic requires a positive layout window; native W0 is unchanged")
         self.metadata = dict(variant.metadata)
-        self.metadata.update(window=window, hot_precision="c8" if window else None,
+        self.metadata.update(window=window, effective_window=0 if self.diagnostic_cold_only else window,
+                             diagnostic_cold_only=self.diagnostic_cold_only,
+                             hot_precision="c8" if window and not self.diagnostic_cold_only else None,
                              lifetime_scope="fixed query batch; no serving state transition is timed")
         if window == 0:
             # This branch deliberately neither imports Triton nor allocates a ring.
@@ -113,7 +137,8 @@ class HotWindowRunner:
         self.reader = factory(base.q_nope, base.q_rope, base.indices, self.cold_cache, base.table,
                               self.hot_cache, self.hot_positions, self.row_batch, self.query_positions,
                               base.lengths, window=window, page=base.page, scale=base.scale,
-                              block_keys=backend.block_keys, block_heads=backend.block_heads)
+                              block_keys=backend.block_keys, block_heads=backend.block_heads,
+                              diagnostic_cold_only=self.diagnostic_cold_only)
         self.metadata.update(reader="triton_fused_c4_c8", zero_window_native_bypass=False,
                              attention_calls_per_read=1, ring_capacity=plan["capacity"],
                              hot_cache_bytes=int(hot.nbytes), hot_tags_bytes=int(plan["tags"].nbytes),
@@ -121,6 +146,13 @@ class HotWindowRunner:
                              reader_metadata=self.reader.metadata,
                              write_scope="current BF16 -> C4 and C8 quantization; both cache scatters; tag scatter; one fused attention",
                              prepare_scope="native full C4 and C8 quantization, physical paging, ring build, allocation outside timing")
+        if self.diagnostic_cold_only:
+            self.metadata.update(reader="triton_fused_c4_control",
+                                 role="READ_ONLY_DIAGNOSTIC",
+                                 production_comparison_eligible=False,
+                                 write_scope="not supported; read-only diagnostic",
+                                 hot_ring_scope="unused compatibility layout prepared outside timing",
+                                 comparison_scope="custom all-C4 reader versus native same-recipe W0; not a hot-window measurement")
 
     def decoded_kv(self):
         return self.variant.decoded_kv()
@@ -132,6 +164,8 @@ class HotWindowRunner:
         return self.variant.call() if self.window == 0 else self.reader.call()
 
     def run(self, write=False):
+        if self.diagnostic_cold_only and write:
+            raise ValueError("The fused cold control is read-only; write+read timing is not supported")
         if self.window == 0:
             return self.variant.run(write=write)
         if write:

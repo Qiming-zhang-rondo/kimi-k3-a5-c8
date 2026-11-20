@@ -22,7 +22,7 @@ from kv_window_common import (ARRAY_KEYS, attention_reference, compare_outputs,
                               load_case, query_positions, save_case, synthetic_case,
                               validate_case, window_selection_stats)
 
-VERSION = "kv-hot-fused-a5-v2"
+VERSION = "kv-hot-fused-a5-v3"
 RECIPES = ("baseline", "alg2_max7")
 
 
@@ -192,6 +192,7 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
     report = {"label": data["label"], "input_sha256": identity(data), "status": "RUNNING",
               "source_kind": data["source_kind"], "selection_source": data["selection_source"],
               "shape": {key: list(data[key].shape) for key in ARRAY_KEYS}, "baselines": {}, "variants": [],
+              "diagnostics": [],
               "production_validation": "NOT_VALIDATED", "directory": str(directory)}
 
     def flush():
@@ -290,7 +291,44 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                 if entry.get("failure_kind") == "DEVICE_EXECUTION_FAULT":
                     report["stopped_after_device_fault"] = name
                     raise DeviceExecutionAborted(name)
-        entries = list(report["baselines"].values()) + report["variants"]
+            positive_windows = sorted(w for w in args.windows if w > 0)
+            if args.fused_cold_control and positive_windows:
+                name = f"{recipe}_fused_cold_control"
+                entry = {"name": name, "recipe": recipe, "window": 0,
+                         "layout_window": positive_windows[0], "status": "RUNNING",
+                         "role": "READ_ONLY_DIAGNOSTIC", "production_comparison_eligible": False,
+                         "production_performance": "NOT_VALIDATED",
+                         "timing_reference": f"{recipe}_w0 (native C4 prepared read)"}
+                report["diagnostics"].append(entry)
+                try:
+                    if not controls_ok or native_entry is None or not native_entry.get("control_passed"):
+                        entry.update(status="CONTROL_FAILED", control_passed=False,
+                                     control_failure_reason="native reference controls unavailable or failed")
+                    else:
+                        runner = backend.prepare_cold_control(recipe, positive_windows[0])
+                        entry["implementation"] = runner.metadata
+                        matching = attention_reference(data, kv_c4=runner.decoded_kv())
+                        output = backend.host(runner.call())
+                        arrays[name + "_prepared"] = output
+                        arrays[name + "_matching_reference"] = matching
+                        entry["kernel_vs_matching_reference"] = compare(output, matching)
+                        entry["vs_bf16_math"] = compare(output, bf16_math)
+                        if bf16_output is not None:
+                            entry["vs_bf16_operator"] = compare(output, bf16_output)
+                        entry["control_passed"] = acceptable(entry["kernel_vs_matching_reference"], args.control_l2)
+                        if entry["control_passed"]:
+                            entry["timing_prepared_read"] = paired_benchmark(native_runner.call, runner.call, args, benchmark)
+                            entry["status"] = "TIMING_ERROR" if timing_failed(entry) else success_status(args)
+                        else:
+                            entry["status"] = "CONTROL_FAILED"
+                except Exception:
+                    entry.update(error_record())
+                print(f"  {name}: {entry['status']} (read-only diagnostic; native W0 remains the performance baseline)", flush=True)
+                flush()
+                if entry.get("failure_kind") == "DEVICE_EXECUTION_FAULT":
+                    report["stopped_after_device_fault"] = name
+                    raise DeviceExecutionAborted(name)
+        entries = list(report["baselines"].values()) + report["variants"] + report["diagnostics"]
         report["status"] = success_status(args) if all(e["status"] in SUCCESS_STATUSES for e in entries) else "FAILED"
         report["host_input_unchanged"] = identity(data) == report["input_sha256"]
         if not report["host_input_unchanged"]:
@@ -309,10 +347,11 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
 def write_summary(report, directory):
     rows = []
     for case in report["cases"]:
-        entries = list(case["baselines"].items()) + [(e["name"], e) for e in case["variants"]]
+        entries = list(case["baselines"].items()) + [(e["name"], e) for e in case["variants"] + case.get("diagnostics", [])]
         for name, entry in entries:
             for mode in ([] if report["args"]["timing"] == "none" else report["args"]["timing"].split(",")) or ["none"]:
                 row = {"case": case["label"], "name": name, "status": entry["status"], "mode": mode,
+                       "role": entry.get("role", "BASELINE" if name in ("bf16", "c8") else "VARIANT"),
                        "relative_l2_vs_bf16_math": entry.get("vs_bf16_math", {}).get("relative_l2"),
                        "relative_l2_vs_bf16_operator": entry.get("vs_bf16_operator", {}).get("relative_l2"),
                        "worst_row_l2_vs_bf16_math": entry.get("vs_bf16_math", {}).get("max_row_relative_l2"),
@@ -322,7 +361,10 @@ def write_summary(report, directory):
                     timing = entry.get(field, {}).get(mode, {})
                     event = timing.get("event_us", {})
                     row[short + "_us"] = event.get("candidate_median", event.get("median"))
+                    row[short + "_paired_w0_us"] = event.get("baseline_median")
                     row[short + "_paired_ratio_vs_same_recipe_w0"] = event.get("median_paired_ratio")
+                    row[short + "_min_paired_ratio"] = event.get("min_paired_ratio")
+                    row[short + "_max_paired_ratio"] = event.get("max_paired_ratio")
                     row[short + "_observation"] = timing.get("observation")
                 rows.append(row)
     if rows:
@@ -330,6 +372,36 @@ def write_summary(report, directory):
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
+
+
+def write_brief(report, directory):
+    """Small pasteable performance report; retain full evidence in JSON/CSV."""
+    mode = "graph" if "graph" in report["args"]["timing"] else report["args"]["timing"]
+    lines = [f"{VERSION} status={report['status']} timing={mode}",
+             "Times are us. Ratios use paired native W0; cold controls are read-only diagnostics."]
+    def number(value, digits=2):
+        return "NA" if value is None else f"{value:.{digits}f}"
+    for case in report["cases"]:
+        lines.append(f"case={case['label']} bf16={case['baselines'].get('bf16', {}).get('status', 'NA')} c8={case['baselines'].get('c8', {}).get('status', 'NA')}")
+        lines.append("name | status | read | read/native W0 | write+read | paired W0 write+read | write+read ratio [min,max] | L2")
+        for entry in case["variants"] + case.get("diagnostics", []):
+            read = entry.get("timing_prepared_read", {}).get(mode, {}).get("event_us", {})
+            pipeline = entry.get("timing_write_read", {}).get(mode, {}).get("event_us", {})
+            ratio = "NA"
+            if pipeline.get("median_paired_ratio") is not None:
+                ratio = (number(pipeline["median_paired_ratio"], 3) + " [" +
+                         number(pipeline.get("min_paired_ratio"), 3) + "," +
+                         number(pipeline.get("max_paired_ratio"), 3) + "]")
+            lines.append(" | ".join((entry["name"], entry["status"],
+                         number(read.get("candidate_median", read.get("median"))),
+                         number(read.get("median_paired_ratio"), 3),
+                         number(pipeline.get("candidate_median", pipeline.get("median"))),
+                         number(pipeline.get("baseline_median")), ratio,
+                         number(entry.get("vs_bf16_math", {}).get("relative_l2"), 6))))
+    lines.append("MEASURED means experiment completed, not that performance passed.")
+    text = "\n".join(lines) + "\n"
+    (Path(directory) / "brief.txt").write_text(text, encoding="utf-8")
+    return text
 
 
 def preflight(device="npu:0"):
@@ -397,6 +469,8 @@ def parser():
     p.add_argument("--pipeline-l2", type=float, default=.001)
     p.add_argument("--block-keys", type=int, default=16)
     p.add_argument("--block-heads", type=int, default=16)
+    p.add_argument("--fused-cold-control", action="store_true",
+                   help="Add read-only custom-kernel C4 diagnostic; native W0 stays the performance baseline")
     p.add_argument("--output", type=Path)
     return p
 
@@ -427,6 +501,7 @@ def main(argv=None):
             report["cases"].append(current)
         (directory / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
         write_summary(report, directory)
+        write_brief(report, directory)
 
     try:
         if args.input:
@@ -447,6 +522,7 @@ def main(argv=None):
     finally:
         persist()
     print(f"{report['status']}: {directory / 'results.json'}; production validation NOT_VALIDATED", flush=True)
+    print(write_brief(report, directory), flush=True)
     return 0 if report["status"] in SUCCESS_STATUSES else 1
 
 

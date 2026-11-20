@@ -3,17 +3,16 @@ GLM-5.3 main-KV recent-window experiment — executable prototype
 
 Status
 ------
-This v2 delivery contains an actual Ascend Triton attention kernel, a native
+This v3 delivery contains an actual Ascend Triton attention kernel, a native
 quantization/write adapter, an A5 experiment runner, and a separately tested
 request-lifecycle metadata core. It has NOT been compiled or run on A5 by the
 author. It is NOT installed into GLM-5.3, mxllm, vLLM, or a PD connector.
 Production correctness, task accuracy, and performance are NOT_VALIDATED.
 
-The latest supplied v1 log from the new container reports BF16, C8, baseline
-C4 W0 and alg2_max7 C4 W0 as MEASURED. The remaining failure is Triton UB
-overflow: 10,799,872 bits requested versus 1,769,472 bits available. V2 reduces
-the fused kernel's working set. Both native backend files remain byte-identical
-to the v1 payload used in that run. V2 A5 compilation/execution is still pending.
+The supplied v2 run passed its numerical controls but showed a severe latency
+regression versus native C4. V3 restructures that custom reader. Both native
+backend files remain byte-identical to the working v1/v2 payload. V3 A5
+compilation, numerical results and performance remain unverified.
 
 The acceptance requirement is no performance regression. One attention launch
 is a design choice, not evidence that this kernel is fast. In particular, the
@@ -24,10 +23,17 @@ What runs
 ---------
 kv_hot_fused.py reads existing packed C4 history and a C8 recent-token ring
 inside ONE kernel, with one online softmax and no separate merge kernel.
-V2 streams 64-feature tiles through QK and PV rather than materializing
-full-width 512-feature decode intermediates. Default key tiles are 16 and
-compiler multibuffering is disabled. KV is decoded in both passes; this can
-change latency and must be measured. QK is not recomputed per output tile.
+V3 retains Q outside the key loop and decodes each KV tile once, reusing the
+BF16 result for QK and PV. With RoPE, each key tile now has three dot operations
+instead of seventeen. Integer/FP32 decoder intermediates remain 64 features
+wide; a full-width BF16 tile is assembled with a dynamic loop. The FP32 output
+accumulator is updated once per key tile. Cold-only tiles skip C8 decoding;
+hot-only tiles skip C4 latent decoding. Default key tiles are 16 and compiler
+multibuffering is disabled. These are structural changes, not measured speedups.
+Retaining Q/KV can increase peak compiler storage; A5 compilation must verify it.
+The portable BF16 assembly uses [BK,8,64]; device alignment and compiler copies
+can inflate its storage beyond its logical byte count. V3 is not asserted to
+fit UB until the installed A5 compiler has accepted the actual specialization.
 The original TopK is unchanged. For query position p, an already-selected
 token uses C8 only if p-W < token <= p. Missing required ring tags produce
 NaN, never a silent C4 fallback. Padding and future tokens are masked.
@@ -44,6 +50,13 @@ and fused C4+C8 W>0. Cold recipes are baseline and scale_alg=2,dst_type_max=7.
 Each hot variant is timed against native W=0 using the SAME cold recipe.
 W=0 bypasses the custom reader and allocates no hot ring. Existing reference
 setup still prepares native controls outside measurement.
+
+--fused-cold-control adds a separate read-only diagnostic using the custom
+reader with hot selection, tags and C8 decoding disabled at compile time. It
+uses the positive window's cache layout but computes pure C4 (semantic W=0).
+This isolates custom-reader overhead from the window path. It never replaces
+the native C4 baseline, runs no writer, and has no write+read timing. Its
+matching-reference control must pass before its read latency is measured.
 
 No extra Hadamard is applied. Captured activations must already be in the
 model's actual latent basis, including any transformation folded into weights.
@@ -99,7 +112,7 @@ First A5 compilation, accuracy and timing experiment:
 
   python test_kv_hot_fused_a5.py --keys 8192 --queries 4 \
     --windows 0,128 --cold-recipes baseline,alg2_max7 \
-    --block-keys 16 \
+    --block-keys 16 --fused-cold-control \
     --timing eager,graph --output /tmp/kv-hot-first-run
 
 After the first run passes, expand the existing experiment:
@@ -125,6 +138,9 @@ establish GLM task-score recovery or the effect of checkpoint-folded rotation.
 
 Interpreting results
 --------------------
+brief.txt is printed at completion and provides a short pasteable table of
+read, write+read, paired native W0 times, paired ratios and relative L2.
+Diagnostic rows have no pipeline timing; missing measurements are NA.
 results.json, summary.csv, run.log, and per-case inputs.npz/outputs.npz retain
 errors, references, original indices, query positions, and ring logical tags.
 CONTROL_FAILED/ERROR rows are not timed. Matching references use the actual

@@ -129,6 +129,67 @@ class RingPlanTests(unittest.TestCase):
         self.assertTrue(np.all(hot_slots == 22))
         np.testing.assert_array_equal(first.hot_positions.array.reshape(-1)[first.plan["current_slots"]], query_positions(data))
 
+    def test_fused_cold_control_is_explicit_read_only_and_keeps_native_w0(self):
+        data = synthetic_case(batch=1, queries=2, keys=40, heads=2, dim=512, rope_dim=64, topk=16)
+        factory_calls, native_calls, writer_calls = [], [], []
+        cache = ArrayTensor(np.zeros((1, 128, 1, 400), np.uint8))
+
+        def quantize(*args):
+            writer_calls.append(args)
+            raise AssertionError("A read-only diagnostic must not quantize or scatter")
+
+        base = types.SimpleNamespace(
+            data=data, torch=types.SimpleNamespace(uint8=np.uint8, int64=np.int64, int32=np.int32),
+            batch=1, page=128, scale=data["scale"], c8_logical=np.ones((1, 40, 1, 656), np.uint8),
+            tensor=lambda a, dtype=None: ArrayTensor(np.asarray(a, dtype=dtype).copy()),
+            q_nope=None, q_rope=None, indices=None, table=None, lengths=None, quantize=quantize)
+        variant = types.SimpleNamespace(metadata={}, cache=cache, _quantize=quantize,
+                                        decoded_kv=lambda: data["kv"],
+                                        call=lambda: native_calls.append("native_read") or "native",
+                                        run=lambda write=False: native_calls.append(("native_run", write)) or "native")
+        scales = types.SimpleNamespace(base=base, environment={}, prepare=lambda name: variant)
+
+        def factory(*args, **kwargs):
+            factory_calls.append(kwargs)
+            return types.SimpleNamespace(metadata={"diagnostic_cold_only": kwargs["diagnostic_cold_only"]},
+                                         call=lambda: "custom_cold" if kwargs["diagnostic_cold_only"] else "custom_hot")
+
+        backend = HotWindowBackend(data, scale_backend=scales, reader_factory=factory)
+        control = backend.prepare_cold_control("baseline", 16)
+        self.assertIs(control, backend.prepare_cold_control("baseline", 16))
+        self.assertEqual(control.call(), "custom_cold")
+        self.assertEqual(control.run(write=False), "custom_cold")
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            control.run(write=True)
+        self.assertEqual(writer_calls, [])
+        self.assertTrue(factory_calls[0]["diagnostic_cold_only"])
+        self.assertEqual(control.metadata["effective_window"], 0)
+        self.assertIsNone(control.metadata["hot_precision"])
+        self.assertEqual(control.metadata["role"], "READ_ONLY_DIAGNOSTIC")
+        self.assertFalse(control.metadata["production_comparison_eligible"])
+        self.assertIsNot(control.cold_cache, cache)
+
+        native = backend.prepare("baseline", 0)
+        hot = backend.prepare("baseline", 16)
+        self.assertEqual(native.call(), "native")
+        self.assertEqual(native.run(write=True), "native")
+        self.assertTrue(native.metadata["zero_window_native_bypass"])
+        self.assertFalse(native.diagnostic_cold_only)
+        self.assertEqual(hot.call(), "custom_hot")
+        self.assertFalse(factory_calls[1]["diagnostic_cold_only"])
+        self.assertIsNot(hot.cold_cache, control.cold_cache)
+        self.assertEqual(native_calls, ["native_read", ("native_run", True)])
+
+    def test_fused_cold_control_rejects_native_zero_window_and_bad_recipe(self):
+        base = types.SimpleNamespace(data=tiny_case())
+        scales = types.SimpleNamespace(base=base, environment={})
+        backend = HotWindowBackend(base.data, scale_backend=scales)
+        for window in (0, -1, True, 2.5):
+            with self.assertRaises(ValueError):
+                backend.prepare_cold_control("baseline", window)
+        with self.assertRaisesRegex(ValueError, "Unknown cold C4 recipe"):
+            backend.prepare_cold_control("unknown", 16)
+
 
 class FakeBackend:
     fail_window = None

@@ -183,8 +183,26 @@ class TestStaticPreparationContract(unittest.TestCase):
             self.assertEqual(constants["CAP"], 640)
             self.assertFalse(constants["multibuffer"])
             self.assertEqual(constants["BK"], 16)
+            self.assertTrue(constants["HOT_ENABLED"])
         self.assertEqual(runner.metadata["attention_launches_per_call"], 1)
+        self.assertEqual(runner.metadata["revision"], 3)
+        self.assertEqual(runner.metadata["kv_decode_passes_per_key_tile"], 1)
+        self.assertEqual(runner.metadata["source_dot_calls_per_key_tile"], 3)
         self.assertIsNone(runner.metadata["fallback"])
+
+    def test_cold_diagnostic_is_explicit_and_does_not_enable_w0(self):
+        with mock.patch.dict(sys.modules, {"torch": mock.Mock()}), mock.patch.object(fused, "_load_kernel"):
+            runner = fused.FusedHotKVReader(*inputs(), window=512, page=128, scale=1 / 24,
+                                            diagnostic_cold_only=True)
+            self.assertFalse(runner._constants["HOT_ENABLED"])
+            self.assertEqual(runner.metadata["semantic_window"], 0)
+            self.assertTrue(runner.metadata["diagnostic_cold_only"])
+            with self.assertRaisesRegex(ValueError, "window"):
+                fused.FusedHotKVReader(*inputs(), window=0, page=128, scale=1 / 24,
+                                       diagnostic_cold_only=True)
+            with self.assertRaisesRegex(ValueError, "diagnostic_cold_only"):
+                fused.FusedHotKVReader(*inputs(), window=512, page=128, scale=1 / 24,
+                                       diagnostic_cold_only="true")
 
     def test_import_does_not_require_torch_or_triton(self):
         code = """
@@ -227,12 +245,13 @@ class _Tensor(np.ndarray):
 
 
 class _Pointer:
-    def __init__(self, values, offset=0):
+    def __init__(self, values, offset=0, name=None):
         self.values = values.reshape(-1)
         self.offset = np.asarray(offset)
+        self.name = name
 
     def __add__(self, offset):
-        return _Pointer(self.values, self.offset + offset)
+        return _Pointer(self.values, self.offset + offset, self.name)
 
 
 class _TL:
@@ -245,6 +264,8 @@ class _TL:
     def __init__(self):
         self.pid = (0, 0)
         self.load_shapes = []
+        self.loads = []
+        self.dots = []
 
     def program_id(self, axis):
         return _Tensor(np.int32(self.pid[axis]))
@@ -255,12 +276,13 @@ class _TL:
 
     @staticmethod
     def full(shape, fill, dtype):
-        return _Tensor(np.full(shape, fill, dtype))
+        return _Tensor(np.full(shape, fill, np.float32 if dtype == "bf16" else dtype))
 
     def load(self, pointer, mask=True, other=0):
         indices = np.asarray(pointer.offset)
         self.load_shapes.append(indices.shape)
         active = np.broadcast_to(mask, indices.shape)
+        self.loads.append((pointer.name, indices.shape, int(np.count_nonzero(active))))
         if np.any(indices[active] < 0) or np.any(indices[active] >= pointer.values.size):
             raise AssertionError("Unmasked out-of-range kernel load")
         result = np.full(indices.shape, other, dtype=pointer.values.dtype)
@@ -299,8 +321,8 @@ class _TL:
     def max(value, axis):
         return _Tensor(np.max(value, axis=axis))
 
-    @staticmethod
-    def dot(a, b):
+    def dot(self, a, b):
+        self.dots.append((a.shape, b.shape))
         return _Tensor(np.matmul(a, b))
 
     @staticmethod
@@ -324,8 +346,8 @@ def _kernel_body():
     return language, scope["_mixed_sparse_mla"]
 
 
-class TestFeatureStreamedKernelBody(unittest.TestCase):
-    def fixture(self, rope=64, zero_query=False):
+class TestDecodeOnceKernelBody(unittest.TestCase):
+    def fixture(self, rope=64, zero_query=False, hot_enabled=True):
         rng = np.random.default_rng(23)
         keys, heads, page, capacity, window = 47, 17, 16, 16, 9
         q = _bf16(rng.normal(0, .15, (1, heads, 512)))
@@ -362,9 +384,9 @@ class TestFeatureStreamedKernelBody(unittest.TestCase):
                   np.array([position], np.int64), np.array([keys], np.int32)]
         constants = dict(H=heads, S=ids.shape[-1], R=rope, B=1, PAGES=3, TABLE_PAGES=3,
                          PAGE=page, CAP=capacity, CW=cold_width, HW=hot_width,
-                         WINDOW=window, SCALE=.04, BK=16, BH=16)
+                         WINDOW=window, SCALE=.04, BK=16, BH=16, HOT_ENABLED=hot_enabled)
         active = [int(i) for i in ids.reshape(-1) if 0 <= i <= position]
-        kv = np.array([fused.decode_c8_token(hot_tokens[i], rope)[0] if i > position-window
+        kv = np.array([fused.decode_c8_token(hot_tokens[i], rope)[0] if hot_enabled and i > position-window
                        else fused.decode_c4_token(cold_tokens[i], rope)[0] for i in active])
         # Match BF16 dot operands while keeping reference reductions in FP64.
         kv = _bf16(kv).astype(np.float64)
@@ -373,20 +395,22 @@ class TestFeatureStreamedKernelBody(unittest.TestCase):
         reference = ((probs / probs.sum(axis=-1, keepdims=True)) @ kv)[None]
         return values, constants, reference
 
-    def execute(self, values, constants):
+    def execute(self, values, constants, return_trace=False):
         language, kernel = _kernel_body()
         output = np.zeros((1, constants["H"], 512), np.float32)
-        pointers = [_Pointer(x) for x in values] + [_Pointer(output)]
+        names = ("Q", "QR", "IDX", "COLD", "TABLE", "HOT", "TAGS", "ROW_BATCH", "POS", "LENGTHS")
+        pointers = [_Pointer(x, name=name) for name, x in zip(names, values)] + [_Pointer(output, name="OUT")]
         with np.errstate(invalid="ignore", over="ignore"):
             for group in range((constants["H"] + constants["BH"] - 1) // constants["BH"]):
                 language.pid = (0, group)
                 kernel(*pointers, **constants)
         # Source-level transfer bound only; the actual compiler can still
         # allocate extra buffers. Catch accidental full-512 decode loads.
-        self.assertTrue(all(len(shape) < 2 or shape[-1] <= 64 for shape in language.load_shapes))
-        return output
+        self.assertTrue(all(len(shape) < 2 or shape[-1] <= 64
+                            for name, shape, _ in language.loads if name in ("COLD", "HOT")))
+        return (output, language) if return_trace else output
 
-    def test_streamed_qk_pv_agree_with_independent_reference(self):
+    def test_decode_once_qk_pv_agree_with_independent_reference(self):
         for rope in (0, 64):
             for bk in (16, 32):
                 for zero_query in (False, True):
@@ -397,6 +421,64 @@ class TestFeatureStreamedKernelBody(unittest.TestCase):
                         relative_l2 = np.linalg.norm(output-reference) / np.linalg.norm(reference)
                         self.assertLess(relative_l2, .004)
                         self.assertTrue(np.isfinite(output).all())
+
+    def test_unsorted_hot_cold_and_padding_remain_correct(self):
+        values, constants, reference = self.fixture()
+        np.random.default_rng(91).shuffle(values[2].reshape(-1))
+        output = self.execute(values, constants)
+        self.assertLess(np.linalg.norm(output-reference) / np.linalg.norm(reference), .004)
+
+    def test_full_width_dots_and_q_load_count_do_not_scale_with_features(self):
+        # This executes the actual kernel body, not a duplicate implementation.
+        # Counts guard the source regression that caused 17 dots per key tile
+        # and reloaded Q in every feature loop. They are NOT NPU timing claims.
+        for rope in (0, 64):
+            values, constants, _ = self.fixture(rope)
+            _, trace = self.execute(values, constants, return_trace=True)
+            groups = math.ceil(constants["H"] / constants["BH"])
+            tiles = math.ceil(constants["S"] / constants["BK"])
+            self.assertEqual(len(trace.dots), groups * tiles * (3 if rope else 2))
+            q_loads = [shape for name, shape, _ in trace.loads if name == "Q"]
+            self.assertEqual(q_loads, [(constants["BH"], 512)] * groups)
+            self.assertEqual(sum(a[-1] == 512 and b[0] == 512 for a, b in trace.dots), groups * tiles)
+            self.assertEqual(sum(b[-1] == 512 for _, b in trace.dots), groups * tiles)
+
+    def test_compile_time_cold_control_matches_c4_and_never_reads_hot(self):
+        values, constants, reference = self.fixture(hot_enabled=False)
+        values[6].fill(-1)  # Diagnostic cannot depend on ring validity.
+        output, trace = self.execute(values, constants, return_trace=True)
+        self.assertLess(np.linalg.norm(output-reference) / np.linalg.norm(reference), .004)
+        self.assertFalse(any(name in ("HOT", "TAGS") for name, _, _ in trace.loads))
+
+    def test_all_cold_tile_skips_c8_decode_and_decodes_once(self):
+        values, constants, _ = self.fixture()
+        values[2] = np.arange(16, dtype=np.int32).reshape(1, 1, 16)
+        constants["S"] = 16
+        _, trace = self.execute(values, constants, return_trace=True)
+        groups = math.ceil(constants["H"] / constants["BH"])
+        self.assertFalse(any(name == "HOT" for name, _, _ in trace.loads))
+        # Per feature: one packed-byte matrix and one 2-scale matrix. RoPE
+        # adds two byte matrices. A second decode pass would double 16 here.
+        cold_loads = [shape for name, shape, _ in trace.loads if name == "COLD"]
+        self.assertEqual(len(cold_loads), groups * (8 * 2 + 2))
+
+    def test_all_hot_tile_skips_c4_decode_but_retains_original_rope(self):
+        values, constants, _ = self.fixture(zero_query=True)
+        values[2] = np.arange(35, 44, dtype=np.int32).reshape(1, 1, 9)
+        constants["S"] = 9
+        output, trace = self.execute(values, constants, return_trace=True)
+        # Zero Q makes the independent result the mean of valid decoded hot
+        # vectors. This also catches wrong assembly order in the hot-only arm.
+        decoded = [_bf16(fused.decode_c8_token(values[5][0, int(key) % constants["CAP"], 0],
+                                               constants["R"])[0])
+                   for key in values[2].reshape(-1)]
+        reference = np.broadcast_to(np.mean(np.asarray(decoded, np.float64), axis=0), output.shape)
+        self.assertLess(np.linalg.norm(output-reference) / np.linalg.norm(reference), .004)
+        groups = math.ceil(constants["H"] / constants["BH"])
+        cold_loads = [shape for name, shape, _ in trace.loads if name == "COLD"]
+        self.assertEqual(len(cold_loads), groups * 2)  # Only original RoPE.
+        hot_loads = [shape for name, shape, _ in trace.loads if name == "HOT"]
+        self.assertEqual(len(hot_loads), groups * 8 * 5)  # FP8 + four scale bytes.
 
     def test_missing_hot_tag_and_invalid_page_surface_as_nan(self):
         for bad in ("tag", "page", "batch"):
