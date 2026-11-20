@@ -13,18 +13,18 @@ import tempfile
 import traceback
 import urllib.request
 
-PAYLOAD_COMMIT = "d2c58ee57a5d55dc4122a868a0f9746ae45dcb4e"
+PAYLOAD_COMMIT = "d1e4268c95761bc72bab523a3bfb3dc243fe3d33"
 REPOSITORY = "Qiming-zhang-rondo/kimi-k3-a5-c8"
 FILES = {
-    "README.txt": "9233a036155ca7c8d63202ebcafa121585e87456384570c328408e55cd7cd603",
+    "README.txt": "7117f64463f0327423644365126b501198d26144e81f59529a30aff616c26ce8",
     "kv_c4_scale_backend.py": "5002af47b6f7394f84f6b5d2d65eeeaf4de8097df279f9cf0328b252f87149a5",
-    "kv_hot_backend.py": "4e3bdbc732bd584aa38c48d97009cd52c52f8f1b21ce636820cb1e6e9b016718",
-    "kv_hot_fused.py": "0b1b33f668d5dbc655b406f047f8f231567b50a0125b3b22afc22203f9d30c79",
+    "kv_hot_backend.py": "90a9a005458ebb2c8b837f103641b3897a8c99d29fa4f22ae4254dc6d9cb61fa",
+    "kv_hot_fused.py": "d2a7f49d9a317d31e82a8ef9bd45e2797e142868964d70a8dcb7f9f10c39cc19",
     "kv_hot_state.py": "633ad5333f441ca070f7415a2ad35dd6243cc4e0e19d481fdcc655989518fc66",
     "kv_window_backend.py": "20c33c19612da73484ea7c57e05b2a78eba68e7bc886db6daf0997976a530bc4",
     "kv_window_capture.py": "b872f9a378a22a27c3ff970426c33718d3c20958724ee018d383b4bb51216bb7",
     "kv_window_common.py": "7357ca29ee22f71445b1d9a3d5eddf8c2d6c0a0dab134b0e2e4d42c36e3dd724",
-    "test_kv_hot_fused_a5.py": "c8ff0124612d3cf4fe72cfb051730003b7c63a475f1867b9ff7ea565a49caaf0"
+    "test_kv_hot_fused_a5.py": "a64183fa77fbdaa8085c2ff03b90723de6e9f31deffdfb2b91fb9a42ce22a2e2"
 }
 
 
@@ -119,6 +119,8 @@ def main(argv=None):
     finally:
         (run/"launcher.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"Full log: {run}/run.log", flush=True)
+        if (run/"results"/"brief.txt").is_file():
+            print(f"Short summary: {run}/results/brief.txt", flush=True)
 
 
 if __name__ == "__main__":
