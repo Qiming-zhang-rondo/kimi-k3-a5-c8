@@ -13,27 +13,28 @@ import tempfile
 import traceback
 import urllib.request
 
-PAYLOAD_COMMIT = "b0e252ee7de7b77593a68f1c76fd03d46ff68289"
+PAYLOAD_COMMIT = "5e70b3b6e850f6f6ec15fbdade97aa32907306e0"
 REPOSITORY = "Qiming-zhang-rondo/kimi-k3-a5-c8"
 FILES = {
-    "NATIVE_TWOPASS_README.txt": "b65b26d0223b9acf0d2bab7c9b2aa3640e809ae560f9bb044690e25a22e415d3",
-    "inspect_kv_fusion_capability.py": "d0f7bb3052a29380b363e4d177a505299c4d5a91f3d607e2e2f66872a462e6f9",
-    "kv_c4_scale_backend.py": "5002af47b6f7394f84f6b5d2d65eeeaf4de8097df279f9cf0328b252f87149a5",
-    "kv_hot_backend.py": "90a9a005458ebb2c8b837f103641b3897a8c99d29fa4f22ae4254dc6d9cb61fa",
-    "kv_native_merge.py": "55c5bad52891dd539e9e5a1acde942aca7decf4019e20d658a08b12b7ad4468a",
-    "kv_native_partition.py": "1b83122344bd1fd2ff07544f9fcf8678e0edd6e4f37e583a71940a32b363d7db",
-    "kv_native_store.py": "94e33ae49f72bfcf5efc0c1914e5ca9f312e6afce1ed9442b22decea56ef85d2",
-    "kv_native_twopass.py": "2f7929472abe4b5257f7d8a274539474be0bb28a9064f7771c96e457e31b669c",
-    "kv_window_backend.py": "20c33c19612da73484ea7c57e05b2a78eba68e7bc886db6daf0997976a530bc4",
-    "kv_window_capture.py": "b872f9a378a22a27c3ff970426c33718d3c20958724ee018d383b4bb51216bb7",
-    "kv_window_common.py": "7357ca29ee22f71445b1d9a3d5eddf8c2d6c0a0dab134b0e2e4d42c36e3dd724",
     "test_kv_hot_fused_a5.py": "a64183fa77fbdaa8085c2ff03b90723de6e9f31deffdfb2b91fb9a42ce22a2e2",
-    "test_kv_native_twopass_a5.py": "0b209ee57cf1e355ce2762ab6300717e0eeb1451ceea806b251daa32859f66be"
+    "kv_window_backend.py": "20c33c19612da73484ea7c57e05b2a78eba68e7bc886db6daf0997976a530bc4",
+    "kv_window_common.py": "7357ca29ee22f71445b1d9a3d5eddf8c2d6c0a0dab134b0e2e4d42c36e3dd724",
+    "kv_hot_backend.py": "90a9a005458ebb2c8b837f103641b3897a8c99d29fa4f22ae4254dc6d9cb61fa",
+    "kv_c4_scale_backend.py": "5002af47b6f7394f84f6b5d2d65eeeaf4de8097df279f9cf0328b252f87149a5",
+    "kv_native_twopass.py": "88ad60e93a360d90f159f873219ddfba2f6bfb1e93c67962ef0659a6c6d8c4b7",
+    "kv_window_capture.py": "b872f9a378a22a27c3ff970426c33718d3c20958724ee018d383b4bb51216bb7",
+    "kv_native_store.py": "94e33ae49f72bfcf5efc0c1914e5ca9f312e6afce1ed9442b22decea56ef85d2",
+    "kv_native_merge.py": "55c5bad52891dd539e9e5a1acde942aca7decf4019e20d658a08b12b7ad4468a",
+    "NATIVE_TWOPASS_README.txt": "ec5b65eaee197b943ec689bab8fd49bc28329c1d82f23ad96fdab6e02195b429",
+    "inspect_kv_fusion_capability.py": "d0f7bb3052a29380b363e4d177a505299c4d5a91f3d607e2e2f66872a462e6f9",
+    "kv_native_hot_merge.py": "66b01342341b285c42879ea8cf2bb6740854cba473df1752831d954ed7f1208c",
+    "kv_native_partition.py": "1b83122344bd1fd2ff07544f9fcf8678e0edd6e4f37e583a71940a32b363d7db",
+    "test_kv_native_twopass_a5.py": "2fed69f5dc36e9007571a9922cba3a2eff8c5bfad71008ba4bdc6802371ea141"
 }
 
 
 def download_payload(directory, insecure=False):
-    if len(PAYLOAD_COMMIT) != 40 or len(FILES) != 13:
+    if len(PAYLOAD_COMMIT) != 40 or len(FILES) != 14:
         raise RuntimeError("Launcher has not been pinned; refusing to run")
     context = ssl._create_unverified_context() if insecure else ssl.create_default_context()
     records = {}
