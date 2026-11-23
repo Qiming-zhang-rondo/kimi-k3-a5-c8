@@ -45,6 +45,18 @@ class TestHostContract(unittest.TestCase):
                                            window=32, ring_capacity=32)
         self.assertEqual((short.hot_width, short.block), (17, 32))
 
+    def test_packed_scan_rejects_signed_prefix_overflow_without_fallback(self):
+        supported = partition.validate_inputs(Metadata((1, 1, 32767)), Metadata((1,)),
+                                               window=128, ring_capacity=128, variant="packed_one_scan")
+        self.assertEqual(supported.variant, "packed_one_scan")
+        self.assertLessEqual(32767 * ((1 << supported.packed_shift) + 1), 2147483647)
+        with self.assertRaisesRegex(ValueError, "signed int32"):
+            partition.validate_inputs(Metadata((1, 1, 32768)), Metadata((1,)),
+                                       window=128, ring_capacity=128, variant="packed_one_scan")
+        # The original algorithm has no packed-prefix overflow restriction.
+        self.assertEqual(partition.validate_inputs(Metadata((1, 1, 32768)), Metadata((1,)),
+                                                   window=128, ring_capacity=128).variant, "two_scan")
+
     def test_bad_metadata_rejected_without_reading_values(self):
         for index, attribute, value in ((0, "shape", (6, 2, 2048)), (0, "dtype", "torch.int64"),
                                          (0, "device", "cpu"), (1, "shape", (6, 1)),
@@ -56,7 +68,8 @@ class TestHostContract(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     partition.validate_inputs(*inputs, window=128, ring_capacity=160)
         for overrides in (dict(window=0), dict(window=True), dict(ring_capacity=127),
-                          dict(hot_width=127), dict(hot_width=2049), dict(remap_ring="true")):
+                          dict(hot_width=127), dict(hot_width=2049), dict(remap_ring="true"),
+                          dict(variant="unknown")):
             kwargs = dict(window=128, ring_capacity=160)
             kwargs.update(overrides)
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
@@ -92,7 +105,8 @@ class TestHostContract(unittest.TestCase):
                     self.assertEqual(grid, (6,))
                     self.assertEqual(args[:2], inputs)
                     self.assertEqual(constants, dict(S=2048, HW=128, WINDOW=128, CAP=160,
-                                                     REMAP_RING=remap, BLOCK=2048))
+                                                     REMAP_RING=remap, BLOCK=2048,
+                                                     PACKED_SCAN=False, PACKED_SHIFT=12))
                 self.assertEqual(prepared.metadata["kernel_launches"], 1)
                 self.assertEqual(prepared.metadata["attention_launches"], 0)
                 if not remap:
@@ -179,6 +193,10 @@ class TL:
     def maximum(left, right):
         return Tensor(np.maximum(left, right))
 
+    @staticmethod
+    def max(value, axis):
+        return Tensor(np.max(value, axis=axis))
+
 
 def kernel_body():
     tree = ast.parse(Path(partition.__file__).read_text())
@@ -220,7 +238,11 @@ def oracle(indices, positions, window, capacity, hot_width, remap):
 
 
 class TestActualKernelBody(unittest.TestCase):
-    def execute(self, indices, positions, window=8, capacity=16, hot_width=None, remap=True, outputs=None):
+    variant = "two_scan"
+
+    def execute(self, indices, positions, window=8, capacity=16, hot_width=None, remap=True,
+                outputs=None, variant=None):
+        variant = self.variant if variant is None else variant
         rows, _, width = indices.shape
         hot_width = min(window, width) if hot_width is None else hot_width
         outputs = allocate_outputs(rows, width, hot_width, remap) if outputs is None else outputs
@@ -231,8 +253,9 @@ class TestActualKernelBody(unittest.TestCase):
         for row in range(rows):
             tl.row = row
             kernel(*pointers, S=width, HW=hot_width, WINDOW=window, CAP=capacity,
-                   REMAP_RING=remap, BLOCK=1 << (width-1).bit_length())
-        self.assertEqual(tl.scans, rows * 2)
+                   REMAP_RING=remap, BLOCK=1 << (width-1).bit_length(),
+                   PACKED_SCAN=variant == "packed_one_scan", PACKED_SHIFT=width.bit_length())
+        self.assertEqual(tl.scans, rows * (1 if variant == "packed_one_scan" else 2))
         for name in order:
             if name != "recent_ring" or remap:
                 np.testing.assert_array_equal(tl.writes[name], np.ones(outputs[name].size, np.int32), err_msg=name)
@@ -286,6 +309,38 @@ class TestActualKernelBody(unittest.TestCase):
         positions = np.array([2147483648], np.int64)
         result = self.execute(indices, positions, window=8, capacity=16)
         self.assertFalse(result["invalid_rows"].any())
+
+
+class TestPackedKernelBody(TestActualKernelBody):
+    # Re-run every original semantic/bounds/write-disjointness contract through
+    # the new body, including invalid rows and in-place input/buffer reuse.
+    variant = "packed_one_scan"
+
+    def test_randomized_equivalence_to_two_scan_for_all_outputs(self):
+        rng = np.random.default_rng(154)
+        for width in (1, 2, 7, 16, 33, 127, 128, 257, 2048, 2051):
+            for window in (1, 8, 129):
+                with self.subTest(width=width, window=window):
+                    positions = np.array([0, 17, 511, 8191], np.int64)
+                    indices = np.full((4, 1, width), -1, np.int32)
+                    for row, position in enumerate(positions):
+                        n = min(int(position) + 1, width)
+                        indices[row, 0, :n] = rng.choice(int(position) + 1, n, replace=False)
+                        rng.shuffle(indices[row, 0])  # Interleaved -1 entries.
+                    for remap in (False, True):
+                        packed = self.execute(indices, positions, window=window,
+                                              capacity=window+3, remap=remap)
+                        old = self.execute(indices, positions, window=window,
+                                           capacity=window+3, remap=remap, variant="two_scan")
+                        for name in packed:
+                            np.testing.assert_array_equal(packed[name], old[name], err_msg=name)
+
+    def test_largest_safe_encoded_prefix_does_not_carry_or_wrap(self):
+        width = 32767
+        indices = np.arange(width, dtype=np.int32)[None, None, :]
+        result = self.execute(indices, np.array([width-1], np.int64), window=width, capacity=width)
+        self.assertFalse(result["invalid_rows"].any())
+        np.testing.assert_array_equal(result["recent_global"], indices)
 
 
 if __name__ == "__main__":

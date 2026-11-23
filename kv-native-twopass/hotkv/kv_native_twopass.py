@@ -16,8 +16,9 @@ from kv_window_common import flatten_queries, paged_array, query_positions, vali
 RECIPES = ("baseline", "alg2_max7")
 MODES = ("split_c4", "mixed")
 INDEX_CAPACITIES = ("full", "bounded")
-MERGES = ("torch", "triton")
-PARTITIONS = ("argsort_int", "argsort_float", "triton_scan")
+MERGES = ("torch", "triton", "triton_log512", "triton_direct512")
+PARTITIONS = ("argsort_int", "argsort_float", "triton_scan", "triton_scan_packed")
+WRITERS = ("native", "fused_store")
 
 
 def validate_partition_width(partition, width):
@@ -136,27 +137,28 @@ class NativeTwoPassBackend:
     def baseline_decoded(self, kind):
         return self.data["kv"].copy() if kind == "bf16" else self.base.decoded_kv(kind)
 
-    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch", partition="argsort_int"):
-        if recipe not in RECIPES or mode not in MODES or index_capacity not in INDEX_CAPACITIES or merge not in MERGES or partition not in PARTITIONS:
-            raise ValueError("Unsupported recipe/mode/index_capacity/merge/partition")
+    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch", partition="argsort_int", writer="native"):
+        if recipe not in RECIPES or mode not in MODES or index_capacity not in INDEX_CAPACITIES or merge not in MERGES or partition not in PARTITIONS or writer not in WRITERS:
+            raise ValueError("Unsupported recipe/mode/index_capacity/merge/partition/writer")
         if isinstance(window, (bool, np.bool_)) or not isinstance(window, (int, np.integer)) or window < 0:
             raise ValueError("window must be an integer >= 0")
-        key = (recipe, int(window), mode, index_capacity, merge, partition)
+        key = (recipe, int(window), mode, index_capacity, merge, partition, writer)
         if key not in self._runners:
             self._runners[key] = NativeTwoPassRunner(self, self.scales.prepare(recipe), int(window),
-                                                     mode, index_capacity, merge, partition)
+                                                     mode, index_capacity, merge, partition, writer)
         return self._runners[key]
 
 
 class NativeTwoPassRunner:
-    def __init__(self, backend, variant, window, mode, index_capacity, merge, partition="argsort_int"):
+    def __init__(self, backend, variant, window, mode, index_capacity, merge, partition="argsort_int", writer="native"):
         self.backend, self.base, self.variant = backend, backend.base, variant
         self.window, self.mode = window, mode
         self.index_capacity, self.merge_kind = index_capacity, merge
         self.partition_algo = partition
+        self.writer_kind, self._store_runner = writer, None
         self.metadata = dict(variant.metadata)
         self.metadata.update(window=window, mode=mode, index_capacity=index_capacity, merge=merge,
-                             partition=partition,
+                             partition=partition, writer=writer,
                              production_validation="NOT_VALIDATED",
                              lifetime_scope="fixed trailing query batch only")
         if window == 0:
@@ -186,11 +188,12 @@ class NativeTwoPassRunner:
             "max_unique_sort_key": 2*self.indices_cpu.shape[-1]-1,
             "device_execution": "NOT_VERIFIED; inspect profiler and full-pipeline measurement",
             "performance": "NOT_VALIDATED"}
-        if partition == "triton_scan":
+        if partition in ("triton_scan", "triton_scan_packed"):
             from kv_native_partition import PreparedPartition
+            options = dict(variant="packed_one_scan") if partition == "triton_scan_packed" else {}
             self._partition_runner = PreparedPartition(
                 base.indices, base.positions, window=window, ring_capacity=self.capacity,
-                hot_width=self.hot_width, remap_ring=mode == "mixed")
+                hot_width=self.hot_width, remap_ring=mode == "mixed", **options)
             partition_metadata = dict(self._partition_runner.metadata)
         self.metadata["partition_implementation"] = partition_metadata
         self.cold_cache = variant.cache.clone()
@@ -208,13 +211,20 @@ class NativeTwoPassRunner:
             self.hot_slots = base.tensor(self.plan["current_slots"], t.int64)
             ring_bytes = int(hot.nbytes)
         self._triton_merge = None
-        if merge == "triton":
+        if merge.startswith("triton"):
             from kv_native_merge import merge_states
             self._triton_merge = merge_states
             # Installed bindings may return FP32 even with BF16 queries. Use
             # the actual native output contract; this template read is setup.
             template = self._cold_read(self.prepared)[0]
             self.merge_output = t.empty_like(template)
+        if writer == "fused_store":
+            from kv_native_store import NativeQuantizedStore
+            self._store_runner = NativeQuantizedStore(
+                base, variant, self.cold_cache,
+                hot_cache=self.hot_cache if mode == "mixed" else None,
+                hot_slots=self.hot_slots if mode == "mixed" else None)
+            self.metadata["writer_implementation"] = dict(self._store_runner.metadata)
         self.metadata.update(
             reader="native_c4_c8_twopass" if mode == "mixed" else "native_c4_split_control",
             role="CANDIDATE" if mode == "mixed" else "SPLIT_C4_CONTROL",
@@ -236,12 +246,13 @@ class NativeTwoPassRunner:
             ring_metadata_bytes=int(self.ring_table.numel()*self.ring_table.element_size() +
                                     self.ring_lengths.numel()*self.ring_lengths.element_size() +
                                     self.hot_slots.numel()*self.hot_slots.element_size()) if mode == "mixed" else 0,
-            merge_output_bytes=int(self.merge_output.numel()*self.merge_output.element_size()) if merge == "triton" else 0,
+            merge_output_bytes=int(self.merge_output.numel()*self.merge_output.element_size()) if self._triton_merge else 0,
             independent_cold_cache=True,
             prepared_read_scope="two stats-on native subset reads + empty-aware merge; prepared indices",
             dynamic_read_scope="device-only partition + two stats-on native subset reads + merge",
             write_scope="current original BF16 -> C4 quantization/scatter" +
-                        (" + original BF16 -> C8 quantization/ring scatter" if mode == "mixed" else ""),
+                        (" + original BF16 -> C8 quantization/ring scatter" if mode == "mixed" else "") +
+                        ("; native quantizers unchanged; fused packing/scatter" if writer == "fused_store" else ""),
             component_timing_scope="diagnostic stages with prepared inputs; do not sum as full pipeline latency")
 
     def decoded_kv(self):
@@ -338,8 +349,10 @@ class NativeTwoPassRunner:
 
     def _merge(self, left, right, parts):
         if self._triton_merge is not None:
+            options = ({"variant": "log512"} if self.merge_kind == "triton_log512" else
+                       {"variant": "direct512"} if self.merge_kind == "triton_direct512" else {})
             return self._triton_merge(left, right, out=self.merge_output,
-                                      left_present=parts["old_present"], right_present=parts["recent_present"])
+                                      left_present=parts["old_present"], right_present=parts["recent_present"], **options)
         return merge_torch(self.base.torch, left, right, parts["old_present"], parts["recent_present"])
 
     def _read(self, parts):
@@ -364,13 +377,56 @@ class NativeTwoPassRunner:
     def call(self):
         return self.variant.call() if self.window == 0 else self._read(self.prepared)
 
+    def _write(self):
+        if self._store_runner is not None:
+            return self._store_runner.call()
+        self._cold_write()
+        if self.mode == "mixed":
+            self._hot_write()
+        return self.cold_cache.view(self.base.torch.uint8)
+
+    def writer_diagnostics(self):
+        """Untimed full-byte comparison including unwritten slots and RoPE.
+
+        Poisoning prevents a no-op store from passing because current-token
+        payloads already exist in the initialized cache. Restore both caches
+        even on failure, so controls never contaminate subsequent candidates.
+        """
+        if self.window == 0 or self.writer_kind == "native":
+            return dict(passed=True, skipped=True, scope="unchanged native writer")
+        t = self.base.torch
+        caches = {"cold": self.cold_cache.view(t.uint8)}
+        if self.mode == "mixed":
+            caches["hot"] = self.hot_cache.view(t.uint8)
+        saved = {name: value.clone() for name, value in caches.items()}
+        result = dict(passed=True, scope="all packed bytes vs native writers after sentinel poison; restored",
+                      fields={})
+        try:
+            for value in caches.values():
+                value.fill_(165)
+            self._write()
+            actual = {name: value.detach().cpu().numpy().copy() for name, value in caches.items()}
+            for value in caches.values():
+                value.fill_(165)
+            self._cold_write()
+            if self.mode == "mixed":
+                self._hot_write()
+            for name, value in caches.items():
+                expected = value.detach().cpu().numpy().copy()
+                bad = np.argwhere(actual[name] != expected)
+                result["fields"][name] = dict(passed=not len(bad), bytes=int(expected.size),
+                                             mismatch_count=int(len(bad)), first_bad_positions=bad[:16].tolist())
+                result["passed"] &= not len(bad)
+        finally:
+            for name, value in caches.items():
+                value.copy_(saved[name])
+        return result
+
     def run(self, write=False, dynamic=True):
         if self.window == 0:
             return self.variant.run(write=write)
         if write:
-            self._cold_write()
-            if self.mode == "mixed":
-                self._hot_write()
+            self._write()
         return self._read(self.partition() if dynamic else self.prepared)
 
     def component_calls(self):
@@ -383,9 +439,12 @@ class NativeTwoPassRunner:
             "partition": lambda: self.partition()["old"],
             "cold_read": lambda: self._cold_read(parts)[0],
             "hot_read": lambda: self._hot_read(parts)[0],
-            "merge": lambda: self._merge(left, right, parts),
-            "cold_write": self._cold_write}
-        if self.mode == "mixed":
+            "merge": lambda: self._merge(left, right, parts)}
+        if self._store_runner is not None:
+            result["quantize_and_fused_store"] = self._write
+        else:
+            result["cold_write"] = self._cold_write
+        if self.mode == "mixed" and self._store_runner is None:
             result["hot_write"] = self._hot_write
         return result
 

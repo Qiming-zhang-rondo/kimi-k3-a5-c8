@@ -20,6 +20,13 @@ Pass a preallocated ``out`` during timing/graph capture. Warm up once before
 capture to compile the installed Ascend Triton kernel. Validation examines
 host metadata only. A5 compilation, correctness and timing need device tests;
 CPU tests do not establish any of them.
+
+Variant log256 preserves the original algorithm/schedule. log512 changes only
+the feature tile size. direct512 uses direct max/sum weights for finite sums
+in [1,65536] (or empty segments), and the original log-weight branch for other
+values. That bounded fast path cannot overflow its denominator and does not
+silently narrow the accepted statistics contract. All variants remain one
+kernel; no host inspection or second-kernel fallback is used.
 """
 
 from dataclasses import dataclass
@@ -74,6 +81,7 @@ def validate_states(left, right, out=None, *, left_present=None, right_present=N
 
 _KERNEL = None
 BLOCK = 256
+MERGE_VARIANTS = {"log256": (256, False), "log512": (512, False), "direct512": (512, True)}
 
 
 def _load_kernel():
@@ -90,7 +98,8 @@ def _load_kernel():
     def _merge_kernel(LEFT, LEFT_MAX, LEFT_SUM, RIGHT, RIGHT_MAX, RIGHT_SUM,
                        LEFT_PRESENT, RIGHT_PRESENT, OUT,
                        H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr,
-                       HAS_LEFT_PRESENT: tl.constexpr, HAS_RIGHT_PRESENT: tl.constexpr):
+                       HAS_LEFT_PRESENT: tl.constexpr, HAS_RIGHT_PRESENT: tl.constexpr,
+                       DIRECT: tl.constexpr):
         row = tl.program_id(1)
         feature = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         lm = tl.load(LEFT_MAX + row)
@@ -115,17 +124,30 @@ def _load_kernel():
         rm = tl.where(right_empty, float("-inf"), rm)
         common_max = tl.maximum(lm, rm)
         common_max = tl.where(both_empty, 0.0, common_max)
-        # Shift maxima BEFORE adding log(sum), retaining relative denominators
-        # even when both maxima are large. The second shift bounds exponentials
-        # by one and avoids overflow when adding large finite denominators.
-        left_log_weight = tl.where(left_empty, float("-inf"),
-                                    (lm - common_max) + tl.log(tl.where(left_empty, 1.0, ls)))
-        right_log_weight = tl.where(right_empty, float("-inf"),
-                                     (rm - common_max) + tl.log(tl.where(right_empty, 1.0, rs)))
-        common_log_weight = tl.maximum(left_log_weight, right_log_weight)
-        common_log_weight = tl.where(both_empty, 0.0, common_log_weight)
-        left_weight = tl.where(left_empty, 0.0, tl.exp(left_log_weight - common_log_weight))
-        right_weight = tl.where(right_empty, 0.0, tl.exp(right_log_weight - common_log_weight))
+        if DIRECT:
+            # Native max-shifted softmax sums usually lie in [1,TopK]. This
+            # bounded domain keeps weights <=65536 and their sum <=131072.
+            # Other valid finite inputs use the full-range log algorithm.
+            use_direct = (~left_bad & ~right_bad
+                          & (left_empty | ((ls >= 1.0) & (ls <= 65536.0)))
+                          & (right_empty | ((rs >= 1.0) & (rs <= 65536.0))))
+        else:
+            use_direct = False
+        if use_direct:
+            left_weight = tl.where(left_empty, 0.0, ls * tl.exp(lm - common_max))
+            right_weight = tl.where(right_empty, 0.0, rs * tl.exp(rm - common_max))
+        else:
+            # Shift maxima BEFORE adding log(sum), retaining relative denominators
+            # even when both maxima are large. The second shift bounds exponentials
+            # by one and avoids overflow when adding large finite denominators.
+            left_log_weight = tl.where(left_empty, float("-inf"),
+                                        (lm - common_max) + tl.log(tl.where(left_empty, 1.0, ls)))
+            right_log_weight = tl.where(right_empty, float("-inf"),
+                                         (rm - common_max) + tl.log(tl.where(right_empty, 1.0, rs)))
+            common_log_weight = tl.maximum(left_log_weight, right_log_weight)
+            common_log_weight = tl.where(both_empty, 0.0, common_log_weight)
+            left_weight = tl.where(left_empty, 0.0, tl.exp(left_log_weight - common_log_weight))
+            right_weight = tl.where(right_empty, 0.0, tl.exp(right_log_weight - common_log_weight))
         denominator = tl.where(both_empty, 1.0, left_weight + right_weight)
         left_weight = left_weight / denominator
         right_weight = right_weight / denominator
@@ -146,7 +168,7 @@ def _load_kernel():
     return _KERNEL
 
 
-def merge_states(left, right, out=None, *, left_present=None, right_present=None):
+def merge_states(left, right, out=None, *, left_present=None, right_present=None, variant="log256"):
     """Merge two native results in one launch, returning ``out``.
 
     With ``out`` supplied this performs no allocation, copies or host sync.
@@ -157,6 +179,9 @@ def merge_states(left, right, out=None, *, left_present=None, right_present=None
     and statistics must remain alive until this launch finishes on the current
     stream. ``out`` must not partially overlap the input tensor storage.
     """
+    if not isinstance(variant, str) or variant not in MERGE_VARIANTS:
+        raise ValueError("variant must be log256, log512 or direct512")
+    block, direct = MERGE_VARIANTS[variant]
     layout = validate_states(left, right, out, left_present=left_present, right_present=right_present)
     if out is None:
         import torch
@@ -166,7 +191,8 @@ def merge_states(left, right, out=None, *, left_present=None, right_present=None
     # their loads entirely when the corresponding presence mask is absent.
     lp = left_present if left_present is not None else left[1]
     rp = right_present if right_present is not None else right[1]
-    kernel[((layout.features + BLOCK - 1) // BLOCK, layout.tokens * layout.heads)](
-        *left, *right, lp, rp, out, H=layout.heads, D=layout.features, BLOCK=BLOCK,
-        HAS_LEFT_PRESENT=left_present is not None, HAS_RIGHT_PRESENT=right_present is not None)
+    kernel[((layout.features + block - 1) // block, layout.tokens * layout.heads)](
+        *left, *right, lp, rp, out, H=layout.heads, D=layout.features, BLOCK=block,
+        HAS_LEFT_PRESENT=left_present is not None, HAS_RIGHT_PRESENT=right_present is not None,
+        DIRECT=direct)
     return out

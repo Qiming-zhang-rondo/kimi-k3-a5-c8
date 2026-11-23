@@ -1,4 +1,4 @@
-Native C4 / C8 two-pass sparse-attention experiment v2
+Native C4 / C8 two-pass sparse-attention experiment v3
 =================================================
 
 Status: executable single-layer A5 microbenchmark, not model integration.
@@ -7,6 +7,54 @@ The author has not run this payload on A5. Use the current working container's
 native operators and environment. The launcher installs/upgrades nothing and
 does not source another vendor package. Native reader and quantizer adapters
 are byte-identical to the previous payload. No custom cold attention is used.
+
+Optimization sweep (v3)
+-----------------------
+--optimization-sweep overrides the capacity/merge/partition/writer matrix with
+seven bounded configurations, evaluated separately for split_c4 and mixed:
+  champion: triton_scan + triton (log256) + native writer
+  partition_only: one encoded integer prefix scan (triton_scan_packed)
+  merge_log512_only: original log-domain merge with a larger 512-wide block
+  merge_direct512_only: max/sum weights with a guarded log-domain fallback
+  writer_only: original native quantizers + one fused packing/scatter kernel
+  stacked_log512: packed scan + log512 merge + fused_store
+  stacked_direct512: packed scan + direct512 merge + fused_store
+The current reported 132 us mixed configuration is the champion reference;
+its timing is remeasured, not copied from the old report. Every candidate is
+paired against BOTH same-mode/same-recipe champion and original native W0.
+
+fused_store is NOT fused quantization: it retains the exact native C4 recipe
+arguments and the native C8 row=1/column=128 quantizer. It eliminates separate
+concatenation/scatter operations by directly storing both packed records in one
+Triton launch. Before timing, complete caches are poisoned and compared byte
+for byte against native writers, including RoPE, scale bytes and untouched
+slots. Caches are restored even on failure. Duplicate/out-of-bounds write slots
+are rejected at setup. W0 remains unchanged and uses no custom store.
+
+The packed scan preserves arbitrary selection order and empty-subset handling;
+its int32 encoding has a checked capacity bound. direct512 uses direct
+max/sum weighting only for valid sums in [1,65536], otherwise uses the same
+stable log formulation. No approximate exp or relaxed numerical tolerance is
+introduced. Any candidate compilation or correctness failure is reported,
+never silently replaced. MEASURED is still not a performance acceptance.
+
+This version does NOT replace the two attention calls with an unverified
+mixed_quant_sparse_flash_mla invocation. Existing dual-KV API names alone do
+not establish support for these MXFP4-400B/FP8-656B layouts and BF16 RoPE.
+inspect_kv_fusion_capability.py collects installed source/header/version
+evidence without importing or executing operators. It does not enable a path.
+One native mixed reader needs a matching kernel contract/build before A/B.
+
+Suggested all-candidate run:
+  python test_kv_native_twopass_a5.py --optimization-sweep \
+    --batch 1 --keys 8192 --queries 4 --topk 2048 --windows 0,128 \
+    --cold-recipes baseline,alg2_max7 --timing graph \
+    --warmup 20 --iterations 100 --repeats 5 --diagnose --stages \
+    --output /tmp/native-two-pass-v3
+New candidates require A5 validation. No 86 us or no-regression result is
+promised. Start in the same already-working container; do not swap CANN/Cloud
+packages. short_summary.txt shows measured mixed-only winners for this run;
+full sample distributions and rejected candidates remain in results.json.
 
 Measured paths
 --------------
@@ -19,7 +67,7 @@ Measured paths
 4. mixed: native C4 old subset + native C8 recent ring + the same merge.
    Timing is gated by the corresponding split_c4 control and its own reference.
 
-Index-partition implementations (v2)
+Original index-partition implementations (v2)
 -----------------------------------
 --partitions argsort_int,argsort_float,triton_scan
   argsort_int is the unchanged integer-sort baseline. It is always evaluated

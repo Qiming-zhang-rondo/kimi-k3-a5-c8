@@ -108,7 +108,21 @@ class TestHostContract(unittest.TestCase):
             self.assertIs(args[7], right[1])
             self.assertIs(args[-1], out)
             self.assertEqual(kwargs, dict(H=2, D=527, BLOCK=256,
-                                         HAS_LEFT_PRESENT=True, HAS_RIGHT_PRESENT=False))
+                                         HAS_LEFT_PRESENT=True, HAS_RIGHT_PRESENT=False, DIRECT=False))
+
+    def test_variants_are_explicit_and_only_change_requested_launch_options(self):
+        launch = mock.Mock()
+        kernel = mock.MagicMock()
+        kernel.__getitem__.return_value = launch
+        left, right, out = state_metadata(), state_metadata(), Metadata((3, 2, 527))
+        with mock.patch.object(merge, "_load_kernel", return_value=kernel):
+            for variant, direct in (("log512", False), ("direct512", True)):
+                merge.merge_states(left, right, out, variant=variant)
+                kernel.__getitem__.assert_called_with((2, 6))
+                self.assertEqual(launch.call_args.kwargs["BLOCK"], 512)
+                self.assertEqual(launch.call_args.kwargs["DIRECT"], direct)
+        with self.assertRaisesRegex(ValueError, "variant"):
+            merge.merge_states(left, right, out, variant="unknown")
 
     def test_import_has_no_accelerator_dependencies(self):
         code = """
@@ -155,6 +169,7 @@ class TL:
     def __init__(self):
         self.pid = (0, 0)
         self.stores = 0
+        self.log_calls = 0
 
     def program_id(self, axis):
         return Tensor(np.int32(self.pid[axis]))
@@ -185,7 +200,13 @@ class TL:
 
     @staticmethod
     def where(mask, yes, no):
-        return Tensor(np.where(mask, yes, no))
+        result = np.where(mask, yes, no)
+        # This kernel has FP32 arithmetic only. NumPy otherwise promotes
+        # 0-D FP32 tensors plus Python float literals to FP64, hiding genuine
+        # FP32 subtraction/denominator overflow in the extreme-stat tests.
+        if np.issubdtype(result.dtype, np.floating):
+            result = result.astype(np.float32)
+        return Tensor(result)
 
     @staticmethod
     def maximum(left, right):
@@ -195,8 +216,8 @@ class TL:
     def exp(value):
         return Tensor(np.exp(value))
 
-    @staticmethod
-    def log(value):
+    def log(self, value):
+        self.log_calls += 1
         return Tensor(np.log(value))
 
 
@@ -225,7 +246,12 @@ def make_states(shape=(3, 2, 527), dtype="bf16"):
 
 
 class TestActualKernelBody(unittest.TestCase):
-    def execute(self, left, right, left_present=None, right_present=None, output_dtype="bf16"):
+    variant = "log256"
+
+    def execute(self, left, right, left_present=None, right_present=None, output_dtype="bf16",
+                variant=None, return_trace=False):
+        variant = self.variant if variant is None else variant
+        block, direct = merge.MERGE_VARIANTS[variant]
         tl, kernel = kernel_body()
         output = np.full(left[0].shape, np.nan, np.float32)
         t, h, d = output.shape
@@ -235,12 +261,12 @@ class TestActualKernelBody(unittest.TestCase):
         pointers.append(Pointer(output, store_dtype=output_dtype))
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
             for row in range(t * h):
-                for tile in range((d + 255) // 256):
+                for tile in range((d + block - 1) // block):
                     tl.pid = tile, row
-                    kernel(*pointers, H=h, D=d, BLOCK=256, HAS_LEFT_PRESENT=left_present is not None,
-                           HAS_RIGHT_PRESENT=right_present is not None)
-        self.assertEqual(tl.stores, t * h * ((d + 255) // 256))
-        return output
+                    kernel(*pointers, H=h, D=d, BLOCK=block, HAS_LEFT_PRESENT=left_present is not None,
+                           HAS_RIGHT_PRESENT=right_present is not None, DIRECT=direct)
+        self.assertEqual(tl.stores, t * h * ((d + block - 1) // block))
+        return (output, tl) if return_trace else output
 
     def assert_reference(self, output, left, right):
         # Independent FP64 sum*exp(max-shift) reference, rather than reproducing
@@ -334,6 +360,64 @@ class TestActualKernelBody(unittest.TestCase):
                 # Without explicit presence, the documented sentinel denotes
                 # an empty segment and the other output survives unchanged.
                 np.testing.assert_array_equal(self.execute(*states), states[1-side][0])
+
+
+class TestLog512KernelBody(TestActualKernelBody):
+    # The complete existing empty/malformed/FP32/extreme-stat contract must
+    # still hold when two 256-feature programs become one 512-feature program.
+    variant = "log512"
+
+    def test_schedule_change_is_bitwise_equivalent(self):
+        for dtype in ("bf16", "fp32"):
+            left, right = make_states(dtype=dtype)
+            a = self.execute(left, right, output_dtype=dtype)
+            b = self.execute(left, right, output_dtype=dtype, variant="log256")
+            np.testing.assert_array_equal(a, b)
+
+
+class TestDirect512KernelBody(TestActualKernelBody):
+    variant = "direct512"
+
+    def test_normal_maxsum_domain_skips_logarithms(self):
+        left, right = make_states()
+        output, trace = self.execute(left, right, return_trace=True)
+        self.assertEqual(trace.log_calls, 0)
+        self.assert_reference(output, left, right)
+
+    def test_fast_domain_boundary_and_subtraction_overflow_are_safe(self):
+        left, right = make_states()
+        left[1].reshape(-1)[:] = [0, 0, 3e38, -3e38, 3e38, -3e38]
+        right[1].reshape(-1)[:] = [0, 0, -3e38, 3e38, 3e38, -3e38]
+        left[2].reshape(-1)[:] = [1, 65536, 1, 65536, 1, 65536]
+        right[2].reshape(-1)[:] = [65536, 1, 65536, 1, 65536, 1]
+        output, trace = self.execute(left, right, return_trace=True)
+        self.assertEqual(trace.log_calls, 0)
+        self.assert_reference(output, left, right)
+
+    def test_finite_outside_fast_domain_uses_original_log_branch(self):
+        for denominator in (np.nextafter(np.float32(1), np.float32(0)),
+                            np.nextafter(np.float32(65536), np.float32(np.inf)),
+                            np.float32(1e-30), np.float32(3e38)):
+            with self.subTest(denominator=denominator):
+                left, right = make_states()
+                left[2].fill(denominator)
+                output, trace = self.execute(left, right, return_trace=True)
+                self.assertEqual(trace.log_calls, trace.stores * 2)
+                original = self.execute(left, right, variant="log512")
+                np.testing.assert_array_equal(output, original)
+
+    def test_randomized_direct_and_log_variants_match_fp64_reference(self):
+        rng = np.random.default_rng(76)
+        for _ in range(20):
+            left, right = make_states(shape=(2, 3, 31), dtype="fp32")
+            for state in (left, right):
+                state[0][:] = rng.normal(size=state[0].shape)
+                state[1][:] = rng.uniform(-80, 80, size=state[1].shape)
+                state[2][:] = rng.uniform(1, 65536, size=state[2].shape)
+            output = self.execute(left, right, output_dtype="fp32")
+            self.assert_reference(output, left, right)
+            log_output = self.execute(left, right, output_dtype="fp32", variant="log512")
+            np.testing.assert_allclose(output, log_output, rtol=3e-5, atol=3e-6)
 
 
 if __name__ == "__main__":
