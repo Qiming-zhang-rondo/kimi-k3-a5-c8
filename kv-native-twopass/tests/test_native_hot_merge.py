@@ -335,6 +335,53 @@ class TestActualBody(unittest.TestCase):
         actual, _, _, _ = self.execute(values, constants)
         self.assertTrue(np.array_equal(actual, np.zeros_like(actual)))
 
+    def test_byte_presence_all_modes_match_boolean_semantics(self):
+        # Device bool storage is one byte. Exercise the exact source with
+        # uint8 loads as well as NumPy predicates: ~uint8(0/1) is 255/254,
+        # which previously made both_empty true in every mode and replaced
+        # normalized weights by exp(maximum)*sum. This models that failure
+        # mechanism; it does not assert how an installed A5 compiler lowers it.
+        for dtype in ("fp32", "bf16"):
+            for cold_present, hot_present in ((True, True), (True, False),
+                                               (False, True), (False, False)):
+                with self.subTest(dtype=dtype, cold=cold_present, hot=hot_present):
+                    values, constants = fixture(cold_dtype=dtype, hot_dtype=dtype)
+                    constants["STATISTICS"] = True
+                    for tensor in values[6:9]:
+                        tensor[2] = tensor[0]
+                    values[9].fill(cold_present)
+                    values[10].fill(hot_present)
+                    expected, _, _ = reference(values, constants)
+                    if dtype == "bf16":
+                        expected = _bf16(expected)
+                    boolean, boolean_max, boolean_sum, _ = self.execute(values, constants, dtype)
+                    values[9] = values[9].astype(np.uint8)
+                    values[10] = values[10].astype(np.uint8)
+                    byte, byte_max, byte_sum, _ = self.execute(values, constants, dtype)
+                    np.testing.assert_array_equal(byte, boolean)
+                    np.testing.assert_array_equal(byte_max, boolean_max)
+                    np.testing.assert_array_equal(byte_sum, boolean_sum)
+                    if cold_present or hot_present:
+                        self.assertLess(np.linalg.norm(byte-expected)/np.linalg.norm(expected), .006)
+                    else:
+                        np.testing.assert_array_equal(byte, np.zeros_like(byte))
+
+    def test_byte_presence_cold_only_identity_for_arbitrary_valid_statistics(self):
+        for dtype in ("fp32", "bf16"):
+            values, constants = fixture(cold_dtype=dtype, hot_dtype=dtype)
+            values[6][2] = values[6][0]
+            values[7][:] = np.resize(np.array([-700., -7., 0., 7., 700.], np.float32), values[7].shape)
+            values[8][:] = np.resize(np.array([1., 128., 2048., 65536.], np.float32), values[8].shape)
+            values[9] = np.ones(values[9].shape, np.uint8)
+            values[10] = np.zeros(values[10].shape, np.uint8)
+            values[2].fill(255)
+            values[4].fill(-1)
+            output, _, _, scope = self.execute(values, constants, dtype)
+            np.testing.assert_array_equal(output, values[6])
+            self.assertEqual(scope["tl"].dots, [])
+            self.assertFalse(any(name in ("CACHE", "TABLE", "INDICES")
+                                 for name, _, _ in scope["tl"].loads))
+
     def test_invalid_hot_inputs_and_present_empty_return_nan_safely(self):
         for bad in ("index", "negative", "page", "batch", "empty", "hole", "tail_negative", "tail_oob"):
             with self.subTest(bad=bad):

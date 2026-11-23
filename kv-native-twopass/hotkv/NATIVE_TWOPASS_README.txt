@@ -1,4 +1,4 @@
-Native C4 / C8 sparse-attention experiment v4
+Native C4 / C8 sparse-attention experiment v4.1
 =================================================
 
 Status: executable single-layer A5 microbenchmark, not model integration.
@@ -7,6 +7,23 @@ The author has not run this payload on A5. Use the current working container's
 native operators and environment. The launcher installs/upgrades nothing and
 does not source another vendor package. Native reader and quantizer adapters
 are byte-identical to the previous payload. No custom cold attention is used.
+
+v4.1 correctness repair (A5 confirmation required)
+-----------------------------------------------
+The reported v4 BK16/BH16 candidate compiled but failed cold-only, hot-only
+and combined controls by factors of roughly 2191, 147 and 2338. This is not
+a tolerance issue. A CPU fault model reproduced that pattern by treating
+presence loads as uint8: bitwise ~cp & ~hp then stays nonzero, incorrectly
+selecting the both-empty branches and forcing the merge denominator to one.
+v4.1 canonicalizes presence with int32 != 0 and uses == 0 for logical negation.
+This fixes the reproduced source-level mechanism; it does not prove which
+predicate lowering occurred on A5. Native readers, quantizers, accuracy gates
+and kernel launch count are unchanged. CPU regressions cover byte predicates
+and strict cold-only identity under widely varying valid max/sum statistics.
+No UB reduction is claimed: begin with only the already-compilable 16/16 tile.
+failure_summary.txt preserves failed checks and errors; diagnostics also report
+fitted per-head output gains and expected partition normalizers. These are
+untimed observations, not relaxed acceptance thresholds.
 
 Native cold + fused hot reader/merge sweep (v4)
 ----------------------------------------------
@@ -70,13 +87,16 @@ Champion self-comparisons remain NA. Reported paired ratios are medians of
 per-round ratios, not the quotient of the two displayed medians. Use this
 file directly instead of reconstructing or relabeling results by hand.
 
-Suggested first A5 run:
+Suggested first v4.1 A5 run (one fused candidate, correctness only):
   python test_kv_native_twopass_a5.py --reader-fusion-sweep \
     --batch 1 --keys 8192 --queries 4 --topk 2048 --windows 0,128 \
-    --cold-recipes baseline,alg2_max7 --hot-block-keys 16,32,64 \
-    --hot-block-heads 16,32 --hot-decodes software,native_cast --timing graph \
-    --warmup 20 --iterations 100 --repeats 5 --diagnose --stages \
-    --output /tmp/native-hot-reader-v4
+    --cold-recipes baseline --hot-block-keys 16 \
+    --hot-block-heads 16 --hot-decodes native_cast --timing none --diagnose \
+    --output /tmp/native-hot-reader-v41
+
+This retains native controls and does not sweep the failing larger tiles.
+Only after correctness passes, measure this same configuration with --timing
+graph --warmup 20 --iterations 100 --repeats 5 in an uncontended environment.
 
 The measured full pipeline still includes current-token C4/C8 quantization,
 both writes, dynamic partition, cold read and fused hot-read/merge. Prepared
@@ -96,8 +116,8 @@ seven bounded configurations, evaluated separately for split_c4 and mixed:
   writer_only: original native quantizers + one fused packing/scatter kernel
   stacked_log512: packed scan + log512 merge + fused_store
   stacked_direct512: packed scan + direct512 merge + fused_store
-The current reported 132 us mixed configuration is the champion reference;
-its timing is remeasured, not copied from the old report. Every candidate is
+The original mixed configuration is the champion reference; its timing is
+remeasured, not copied from historical reports. Every candidate is
 paired against BOTH same-mode/same-recipe champion and original native W0.
 
 fused_store is NOT fused quantization: it retains the exact native C4 recipe

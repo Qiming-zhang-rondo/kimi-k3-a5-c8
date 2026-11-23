@@ -23,6 +23,42 @@ WRITERS = ("native", "fused_store")
 READERS = ("native", "hot_merge")
 
 
+def diagnostic_range(value):
+    """Compact, JSON-safe range; nonfinite values are counted, never repaired."""
+    value = np.asarray(value, np.float64)
+    finite = value[np.isfinite(value)]
+    return dict(shape=list(value.shape), finite=bool(finite.size == value.size),
+                nonfinite_count=int(value.size-finite.size),
+                min=float(finite.min()) if finite.size else None,
+                max=float(finite.max()) if finite.size else None)
+
+
+def diagnostic_gain(actual, reference):
+    """Fit actual=gain*reference independently along D for every [row,head].
+
+    Zero reference coordinates add no weight; all-zero/nonfinite vectors are
+    excluded explicitly. This diagnostic never changes a correctness gate.
+    """
+    actual, reference = np.asarray(actual, np.float64), np.asarray(reference, np.float64)
+    finite = np.isfinite(actual).all(axis=-1) & np.isfinite(reference).all(axis=-1)
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        norm2 = np.sum(reference*reference, axis=-1)
+        gains = np.sum(actual*reference, axis=-1)/norm2
+    valid = finite & (norm2 > 0) & np.isfinite(gains)
+
+    def summary(values):
+        return dict(count=int(values.size), min=float(values.min()) if values.size else None,
+                    median=float(np.median(values)) if values.size else None,
+                    max=float(values.max()) if values.size else None)
+
+    return dict(method="per-row/head least squares along D: dot(actual,reference)/dot(reference,reference)",
+                **summary(gains[valid]),
+                excluded_zero_reference_vectors=int(np.count_nonzero(norm2 == 0)),
+                excluded_nonfinite_vectors=int(np.count_nonzero(~finite | ~np.isfinite(norm2))),
+                zero_reference_coordinates=int(np.count_nonzero(reference == 0)),
+                per_row=[dict(row=row, **summary(gains[row][valid[row]])) for row in range(len(gains))])
+
+
 def validate_partition_width(partition, width):
     """Metadata-only guard for exact FLOAT32 encoding of unique sort keys."""
     if partition not in PARTITIONS:
@@ -479,12 +515,21 @@ class NativeTwoPassRunner:
         old_present, hot_present = parts["old_present"], parts["recent_present"]
         zeros = t.zeros_like(old_present)
         native_merged = base.host(merge_torch(t, left, right, old_present, hot_present))
+        native_states = {"cold": tuple(base.host(value) for value in left),
+                         "hot": tuple(base.host(value) for value in right)}
         cold_reference = np.where(np.asarray(self.metadata["old_counts"])[:, None, None] > 0,
-                                  base.host(left[0]), 0.)
+                                  native_states["cold"][0], 0.)
         hot_reference = np.where(np.asarray(self.metadata["hot_counts"])[:, None, None] > 0,
-                                 base.host(right[0]), 0.)
+                                 native_states["hot"][0], 0.)
         result = dict(passed=True, scope="fused hot attention/merge vs native states; forced empty sides; zero-query counts",
-                      checks={})
+                      native_state_ranges={}, checks={})
+        normalizers = {}
+        for side, (output, maximum, total) in native_states.items():
+            with np.errstate(over="ignore", invalid="ignore"):
+                normalizers[side] = np.exp(maximum.astype(np.float64))*total.astype(np.float64)
+            result["native_state_ranges"][side] = {
+                "output": diagnostic_range(output), "maximum": diagnostic_range(maximum),
+                "sum": diagnostic_range(total), "exp_max_times_sum": diagnostic_range(normalizers[side])}
         for name, cp, hp, reference, tolerance in (
                 ("combined_vs_native_twopass", old_present, hot_present, native_merged, pipeline_l2),
                 ("hot_only_vs_native_hot", zeros, hot_present, hot_reference, control_l2),
@@ -495,6 +540,15 @@ class NativeTwoPassRunner:
             passed = bool(metric["finite"] and metric["relative_l2"] <= tolerance and
                           metric["max_row_relative_l2"] <= tolerance)
             metric.update(passed=passed, tolerance=tolerance)
+            cold_mask = base.host(cp).astype(bool)[:, None, None]
+            hot_mask = base.host(hp).astype(bool)[:, None, None]
+            with np.errstate(over="ignore", invalid="ignore"):
+                expected_normalizer = (np.where(cold_mask, normalizers["cold"], 0.) +
+                                       np.where(hot_mask, normalizers["hot"], 0.))
+            metric.update(output_range=diagnostic_range(output), reference_range=diagnostic_range(reference),
+                          fitted_gain=diagnostic_gain(output, reference),
+                          expected_normalizer=diagnostic_range(expected_normalizer),
+                          expected_normalizer_definition="sum of exp(native_max)*native_sum over presence-true sides")
             result["checks"][name] = metric
             result["passed"] &= passed
         zero = type(self._hot_merge)(

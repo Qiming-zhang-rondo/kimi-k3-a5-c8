@@ -159,8 +159,10 @@ def _load_kernel():
         hh = tl.program_id(1)*BH + tl.arange(0, BH)
         dd = tl.arange(0, 512)
         kk = tl.arange(0, BK)
-        cp = tl.load(COLD_PRESENT + row)
-        hp = tl.load(HOT_PRESENT + row)
+        # Torch bool storage may reach the backend as a byte. Canonicalize
+        # nonzero values to predicates; never bitwise-invert the loaded byte.
+        cp = tl.load(COLD_PRESENT + row).to(tl.int32) != 0
+        hp = tl.load(HOT_PRESENT + row).to(tl.int32) != 0
         acc = tl.full((BH, 512), 0, tl.float32)
         maximum = tl.full((BH,), float("-inf"), tl.float32)
         total = tl.full((BH,), 0, tl.float32)
@@ -168,7 +170,7 @@ def _load_kernel():
         if hp:
             batch = tl.load(ROW_BATCH + row).to(tl.int64)
             batch_ok = (batch >= 0) & (batch < B)
-            bad = ~batch_ok
+            bad = batch_ok == 0
             scan_lane = tl.arange(0, SCAN_BLOCK)
             scan_ids = tl.load(INDICES + row.to(tl.int64)*HW + scan_lane,
                                mask=scan_lane < HW, other=-1).to(tl.int64)
@@ -194,7 +196,7 @@ def _load_kernel():
                 physical = tl.load(TABLE + batch*TABLE_PAGES + logical,
                                    mask=valid & (logical < TABLE_PAGES), other=-1).to(tl.int64)
                 page_ok = (physical >= 0) & (physical < PAGES)
-                bad = bad | (tl.sum((valid & ~page_ok).to(tl.int32), 0) > 0)
+                bad = bad | (tl.sum((valid & (page_ok == 0)).to(tl.int32), 0) > 0)
                 valid = valid & page_ok
                 base = (physical*PAGE + tl.maximum(ids, 0) % PAGE) * (528+2*R)
                 latent = tl.full((BK, 512), 0, tl.bfloat16)
@@ -232,7 +234,7 @@ def _load_kernel():
         hot_bad = hp & ((maximum != maximum) | (maximum == float("inf")) | (maximum == float("-inf"))
                         | (total != total) | (total == float("inf")) | (total <= 0))
         cm = tl.where(cp, cm, float("-inf"))
-        both_empty = ~cp & ~hp
+        both_empty = (cp == 0) & (hp == 0)
         common = tl.maximum(cm, maximum)
         common = tl.where(both_empty, 0.0, common)
         clog = tl.where(cp, (cm-common) + tl.log(tl.where(cp, cs, 1.0)), float("-inf"))
@@ -286,6 +288,7 @@ class PreparedHotMerge:
                              decode=decode, native_cast_type="tl.float8e4nv" if decode == "native_cast" else None,
                              hot_loop_bound="validated nonpadding prefix count, not allocated capacity",
                              prefix_validation="all HW entries checked; invalid IDs/holes/present-empty produce NaN",
+                             presence_predicates="explicit int32 != 0; logical negation uses == 0 (v4.1)",
                              assembly_api="triton.language.extra.cann.extension.insert_slice",
                              statistics_default=False, fallback=None,
                              resource_validation="A5 compile required; tile arithmetic is not compiler UB accounting")

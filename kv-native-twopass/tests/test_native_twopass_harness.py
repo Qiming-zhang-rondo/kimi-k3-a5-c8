@@ -534,6 +534,35 @@ class NativeHarnessTests(unittest.TestCase):
 
 
 class NativeReportTests(unittest.TestCase):
+    def test_failure_summary_preserves_exact_diagnostics_and_errors_without_timings(self):
+        checks = {"passed": False, "native_state_ranges": {"cold": {"sum": {"min": 128., "max": 256.}}},
+                  "checks": {"cold_only_vs_native_cold": {"passed": False, "relative_l2": 2190.27,
+                    "tolerance": .001, "fitted_gain": {"median": 2191.27}}}}
+        failed = dict(name="failed_reader", role="HOT_WINDOW", status="CONTROL_FAILED",
+                      reader_consistency=checks, control_failure_reason="exact original reason")
+        error = dict(name="failed_compile", role="HOT_WINDOW", status="ERROR",
+                     traceback="Traceback\nEXACT_COMPILER_ERROR", failure_kind="TRITON_UB_OVERFLOW")
+        passed = dict(name="passed_native", role="HOT_WINDOW", status="MEASURED",
+                      timing_write_read={"graph": {"event_us": {"candidate_median": 123.456}}})
+        report = {"status": "FAILED", "args": {"timing": "none"}, "cases": [{"label": "one",
+                  "baselines": {}, "variants": [failed, error, passed]}]}
+        before = copy.deepcopy(report)
+        with tempfile.TemporaryDirectory() as tmp:
+            harness.write_reports(report, tmp)
+            text = (Path(tmp)/"failure_summary.txt").read_text()
+        self.assertEqual(report, before)
+        self.assertIn("Diagnostics/errors only", text)
+        evidence = text.split("case=one entry=failed_reader status=CONTROL_FAILED\n", 1)[1].split("\ncase=", 1)[0]
+        self.assertEqual(json.loads(evidence)["reader_consistency"], checks)
+        self.assertIn('"relative_l2": 2190.27', text)
+        self.assertIn('"tolerance": 0.001', text)
+        self.assertIn('"median": 2191.27', text)
+        self.assertIn("EXACT_COMPILER_ERROR", text)
+        self.assertIn("TRITON_UB_OVERFLOW", text)
+        self.assertIn("failed_entries=2", text)
+        self.assertNotIn("passed_native", text)
+        self.assertNotIn("123.456", text)
+
     def test_exact_paired_summary_keeps_json_pairs_separate_and_never_invents_champion_selfcheck(self):
         def timing(candidate, baseline, ratio, low, high):
             return {"graph": {"status": "MEASURED", "event_us": {

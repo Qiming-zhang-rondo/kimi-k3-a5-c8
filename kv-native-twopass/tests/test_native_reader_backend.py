@@ -10,7 +10,7 @@ from unittest import mock
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hotkv"))
-from kv_native_twopass import NativeTwoPassBackend, merge_torch, partition_numpy
+from kv_native_twopass import NativeTwoPassBackend, diagnostic_gain, diagnostic_range, merge_torch, partition_numpy
 from kv_window_common import attention_reference
 from test_native_twopass_backend import FakeBase, FakeScales, NumpyTorch, Tensor, case_data
 
@@ -175,6 +175,62 @@ class NativeHotReaderAdapterTests(unittest.TestCase):
             self.assertFalse(diagnostic["checks"][name]["passed"])
         self.assertTrue(diagnostic["checks"]["both_empty"]["passed"])
         self.assertTrue(diagnostic["checks"]["zero_query_hot_counts"]["passed"])
+
+    def test_reader_diagnostics_expose_large_gain_without_changing_accuracy_gate(self):
+        runner = self.prepare()
+        original = runner._hot_merge.call
+
+        def scaled(*args, **kwargs):
+            return original(*args, **kwargs)*2191.
+
+        with mock.patch.object(runner._hot_merge, "call", side_effect=scaled):
+            diagnostic = runner.reader_diagnostics()
+        self.assertFalse(diagnostic["passed"])
+        self.assertEqual(set(diagnostic["native_state_ranges"]), {"cold", "hot"})
+        for name in ("combined_vs_native_twopass", "hot_only_vs_native_hot", "cold_only_vs_native_cold"):
+            check = diagnostic["checks"][name]
+            self.assertFalse(check["passed"])
+            self.assertAlmostEqual(check["fitted_gain"]["median"], 2191., places=3)
+            self.assertTrue(check["expected_normalizer"]["finite"])
+            self.assertGreater(check["expected_normalizer"]["max"], 0.)
+        self.assertEqual(diagnostic["checks"]["cold_only_vs_native_cold"]["tolerance"], .001)
+        self.assertEqual(diagnostic["checks"]["hot_only_vs_native_hot"]["tolerance"], .01)
+        empty = diagnostic["checks"]["both_empty"]
+        self.assertTrue(empty["passed"])
+        self.assertEqual(empty["fitted_gain"]["count"], 0)
+        self.assertIsNone(empty["fitted_gain"]["median"])
+        self.assertEqual(empty["expected_normalizer"]["max"], 0.)
+        json.dumps(diagnostic, allow_nan=False)
+
+    def test_gain_fit_excludes_zero_reference_vectors_and_reports_per_row(self):
+        reference = np.ones((2, 3, 4))
+        reference[0, 2] = 0.
+        reference[0, 0, 0] = 0.
+        actual = reference*np.array([[2., 3., 99.], [4., 5., 6.]])[..., None]
+        gain = diagnostic_gain(actual, reference)
+        self.assertEqual((gain["min"], gain["median"], gain["max"]), (2., 4., 6.))
+        self.assertEqual(gain["excluded_zero_reference_vectors"], 1)
+        self.assertEqual(gain["zero_reference_coordinates"], 5)
+        self.assertEqual([row["count"] for row in gain["per_row"]], [2, 3])
+
+    def test_overflowed_normalizer_ranges_are_json_safe_and_never_fake_finite_values(self):
+        runner = self.prepare()
+        original = runner._cold_read
+
+        def large_max(*args, **kwargs):
+            output, maximum, total = original(*args, **kwargs)
+            return output, Tensor(np.full_like(maximum, 1000.)), total
+
+        with mock.patch.object(runner, "_cold_read", side_effect=large_max):
+            diagnostic = runner.reader_diagnostics()
+        cold = diagnostic["native_state_ranges"]["cold"]["exp_max_times_sum"]
+        self.assertFalse(cold["finite"])
+        self.assertGreater(cold["nonfinite_count"], 0)
+        self.assertIsNone(cold["min"])
+        self.assertIsNone(cold["max"])
+        self.assertEqual(diagnostic_range(np.array([float("nan"), 7.])),
+                         dict(shape=[2], finite=False, nonfinite_count=1, min=7., max=7.))
+        json.dumps(diagnostic, allow_nan=False)
 
     def test_zero_query_statistics_bias_fails_even_when_attention_outputs_match(self):
         runner = self.prepare()

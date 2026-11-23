@@ -20,7 +20,7 @@ from test_kv_hot_fused_a5 import (DeviceExecutionAborted, SUCCESS_STATUSES, acce
     compare, error_record, evaluate, identity, integer_list, paired_benchmark,
     recipe_list, standalone_benchmark, success_status, timing_failed)
 
-VERSION = "kv-native-twopass-a5-v4"
+VERSION = "kv-native-twopass-a5-v4.1"
 
 
 class PartitionControlFailed(RuntimeError):
@@ -541,7 +541,35 @@ def write_reports(report, directory):
     (directory / "brief.txt").write_text(text, encoding="utf-8")
     (directory / "short_summary.txt").write_text(short_summary(report, display), encoding="utf-8")
     (directory / "paired_summary.txt").write_text(paired_summary(report, display), encoding="utf-8")
+    (directory / "failure_summary.txt").write_text(failure_summary(report), encoding="utf-8")
     return text
+
+
+def failure_summary(report):
+    """Original diagnostic/error fields only; never reinterpret a failed timing."""
+    lines = [f"{VERSION} status={report['status']}",
+             "Diagnostics/errors only. Check metrics and thresholds are copied unchanged; no performance claims."]
+    count = 0
+    fields = ("control_failure_reason", "failure_kind", "error", "traceback",
+              "reader_consistency", "partition_consistency", "writer_consistency",
+              "kernel_vs_matching_reference", "pipeline_vs_prepared", "pipeline_vs_matching_reference",
+              "dynamic_vs_prepared", "split_vs_native_w0", "zero_query_statistics")
+    for case in report["cases"]:
+        for entry in list(case["baselines"].values()) + case["variants"]:
+            if entry.get("status") in SUCCESS_STATUSES + ("RUNNING",):
+                continue
+            count += 1
+            lines.append(f"case={case['label']} entry={entry['name']} status={entry['status']}")
+            evidence = {field: entry[field] for field in fields if field in entry}
+            lines.append(json.dumps(evidence, indent=2, ensure_ascii=False, allow_nan=False))
+        for field in ("error", "traceback"):
+            if field in case:
+                lines.append(f"case={case['label']} {field}:\n{case[field]}")
+    for field in ("error", "traceback"):
+        if field in report:
+            lines.append(f"report {field}:\n{report[field]}")
+    lines.append(f"failed_entries={count}")
+    return "\n".join(lines) + "\n"
 
 
 def parser():
@@ -637,7 +665,7 @@ def main(argv=None):
         persist()
     detail = write_reports(report,directory)
     print((directory / "short_summary.txt").read_text() if args.optimization_sweep or args.reader_fusion_sweep else detail, flush=True)
-    print(f"Results: {directory / 'results.json'}\nShort summary: {directory / 'short_summary.txt'}\nDetails: {directory / 'brief.txt'}",flush=True)
+    print(f"Results: {directory / 'results.json'}\nShort summary: {directory / 'short_summary.txt'}\nDetails: {directory / 'brief.txt'}\nFailure diagnostics: {directory / 'failure_summary.txt'}",flush=True)
     if args.reader_fusion_sweep:
         print(f"Exact paired summary: {directory / 'paired_summary.txt'}", flush=True)
     return 0 if report["status"] in SUCCESS_STATUSES else 1
