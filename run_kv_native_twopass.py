@@ -13,24 +13,25 @@ import tempfile
 import traceback
 import urllib.request
 
-PAYLOAD_COMMIT = "dd62d638cf900d6d33e572195877f8a1bf1bb131"
+PAYLOAD_COMMIT = "97ab8ceaab1bdecef2bbe52440df78b8312ca600"
 REPOSITORY = "Qiming-zhang-rondo/kimi-k3-a5-c8"
 FILES = {
-    "NATIVE_TWOPASS_README.txt": "5c563198c410c1d1de96ef4a99ea338d5548b628da29aedbe6e0cb85567c2bda",
+    "NATIVE_TWOPASS_README.txt": "c5d2746f5bb6364461ba651e28da45ecefe519bea0e19e5e82b932a34c8cb3e9",
     "kv_c4_scale_backend.py": "5002af47b6f7394f84f6b5d2d65eeeaf4de8097df279f9cf0328b252f87149a5",
     "kv_hot_backend.py": "90a9a005458ebb2c8b837f103641b3897a8c99d29fa4f22ae4254dc6d9cb61fa",
     "kv_window_backend.py": "20c33c19612da73484ea7c57e05b2a78eba68e7bc886db6daf0997976a530bc4",
     "kv_window_capture.py": "b872f9a378a22a27c3ff970426c33718d3c20958724ee018d383b4bb51216bb7",
     "kv_window_common.py": "7357ca29ee22f71445b1d9a3d5eddf8c2d6c0a0dab134b0e2e4d42c36e3dd724",
     "test_kv_hot_fused_a5.py": "a64183fa77fbdaa8085c2ff03b90723de6e9f31deffdfb2b91fb9a42ce22a2e2",
-    "kv_native_twopass.py": "0b5b58be9696287c48f4f5d85c43827ef2a9b99bb68baf1d2b4fe6f1b98e4f1f",
+    "kv_native_twopass.py": "608b15a53cf7e190037b3eb90ff9f26476a5145c08240e257a30756c6d47dfef",
     "kv_native_merge.py": "52da4d06c227a431db840f2ec20269ad84dc2bc0a849384345223b2cccd7f361",
-    "test_kv_native_twopass_a5.py": "721bd75f6e40f5a1deffac7e361a8cdb08936e23a35fa0df7c55dab4274431c6"
+    "kv_native_partition.py": "96234b1b7f29b153ba06128425bc2b0d62a99fffd2f3ceb0119255bcf74da26f",
+    "test_kv_native_twopass_a5.py": "acabfcf44ead4c4f0b7c9d61c3c35e603b532c3b48253e5f9ea79ebd66e32d93"
 }
 
 
 def download_payload(directory, insecure=False):
-    if len(PAYLOAD_COMMIT) != 40 or len(FILES) != 10:
+    if len(PAYLOAD_COMMIT) != 40 or len(FILES) != 11:
         raise RuntimeError("Launcher has not been pinned; refusing to run")
     context = ssl._create_unverified_context() if insecure else ssl.create_default_context()
     records = {}
