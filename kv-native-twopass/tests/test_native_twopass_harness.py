@@ -36,6 +36,8 @@ class NativeHarnessBackend(FakeBackend):
     def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch",
                 partition="argsort_int", writer="native", reader="native", hot_block_keys=16, hot_block_heads=16,
                 hot_decode="software"):
+        if window and writer == "hot_store_partition" and (mode != "mixed" or reader != "native"):
+            raise ValueError("hot_store_partition is mixed/native-reader only")
         config = (recipe, window, mode, index_capacity, merge, partition)
         if writer != "native":
             config += (writer,)
@@ -56,6 +58,8 @@ class NativeHarnessBackend(FakeBackend):
             raise RuntimeError("507015: The address for scalar to access GM is invalid")
         if self.fault == "new_merge" and merge == "triton_direct512":
             raise RuntimeError("CANDIDATE_MERGE_COMPILATION_FAILED")
+        if self.fault == "hot_prepare_compile" and recipe == "baseline" and writer == "hot_store_partition":
+            raise RuntimeError("HOT_PREPARE_COMPILATION_FAILED")
         hot_tile = reader == "hot_merge" and recipe == "baseline" and hot_block_keys == 16 and hot_block_heads == 16
         hot_target = hot_tile and hot_decode == "software"
         if self.fault == "hot_compile" and hot_target:
@@ -98,12 +102,15 @@ class NativeHarnessBackend(FakeBackend):
         def partition_diagnostics():
             self.calls.append((name, "partition_diagnostics"))
             return {"passed": not (self.fault == "partition" and selected
-                                    and partition == "argsort_float" and mode == "split_c4")}
+                                    and partition == "argsort_float" and mode == "split_c4")
+                              and not (self.fault == "hot_prepare_partition" and recipe == "baseline"
+                                       and writer == "hot_store_partition")}
 
         def writer_diagnostics():
             self.calls.append((name, "writer_diagnostics"))
             bad = (self.fault == "writer" and recipe == "baseline" and mode == "split_c4" and
                    writer == "fused_store" and partition == "triton_scan" and merge == "triton")
+            bad |= self.fault == "hot_prepare_writer" and recipe == "baseline" and writer == "hot_store_partition"
             return {"passed": not bad, "scope": "exact-cache CPU test double", "changed_bytes": int(bad)}
 
         def reader_diagnostics(*, control_l2, pipeline_l2):
@@ -117,6 +124,9 @@ class NativeHarnessBackend(FakeBackend):
             return output
 
         def components():
+            if writer == "hot_store_partition":
+                return {stage: lambda stage=stage: stage_call(stage)
+                        for stage in ("hot_prepare", "cold_read", "hot_read", "merge", "cold_write")}
             if reader == "hot_merge":
                 stages = ("partition", "cold_read", "hot_read_merge", "cold_write", "hot_write")
                 return {stage: lambda stage=stage: stage_call(stage) for stage in stages}
@@ -425,6 +435,89 @@ class NativeHarnessTests(unittest.TestCase):
                     self.assertEqual(len(calls), 4)
                     self.assertEqual(timed[calls[2]-1], (champion["name"], "pipeline"))
                     self.assertEqual(timed[calls[3]+1], (champion["name"], "pipeline"))
+
+    def test_hot_prepare_ab_reuses_native_split_for_two_native_reader_paths_and_forces_stages(self):
+        args = self.args(["--hot-prepare-ab"])
+        self.assertFalse(args.stages)
+        with tempfile.TemporaryDirectory() as tmp:
+            report, backend, timed = self.run_fake(Path(tmp)/"case", args)
+            harness.write_reports({"status": report["status"], "args": {"timing": "graph"}, "cases": [report]}, tmp)
+            with (Path(tmp)/"summary.csv").open() as stream:
+                rows = {row["name"]: row for row in csv.DictReader(stream)}
+        self.assertTrue(args.stages)
+        self.assertEqual(report["status"], "MEASURED")
+        self.assertEqual(len(report["variants"]), 8)  # 2 recipes × (W0 + split + champion + candidate).
+        plan = report["configuration_plan"]
+        self.assertEqual([config["writer"] for config in plan], ["native", "hot_store_partition"])
+        self.assertTrue(all(config["reader"] == "native" and config["merge"] == "triton"
+                            and config["partition"] == "triton_scan" and config["index_capacity"] == "bounded"
+                            for config in plan))
+        entries = {entry["name"]: entry for entry in report["variants"]}
+        for recipe in args.cold_recipes:
+            selected = [entry for entry in entries.values() if entry["recipe"] == recipe]
+            native = next(entry for entry in selected if entry["mode"] == "native")
+            split = next(entry for entry in selected if entry["mode"] == "split_c4")
+            mixed = [entry for entry in selected if entry["mode"] == "mixed"]
+            self.assertEqual(len(mixed), 2)
+            self.assertEqual(split["writer"], "native")
+            self.assertEqual(len([config for config in backend.prepared if config[:3] == (recipe, 8, "split_c4")]), 1)
+            self.assertTrue(native["implementation"]["zero_window_native_bypass"])
+            self.assertNotIn("stage_timings", native)
+            champion = next(entry for entry in mixed if entry["writer"] == "native")
+            candidate = next(entry for entry in mixed if entry["writer"] == "hot_store_partition")
+            self.assertEqual(candidate["split_control_reference"], split["name"])
+            self.assertEqual(candidate["split_control_writer"], "native")
+            self.assertEqual(candidate["requested_writer"], "hot_store_partition")
+            self.assertEqual(candidate["reader"], "native")
+            self.assertEqual(candidate["merge"], "triton")
+            self.assertNotIn("reader_consistency", candidate)
+            self.assertTrue(candidate["writer_consistency"]["passed"])
+            self.assertTrue(candidate["partition_consistency"]["passed"])
+            self.assertEqual(candidate["champion_timing_reference"], champion["name"])
+            self.assertEqual(candidate["timing_reference"], native["name"])
+            self.assertEqual(set(candidate["stage_timings"]), {"hot_prepare", "cold_read", "hot_read", "merge", "cold_write"})
+            self.assertIn("partition", champion["stage_timings"])
+            self.assertEqual(candidate["timing_vs_champion"]["graph"]["event_us"]["median_paired_ratio"], 1.)
+            self.assertEqual(rows[candidate["name"]]["writer"], "hot_store_partition")
+            self.assertEqual(rows[candidate["name"]]["split_control_writer"], "native")
+            self.assertIn("native C8 quantization", rows[candidate["name"]]["optimization_scope"])
+            pipeline_calls = [index for index, call in enumerate(timed) if call == (candidate["name"], "pipeline")]
+            self.assertEqual(len(pipeline_calls), 4)
+            self.assertEqual(timed[pipeline_calls[2]-1], (champion["name"], "pipeline"))
+            self.assertEqual(timed[pipeline_calls[3]+1], (champion["name"], "pipeline"))
+
+    def test_hot_prepare_failures_are_gated_and_native_split_failure_is_not_retried(self):
+        for fault in ("hot_prepare_partition", "hot_prepare_writer", "writer_missing", "hot_prepare_compile", "split_fusion"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                report, backend, timed = self.run_fake(Path(tmp)/"case", self.args(["--hot-prepare-ab"]), fault=fault)
+            self.assertEqual(report["status"], "FAILED")
+            candidates = [entry for entry in report["variants"] if entry.get("writer") == "hot_store_partition"]
+            for entry in candidates:
+                failed = entry["recipe"] == "baseline" or fault == "writer_missing"
+                if failed:
+                    self.assertEqual(entry["status"], "ERROR" if fault == "hot_prepare_compile" else "CONTROL_FAILED")
+                    self.assertNotIn("timing_write_read", entry)
+                    self.assertFalse(any(name == entry["name"] for name, _ in timed))
+                else:
+                    self.assertEqual(entry["status"], "MEASURED")
+            if fault == "split_fusion":
+                self.assertEqual(len([config for config in backend.prepared if config[:3] == ("baseline", 8, "split_c4")]), 1)
+                self.assertFalse(any(config[-1] == "hot_store_partition" and config[0] == "baseline" for config in backend.prepared))
+
+    def test_hot_prepare_validation_only_and_cli_preset_scope(self):
+        args = self.args(["--hot-prepare-ab", "--cold-recipes", "baseline", "--timing", "none"])
+        with tempfile.TemporaryDirectory() as tmp:
+            report, backend, timed = self.run_fake(Path(tmp)/"case", args)
+        self.assertTrue(args.stages)
+        self.assertEqual(report["status"], "VALIDATED_ONLY")
+        self.assertEqual(len(report["variants"])+len(report["baselines"]), 6)
+        self.assertEqual(timed, [])
+        self.assertTrue(all("stage_timings" not in entry for entry in report["variants"]))
+        for other in ("--optimization-sweep", "--reader-fusion-sweep"):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                harness.parser().parse_args(["--hot-prepare-ab", other])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            harness.main(["--writers", "hot_store_partition"])
 
     def test_reader_diagnostic_and_compilation_failures_never_time_that_tile_or_block_others(self):
         for fault in ("hot_reader", "hot_compile", "native_cast_compile", "hot_missing"):

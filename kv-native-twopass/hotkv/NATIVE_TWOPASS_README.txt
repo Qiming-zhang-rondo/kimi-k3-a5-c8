@@ -1,4 +1,4 @@
-Native C4 / C8 sparse-attention experiment v4.1
+Native C4 / C8 sparse-attention experiment v4.2
 =================================================
 
 Status: executable single-layer A5 microbenchmark, not model integration.
@@ -8,7 +8,48 @@ native operators and environment. The launcher installs/upgrades nothing and
 does not source another vendor package. Native reader and quantizer adapters
 are byte-identical to the previous payload. No custom cold attention is used.
 
-v4.1 correctness repair (A5 confirmation required)
+v4.2 native-reader hot preparation A/B (A5 validation required)
+-------------------------------------------------------------
+The user-reported v4.1 BK16/BH16 native_cast hot reader passed correctness but
+lost to the same-run native two-pass champion (paired ratio 1.558). Cold C4
+reading was always native; the slow candidate combined hot C8 attention and
+merge only. It is not the default or the baseline for this new comparison.
+
+--hot-prepare-ab compares the unchanged native-writer champion against one
+hot_store_partition candidate. Both retain native C4 and native C8 readers,
+the same Triton merge, and the original native quantizers. The candidate keeps
+cold writing unchanged, then runs native C8 quantization followed by one
+Triton kernel that packs/scatters the hot C8 bytes AND partitions current TopK.
+It eliminates separate C8 concatenation/scatter and standalone partition
+calls in the write+dynamic-read pipeline. It does not cache quantized inputs,
+omit current-token writes, or move work outside timing.
+
+The fused producer must pass exact poisoned-output partition checks against
+the CPU oracle and full-cache byte checks against native writers, including
+unwritten slots. Diagnostics restore both caches and shared partition buffers.
+Prepared-only reads do no writing; dynamic reads without writing still use
+the original standalone partition. Native W0 remains unchanged.
+
+The preset enables --stages automatically (unless timing is none, when no
+timing is performed). The candidate stage hot_prepare includes native C8
+quantization, packing, ring store and partition. Compare full-pipeline paired
+ratios, not sums/differences of independently timed stages. Single baseline
+recipe produces 6 entries: BF16/C8, W0, one native split control, champion and
+candidate. Existing split controls are reused only with the identical native
+reader/merge/partition setup; candidate writer/partition checks remain separate.
+
+Suggested first A5 run in the existing working container:
+  python test_kv_native_twopass_a5.py --hot-prepare-ab \
+    --batch 1 --keys 8192 --queries 4 --topk 2048 --windows 0,128 \
+    --cold-recipes baseline --timing graph \
+    --warmup 20 --iterations 100 --repeats 5 --diagnose \
+    --output /tmp/native-hot-prepare-v42
+
+Correctness gates run before timing. No speedup is claimed until A5 measures
+this candidate. Use an uncontended device for performance acceptance; earlier
+132 us results are historical observations, not the current baseline.
+
+v4.1 correctness repair (subsequently passed the A5 small-tile test)
 -----------------------------------------------
 The reported v4 BK16/BH16 candidate compiled but failed cold-only, hot-only
 and combined controls by factors of roughly 2191, 147 and 2338. This is not

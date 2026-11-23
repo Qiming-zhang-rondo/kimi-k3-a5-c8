@@ -19,7 +19,7 @@ MODES = ("split_c4", "mixed")
 INDEX_CAPACITIES = ("full", "bounded")
 MERGES = ("torch", "triton", "triton_log512", "triton_direct512")
 PARTITIONS = ("argsort_int", "argsort_float", "argsort_desc", "triton_scan", "triton_scan_packed")
-WRITERS = ("native", "fused_store")
+WRITERS = ("native", "fused_store", "hot_store_partition")
 READERS = ("native", "hot_merge")
 
 
@@ -183,6 +183,9 @@ class NativeTwoPassBackend:
             raise ValueError("window must be an integer >= 0")
         if reader == "hot_merge" and window > 0 and (mode != "mixed" or merge != "triton"):
             raise ValueError("hot_merge requires mixed mode and merge=triton; merge is inside the hot reader")
+        if writer == "hot_store_partition" and window > 0 and (
+                mode != "mixed" or reader != "native" or merge != "triton" or partition != "triton_scan"):
+            raise ValueError("hot_store_partition requires mixed/native reader/triton merge/triton_scan")
         if isinstance(hot_block_keys, bool) or hot_block_keys not in (16, 32, 64) or isinstance(hot_block_heads, bool) or hot_block_heads not in (16, 32):
             raise ValueError("Experimental hot tiles require keys=16/32/64 and heads=16/32")
         if hot_decode not in ("software", "native_cast"):
@@ -203,6 +206,7 @@ class NativeTwoPassRunner:
         self.index_capacity, self.merge_kind = index_capacity, merge
         self.partition_algo = partition
         self.writer_kind, self._store_runner = writer, None
+        self._hot_prepare = None
         self.reader_kind, self._hot_merge = reader, None
         self.metadata = dict(variant.metadata)
         self.metadata.update(window=window, mode=mode, index_capacity=index_capacity, merge=merge,
@@ -290,6 +294,11 @@ class NativeTwoPassRunner:
                 hot_cache=self.hot_cache if mode == "mixed" else None,
                 hot_slots=self.hot_slots if mode == "mixed" else None)
             self.metadata["writer_implementation"] = dict(self._store_runner.metadata)
+        if writer == "hot_store_partition":
+            from kv_native_hot_prepare import PreparedHotStorePartition
+            self._hot_prepare = PreparedHotStorePartition(base, self.hot_cache, self.hot_slots,
+                                                         self._partition_runner)
+            self.metadata["writer_implementation"] = dict(self._hot_prepare.metadata)
         self.metadata.update(
             reader="native_c4_c8_twopass" if mode == "mixed" else "native_c4_split_control",
             role="CANDIDATE" if mode == "mixed" else "SPLIT_C4_CONTROL",
@@ -325,6 +334,15 @@ class NativeTwoPassRunner:
                                  merge="fused_hot_reader", merge_selector=merge,
                                  prepared_read_scope="one native C4 stats-on read + custom C8 hot attention/merge",
                                  dynamic_read_scope="device partition + native C4 read + custom C8 hot attention/merge")
+        if self._hot_prepare is not None:
+            self.metadata.update(
+                hot_prepare_implementation=dict(self._hot_prepare.metadata),
+                separate_partition_calls_per_write_dynamic_run=0,
+                hot_prepare_calls_per_write_dynamic_run=1,
+                partition_calls_per_dynamic_read_without_write=1,
+                write_scope="unchanged native C4 quantize/pack/scatter + native C8 quantizer + fused C8 pack/store and current TopK partition",
+                write_dynamic_scope="cold write + hot_prepare + two native subset reads + unchanged Triton merge",
+                prepared_write_scope="hot_prepare also computes partition; prepared indices remain the read source")
 
     def decoded_kv(self):
         return self.variant.decoded_kv()
@@ -375,10 +393,34 @@ class NativeTwoPassRunner:
                                    self.capacity, self.index_capacity)
         if self.mode == "split_c4":
             expected["recent_ring"] = expected["recent_global"]
-        actual = self.partition()
+        if self._hot_prepare is None:
+            actual = self.partition()
+        else:
+            # Exercise the NEW fused producer, not the already-validated
+            # standalone partition. Poison shared outputs so a missing store
+            # cannot pass using values left by an earlier call.
+            outputs = self._hot_prepare.outputs
+            saved_parts = {name: value.clone() for name, value in outputs.items()}
+            hot_bytes = self.hot_cache.view(self.base.torch.uint8)
+            saved_hot = hot_bytes.clone()
+            try:
+                for name, value in outputs.items():
+                    if name == "invalid_rows":
+                        value.fill_(True)
+                    elif name.endswith("present"):
+                        value.copy_(self.base.tensor(~expected[name], self.base.torch.bool))
+                    else:
+                        value.fill_(-17)
+                actual = {name: value.clone() for name, value in self._hot_prepare.call().items()}
+            finally:
+                hot_bytes.copy_(saved_hot)
+                for name, value in outputs.items():
+                    value.copy_(saved_parts[name])
         result = {"scope": "untimed exact integer/bool device partition versus CPU oracle",
                   "passed": True, "fields": {}, "invalid_rows": [],
                   "invalid_rows_checked": "invalid_rows" in actual}
+        if self._hot_prepare is not None:
+            result["producer"] = "fused_hot_store_partition_after_output_poison"
         def json_scalar(value):
             value = value.item()
             return str(value) if isinstance(value, float) and not np.isfinite(value) else value
@@ -459,7 +501,9 @@ class NativeTwoPassRunner:
         if self._store_runner is not None:
             return self._store_runner.call()
         self._cold_write()
-        if self.mode == "mixed":
+        if self._hot_prepare is not None:
+            self._hot_prepare.call()
+        elif self.mode == "mixed":
             self._hot_write()
         return self.cold_cache.view(self.base.torch.uint8)
 
@@ -477,6 +521,8 @@ class NativeTwoPassRunner:
         if self.mode == "mixed":
             caches["hot"] = self.hot_cache.view(t.uint8)
         saved = {name: value.clone() for name, value in caches.items()}
+        saved_parts = ({name: value.clone() for name, value in self._hot_prepare.outputs.items()}
+                       if self._hot_prepare is not None else {})
         result = dict(passed=True, scope="all packed bytes vs native writers after sentinel poison; restored",
                       fields={})
         try:
@@ -498,6 +544,8 @@ class NativeTwoPassRunner:
         finally:
             for name, value in caches.items():
                 value.copy_(saved[name])
+            for name, value in saved_parts.items():
+                self._hot_prepare.outputs[name].copy_(value)
         return result
 
     def reader_diagnostics(self, control_l2=.01, pipeline_l2=.001):
@@ -580,6 +628,8 @@ class NativeTwoPassRunner:
             return self.variant.run(write=write)
         if write:
             self._write()
+            if dynamic and self._hot_prepare is not None:
+                return self._read(self._hot_prepare.outputs)
         return self._read(self.partition() if dynamic else self.prepared)
 
     def component_calls(self):
@@ -588,9 +638,9 @@ class NativeTwoPassRunner:
             return {"cold_read": self.variant.call}
         parts = self.prepared
         left = self._cold_read(parts)
-        result = {
-            "partition": lambda: self.partition()["old"],
-            "cold_read": lambda: self._cold_read(parts)[0]}
+        result = {"cold_read": lambda: self._cold_read(parts)[0]}
+        if self._hot_prepare is None:
+            result["partition"] = lambda: self.partition()["old"]
         if self._hot_merge is not None:
             result["hot_read_merge"] = lambda: self._hot_merge.call(
                 left, parts["recent_ring"], parts["old_present"], parts["recent_present"])
@@ -602,7 +652,12 @@ class NativeTwoPassRunner:
             result["quantize_and_fused_store"] = self._write
         else:
             result["cold_write"] = self._cold_write
-        if self.mode == "mixed" and self._store_runner is None:
+        if self._hot_prepare is not None:
+            def hot_prepare():
+                self._hot_prepare.call()
+                return self.hot_cache.view(self.base.torch.uint8)
+            result["hot_prepare"] = hot_prepare
+        elif self.mode == "mixed" and self._store_runner is None:
             result["hot_write"] = self._hot_write
         return result
 

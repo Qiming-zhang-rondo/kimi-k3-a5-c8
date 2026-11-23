@@ -20,7 +20,7 @@ from test_kv_hot_fused_a5 import (DeviceExecutionAborted, SUCCESS_STATUSES, acce
     compare, error_record, evaluate, identity, integer_list, paired_benchmark,
     recipe_list, standalone_benchmark, success_status, timing_failed)
 
-VERSION = "kv-native-twopass-a5-v4.1"
+VERSION = "kv-native-twopass-a5-v4.2"
 
 
 class PartitionControlFailed(RuntimeError):
@@ -74,8 +74,23 @@ def reader_fusion_configurations(args):
     return configs
 
 
+def hot_prepare_configurations():
+    champion = dict(merge="triton", partition="triton_scan", writer="native", reader="native")
+    return [dict(champion, optimization="champion", changed_knobs=[], champion=True),
+            dict(champion, writer="hot_store_partition", optimization="hot_store_partition",
+                 changed_knobs=["writer"], champion=False,
+                 optimization_scope="native C8 quantization + fused hot packing/scatter and partition; "
+                                    "native cold write, both native readers and Triton merge retained")]
+
+
+def uses_preset(args):
+    return args.optimization_sweep or args.reader_fusion_sweep or args.hot_prepare_ab
+
+
 def configuration_groups(args):
     """Explicit A/B configurations; the preset avoids a Cartesian explosion."""
+    if args.hot_prepare_ab:
+        return [("bounded", hot_prepare_configurations())]
     if args.reader_fusion_sweep:
         return [("bounded", reader_fusion_configurations(args))]
     if args.optimization_sweep:
@@ -92,6 +107,8 @@ def configuration_groups(args):
 
 
 def run_case(data, args, directory, *, backend_factory=None, benchmark=None, progress=None):
+    if args.hot_prepare_ab:
+        args.stages = True
     data = validate_case(data)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
@@ -192,9 +209,10 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
             for window in sorted(w for w in args.windows if w > 0):
                 for capacity, configurations in configuration_groups(args):
                     for config in configurations:
-                        merge, partition, writer = config["merge"], config["partition"], config["writer"]
+                        merge, partition, requested_writer = config["merge"], config["partition"], config["writer"]
                         requested_reader = config.get("reader", "native")
-                        split_key = (window, capacity, merge, partition, writer)
+                        control_writer = "native" if requested_writer == "hot_store_partition" else requested_writer
+                        split_key = (window, capacity, merge, partition, control_writer)
                         split_record = split_controls.get(split_key)
                         split_reference = split_record["name"] if split_record is not None else None
                         modes = ("mixed",) if split_record is not None else ("split_c4", "mixed")
@@ -202,6 +220,7 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                         if split_record is not None:
                             split_passed = split_record.get("control_passed", False) and split_record["status"] in SUCCESS_STATUSES
                         for mode in modes:
+                            writer = control_writer if mode == "split_c4" else requested_writer
                             reader = "native" if mode == "split_c4" else requested_reader
                             name = f"{recipe}_{mode}_w{window}_{capacity}_{merge}"
                             if partition != "argsort_int":
@@ -213,12 +232,14 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                             entry = dict(name=name, recipe=recipe, window=window, mode=mode,
                                          index_capacity=capacity, merge="fused_hot_reader" if reader == "hot_merge" else merge,
                                          merge_selector=merge, partition=partition, writer=writer, reader=reader,
+                                         requested_writer=requested_writer,
                                          requested_reader=requested_reader,
                                          hot_block_keys=config.get("hot_block_keys") if reader == "hot_merge" else None,
                                          hot_block_heads=config.get("hot_block_heads") if reader == "hot_merge" else None,
                                          hot_decode=config.get("hot_decode") if reader == "hot_merge" else None,
                                          optimization=config["optimization"], changed_knobs=config["changed_knobs"] if mode == "mixed" else
-                                             [knob for knob in config["changed_knobs"] if knob not in ("reader", "hot_block_keys", "hot_block_heads", "hot_decode")],
+                                             [knob for knob in config["changed_knobs"] if knob not in ("reader", "hot_block_keys", "hot_block_heads", "hot_decode")
+                                              and not (knob == "writer" and writer != requested_writer)],
                                          comparison_role="CHAMPION" if config["champion"] else "CANDIDATE",
                                          status="RUNNING",
                                          role="SPLIT_CONTROL" if mode == "split_c4" else "HOT_WINDOW",
@@ -226,6 +247,10 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                          selection=window_selection_stats(data, window))
                             if mode == "mixed":
                                 entry["split_control_reference"] = split_reference
+                            if requested_writer == "hot_store_partition":
+                                entry["split_control_writer"] = control_writer
+                                entry["split_control_scope"] = "native split reader/merge control; candidate partition and writer separately validated"
+                                entry["optimization_scope"] = config["optimization_scope"]
                             report["variants"].append(entry)
                             try:
                                 dependency = controls_ok and native_entry.get("control_passed", False)
@@ -288,7 +313,7 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                                         config.get("hot_block_keys") if reader == "hot_merge" else None,
                                                         config.get("hot_block_heads") if reader == "hot_merge" else None,
                                                         config.get("hot_decode") if reader == "hot_merge" else None)
-                                        if partition != "argsort_int" and not (args.optimization_sweep or args.reader_fusion_sweep):
+                                        if partition != "argsort_int" and not uses_preset(args):
                                             matched = partition_baselines.get(baseline_key)
                                             if matched is not None:
                                                 baseline_runner, baseline_record = matched
@@ -300,7 +325,7 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                                     entry["status"] = "TIMING_ERROR"
                                             else:
                                                 entry["partition_timing_comparison"] = "UNAVAILABLE: matching integer-sort control did not pass"
-                                        if (args.optimization_sweep or args.reader_fusion_sweep) and not config["champion"]:
+                                        if uses_preset(args) and not config["champion"]:
                                             matched = champions.get((window, mode))
                                             if matched is not None:
                                                 champion_runner, champion_record = matched
@@ -462,6 +487,7 @@ def write_reports(report, directory):
              "Full pipeline includes dynamic partition, current-token writes, native reads and merge.",
              "Champion comparisons pair the same recipe/window/mode; native W0 remains the performance baseline.",
              "fused_store retains native quantizers and fuses packing/scatter; it does not fuse quantization.",
+             "hot_store_partition retains native readers/merge and native quantizers; it combines hot packing/scatter with partition.",
              "hot_merge retains the native C4 cold reader; its Triton kernel combines C8 hot attention and merge. Split controls always use native readers."]
     rows = []
     def num(x, digits=2):
@@ -482,6 +508,9 @@ def write_reports(report, directory):
                     index_capacity=entry.get("index_capacity"),
                     partition=entry.get("partition", "none"),
                     merge=entry.get("merge", "none"), writer=entry.get("writer", "native"),
+                    requested_writer=entry.get("requested_writer", entry.get("writer", "native")),
+                    optimization_scope=entry.get("optimization_scope"),
+                    split_control_writer=entry.get("split_control_writer"),
                     merge_selector=entry.get("merge_selector", entry.get("merge")),
                     reader=entry.get("reader", "native"), requested_reader=entry.get("requested_reader", "native"),
                     hot_block_keys=entry.get("hot_block_keys"), hot_block_heads=entry.get("hot_block_heads"),
@@ -590,7 +619,7 @@ def parser():
     p.add_argument("--merges", type=lambda s: choices_list(s,("torch","triton","triton_log512","triton_direct512")), default=["torch","triton"])
     p.add_argument("--partitions", type=lambda s: choices_list(s,("argsort_int","argsort_float","argsort_desc","triton_scan","triton_scan_packed")),
                    default=["argsort_int","argsort_float","triton_scan"])
-    p.add_argument("--writers", type=lambda s: choices_list(s,("native","fused_store")), default=["native"])
+    p.add_argument("--writers", type=lambda s: choices_list(s,("native","fused_store","hot_store_partition")), default=["native"])
     p.add_argument("--readers", type=lambda s: choices_list(s,("native","hot_merge")), default=["native"])
     p.add_argument("--hot-block-keys", type=integer_list, default=[16,32,64], help="Hot-reader tile key sizes; used only by hot_merge candidates")
     p.add_argument("--hot-block-heads", type=integer_list, default=[16,32], help="Hot-reader tile head sizes; used only by hot_merge candidates")
@@ -601,6 +630,8 @@ def parser():
                    help="Run 7 bounded configurations: champion, isolated partition/merge/writer changes and two stacked candidates; overrides capacities/merges/partitions/writers lists")
     presets.add_argument("--reader-fusion-sweep", action="store_true",
                    help="Bounded native champion + descending-sort native control + hot_merge tile/decoder sweep with triton_scan; reuse native split controls, keep native writers")
+    presets.add_argument("--hot-prepare-ab", action="store_true",
+                   help="Bounded native champion vs hot_store_partition; reuse native split control, keep both native readers and Triton merge; enable stages")
     p.add_argument("--device", default="npu:0")
     p.add_argument("--seed", type=int, default=20261120)
     p.add_argument("--timing", choices=("none","eager","graph","eager,graph"), default="graph")
@@ -618,6 +649,8 @@ def parser():
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
+    if args.hot_prepare_ab:
+        args.stages = True
     if args.self_test:
         from test_kv_hot_fused_a5 import self_test
         from kv_native_twopass import partition_numpy
@@ -631,9 +664,11 @@ def main(argv=None):
         return 0
     if 0 not in args.windows:
         p.error("--windows must include 0 for native C4 baseline")
-    if not (args.optimization_sweep or args.reader_fusion_sweep) and "argsort_int" not in args.partitions:
+    if "hot_store_partition" in args.writers and not args.hot_prepare_ab:
+        p.error("hot_store_partition requires --hot-prepare-ab; unsupported manual matrix combinations are not generated")
+    if not uses_preset(args) and "argsort_int" not in args.partitions:
         p.error("--partitions must include argsort_int for the same-path baseline")
-    if not (args.optimization_sweep or args.reader_fusion_sweep) and "hot_merge" in args.readers and args.merges != ["triton"]:
+    if not uses_preset(args) and "hot_merge" in args.readers and args.merges != ["triton"]:
         p.error("hot_merge requires --merges triton; its actual merge executes inside the fused hot reader")
     if min(args.batch,args.heads,args.topk,args.iterations,args.repeats) < 1 or args.warmup < 0:
         p.error("Positive batch/heads/TopK/iterations/repeats and nonnegative warmup required")
@@ -664,9 +699,9 @@ def main(argv=None):
     finally:
         persist()
     detail = write_reports(report,directory)
-    print((directory / "short_summary.txt").read_text() if args.optimization_sweep or args.reader_fusion_sweep else detail, flush=True)
+    print((directory / "short_summary.txt").read_text() if uses_preset(args) else detail, flush=True)
     print(f"Results: {directory / 'results.json'}\nShort summary: {directory / 'short_summary.txt'}\nDetails: {directory / 'brief.txt'}\nFailure diagnostics: {directory / 'failure_summary.txt'}",flush=True)
-    if args.reader_fusion_sweep:
+    if args.reader_fusion_sweep or args.hot_prepare_ab:
         print(f"Exact paired summary: {directory / 'paired_summary.txt'}", flush=True)
     return 0 if report["status"] in SUCCESS_STATUSES else 1
 
