@@ -17,6 +17,17 @@ RECIPES = ("baseline", "alg2_max7")
 MODES = ("split_c4", "mixed")
 INDEX_CAPACITIES = ("full", "bounded")
 MERGES = ("torch", "triton")
+PARTITIONS = ("argsort_int", "argsort_float", "triton_scan")
+
+
+def validate_partition_width(partition, width):
+    """Metadata-only guard for exact FLOAT32 encoding of unique sort keys."""
+    if partition not in PARTITIONS:
+        raise ValueError("Unsupported partition algorithm")
+    if isinstance(width, (bool, np.bool_)) or not isinstance(width, (int, np.integer)) or width < 1:
+        raise ValueError("Partition index capacity must be a positive integer")
+    if partition == "argsort_float" and 2*int(width)-1 > 2**24:
+        raise ValueError("argsort_float requires 2*S-1 <= 2**24 for exact unique sort keys")
 
 
 def partition_numpy(indices, positions, window, ring_capacity, index_capacity="full"):
@@ -125,25 +136,27 @@ class NativeTwoPassBackend:
     def baseline_decoded(self, kind):
         return self.data["kv"].copy() if kind == "bf16" else self.base.decoded_kv(kind)
 
-    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch"):
-        if recipe not in RECIPES or mode not in MODES or index_capacity not in INDEX_CAPACITIES or merge not in MERGES:
-            raise ValueError("Unsupported recipe/mode/index_capacity/merge")
+    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch", partition="argsort_int"):
+        if recipe not in RECIPES or mode not in MODES or index_capacity not in INDEX_CAPACITIES or merge not in MERGES or partition not in PARTITIONS:
+            raise ValueError("Unsupported recipe/mode/index_capacity/merge/partition")
         if isinstance(window, (bool, np.bool_)) or not isinstance(window, (int, np.integer)) or window < 0:
             raise ValueError("window must be an integer >= 0")
-        key = (recipe, int(window), mode, index_capacity, merge)
+        key = (recipe, int(window), mode, index_capacity, merge, partition)
         if key not in self._runners:
             self._runners[key] = NativeTwoPassRunner(self, self.scales.prepare(recipe), int(window),
-                                                     mode, index_capacity, merge)
+                                                     mode, index_capacity, merge, partition)
         return self._runners[key]
 
 
 class NativeTwoPassRunner:
-    def __init__(self, backend, variant, window, mode, index_capacity, merge):
+    def __init__(self, backend, variant, window, mode, index_capacity, merge, partition="argsort_int"):
         self.backend, self.base, self.variant = backend, backend.base, variant
         self.window, self.mode = window, mode
         self.index_capacity, self.merge_kind = index_capacity, merge
+        self.partition_algo = partition
         self.metadata = dict(variant.metadata)
         self.metadata.update(window=window, mode=mode, index_capacity=index_capacity, merge=merge,
+                             partition=partition,
                              production_validation="NOT_VALIDATED",
                              lifetime_scope="fixed trailing query batch only")
         if window == 0:
@@ -153,6 +166,7 @@ class NativeTwoPassRunner:
                                  merge_calls_per_read=0)
             return
         base, t = self.base, self.base.torch
+        validate_partition_width(partition, base.indices.shape[-1])
         self.plan = fixed_ring_plan(backend.data, window)
         self.capacity = self.plan["capacity"]
         self.indices_cpu = flatten_queries(backend.data, "indices").astype(np.int32)
@@ -163,6 +177,22 @@ class NativeTwoPassRunner:
         self.hot_width = parts["recent_global"].shape[-1]
         self.ordinal = t.arange(self.indices_cpu.shape[-1], dtype=t.int32,
                                 device=base.device).reshape(1, 1, -1)
+        self._partition_runner = None
+        partition_metadata = {
+            "algorithm": partition, "sort_key_dtype": "float32" if partition == "argsort_float" else "int32",
+            "source_indices_dtype": "int32", "source_shape": list(self.indices_cpu.shape),
+            "old_shape": list(parts["old"].shape), "hot_shape": list(parts["recent_global"].shape),
+            "sort_key": "ordinal + (!selected)*S; token IDs are never cast to float",
+            "max_unique_sort_key": 2*self.indices_cpu.shape[-1]-1,
+            "device_execution": "NOT_VERIFIED; inspect profiler and full-pipeline measurement",
+            "performance": "NOT_VALIDATED"}
+        if partition == "triton_scan":
+            from kv_native_partition import PreparedPartition
+            self._partition_runner = PreparedPartition(
+                base.indices, base.positions, window=window, ring_capacity=self.capacity,
+                hot_width=self.hot_width, remap_ring=mode == "mixed")
+            partition_metadata = dict(self._partition_runner.metadata)
+        self.metadata["partition_implementation"] = partition_metadata
         self.cold_cache = variant.cache.clone()
         ring_bytes = 0
         if mode == "mixed":
@@ -222,6 +252,8 @@ class NativeTwoPassRunner:
 
     def partition(self):
         """Fixed-shape device work; no CPU indices or synchronization."""
+        if self._partition_runner is not None:
+            return self._partition_runner.call()
         base, t = self.base, self.base.torch
         valid = base.indices >= 0
         hot = valid & (base.indices >= (base.positions-self.window+1)[:, None, None])
@@ -229,6 +261,8 @@ class NativeTwoPassRunner:
 
         def pack(mask, width):
             key = self.ordinal+(~mask).to(t.int32)*base.indices.shape[-1]
+            if self.partition_algo == "argsort_float":
+                key = key.to(t.float32)
             order = t.argsort(key, dim=-1)
             values = t.gather(t.where(mask, base.indices, t.full_like(base.indices, -1)), -1, order)
             values = values[:, :, :width]
@@ -242,6 +276,54 @@ class NativeTwoPassRunner:
                 if self.mode == "mixed" else recent)
         return dict(old=old, recent_global=recent, recent_ring=ring,
                     old_present=old_present, recent_present=hot_present)
+
+    def partition_diagnostics(self):
+        """Untimed exact checks of every partition output, including raw IDs.
+
+        Do not use base.host(): its float conversion could round int32 token
+        IDs above 2**24. No host copies are added to partition() or run().
+        """
+        if self.window == 0:
+            return {"passed": True, "skipped": True, "scope": "W0 has no partition"}
+        expected = partition_numpy(self.indices_cpu, self.positions_cpu, self.window,
+                                   self.capacity, self.index_capacity)
+        if self.mode == "split_c4":
+            expected["recent_ring"] = expected["recent_global"]
+        actual = self.partition()
+        result = {"scope": "untimed exact integer/bool device partition versus CPU oracle",
+                  "passed": True, "fields": {}, "invalid_rows": [],
+                  "invalid_rows_checked": "invalid_rows" in actual}
+        def json_scalar(value):
+            value = value.item()
+            return str(value) if isinstance(value, float) and not np.isfinite(value) else value
+
+        for name in ("old", "recent_global", "recent_ring", "old_present", "recent_present"):
+            reference = expected[name]
+            # A missing output is an interface failure and propagates unchanged.
+            observed = actual[name].detach().cpu().numpy().copy()
+            same_shape = observed.shape == reference.shape
+            same_dtype = observed.dtype == reference.dtype
+            bad = np.argwhere(observed != reference) if same_shape else np.empty((0, reference.ndim), np.int64)
+            mismatch_count = len(bad) if same_shape else max(observed.size, reference.size)
+            field = {"passed": bool(same_shape and same_dtype and not mismatch_count),
+                     "expected_shape": list(reference.shape), "actual_shape": list(observed.shape),
+                     "expected_dtype": str(reference.dtype), "actual_dtype": str(observed.dtype),
+                     "mismatch_count": int(mismatch_count),
+                     "first_bad_positions": bad[:16].tolist()}
+            if same_shape and len(bad):
+                field["first_mismatches"] = [
+                    {"position": position.tolist(), "expected": json_scalar(reference[tuple(position)]),
+                     "actual": json_scalar(observed[tuple(position)])} for position in bad[:16]]
+            result["fields"][name] = field
+            result["passed"] &= field["passed"]
+        if "invalid_rows" in actual:
+            invalid = actual["invalid_rows"].detach().cpu().numpy().copy()
+            valid_format = invalid.shape == (len(self.indices_cpu),) and invalid.dtype == np.bool_
+            result["invalid_rows"] = np.flatnonzero(invalid.reshape(-1)).tolist()
+            result["invalid_rows_format"] = {"passed": bool(valid_format),
+                                             "shape": list(invalid.shape), "dtype": str(invalid.dtype)}
+            result["passed"] &= bool(valid_format and not result["invalid_rows"])
+        return result
 
     def _cold_read(self, parts, base=None):
         base = self.base if base is None else base

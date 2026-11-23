@@ -6,6 +6,7 @@ W0 remains the baseline; optional Triton implements only the small merge.
 """
 import argparse
 import csv
+import itertools
 import json
 from pathlib import Path
 import sys
@@ -19,7 +20,11 @@ from test_kv_hot_fused_a5 import (DeviceExecutionAborted, SUCCESS_STATUSES, acce
     compare, error_record, evaluate, identity, integer_list, paired_benchmark,
     recipe_list, standalone_benchmark, success_status, timing_failed)
 
-VERSION = "kv-native-twopass-a5-v1"
+VERSION = "kv-native-twopass-a5-v2"
+
+
+class PartitionControlFailed(RuntimeError):
+    pass
 
 
 def choices_list(value, allowed):
@@ -39,6 +44,13 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                   source_kind=data["source_kind"], selection_source=data["selection_source"],
                   shape={key: list(data[key].shape) for key in ARRAY_KEYS}, baselines={}, variants=[],
                   production_validation="NOT_VALIDATED", directory=str(directory))
+    report["benchmark_scope"] = {
+        "calls_per_captured_graph": 1,
+        "graph_capture": "one call; iterations are repeated graph replay outside capture",
+        "serving_graph_break": "NOT_MEASURED",
+        "concurrency_to_batch_mapping": "NOT_ASSUMED",
+        "tokens_not_characters": True,
+    }
 
     def flush():
         (directory / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
@@ -115,14 +127,18 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
             finish(entry)
             native_entry = entry
             references = {}
+            partition_baselines = {}
+            partitions = ["argsort_int"] + [x for x in args.partitions if x != "argsort_int"]
             for window in sorted(w for w in args.windows if w > 0):
                 for capacity in args.index_capacities:
-                    for merge in args.merges:
+                    for merge, partition in itertools.product(args.merges, partitions):
                         split_passed = False
                         for mode in ("split_c4", "mixed"):
                             name = f"{recipe}_{mode}_w{window}_{capacity}_{merge}"
+                            if partition != "argsort_int":
+                                name += "_" + partition
                             entry = dict(name=name, recipe=recipe, window=window, mode=mode,
-                                         index_capacity=capacity, merge=merge, status="RUNNING",
+                                         index_capacity=capacity, merge=merge, partition=partition, status="RUNNING",
                                          role="SPLIT_CONTROL" if mode == "split_c4" else "HOT_WINDOW",
                                          timing_reference=f"{recipe}_w0", production_performance="NOT_VALIDATED",
                                          selection=window_selection_stats(data, window))
@@ -136,8 +152,11 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                         control_failure_reason="BF16/C8, matching native W0, or same-configuration split C4 control failed")
                                 else:
                                     runner = backend.prepare(recipe, window, mode=mode,
-                                                             index_capacity=capacity, merge=merge)
+                                                             index_capacity=capacity, merge=merge, partition=partition)
                                     entry["implementation"] = runner.metadata
+                                    entry["partition_consistency"] = runner.partition_diagnostics()
+                                    if not entry["partition_consistency"]["passed"]:
+                                        raise PartitionControlFailed("Device partition differs from validated CPU indices/presence")
                                     key = (window, mode)
                                     if key not in references:
                                         references[key] = (cold_reference if mode == "split_c4" else
@@ -163,6 +182,19 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                         entry["timing_write_read"] = paired_benchmark(
                                             lambda: native.run(write=True), pipeline, args, benchmark)
                                         entry["status"] = "TIMING_ERROR" if timing_failed(entry) else success_status(args)
+                                        baseline_key = (window, capacity, merge, mode)
+                                        if partition != "argsort_int":
+                                            matched = partition_baselines.get(baseline_key)
+                                            if matched is not None:
+                                                baseline_runner, baseline_record = matched
+                                                entry["partition_timing_reference"] = baseline_record["name"]
+                                                entry["timing_vs_argsort_int"] = paired_benchmark(
+                                                    lambda runner=baseline_runner: runner.run(write=True, dynamic=True),
+                                                    pipeline, args, benchmark)
+                                                if any(v.get("status") == "ERROR" for v in entry["timing_vs_argsort_int"].values()):
+                                                    entry["status"] = "TIMING_ERROR"
+                                            else:
+                                                entry["partition_timing_comparison"] = "UNAVAILABLE: matching integer-sort control did not pass"
                                         if args.stages and args.timing != "none":
                                             entry["stage_timings"] = {stage: standalone_benchmark(call, args, benchmark)
                                                 for stage, call in runner.component_calls().items()}
@@ -173,8 +205,12 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                             1-entry["vs_bf16_math"]["relative_l2"]/original if original else None)
                                     else:
                                         entry["status"] = "CONTROL_FAILED"
+                            except PartitionControlFailed as exc:
+                                entry.update(status="CONTROL_FAILED", control_passed=False, control_failure_reason=str(exc))
                             except Exception:
                                 entry.update(error_record())
+                            if partition == "argsort_int" and entry["status"] in SUCCESS_STATUSES:
+                                partition_baselines[(window, capacity, merge, mode)] = (runner, entry)
                             if mode == "split_c4":
                                 split_passed = entry.get("control_passed", False) and entry["status"] in SUCCESS_STATUSES
                             finish(entry)
@@ -204,27 +240,34 @@ def write_reports(report, directory):
     def num(x, digits=2):
         return "NA" if x is None else f"{x:.{digits}f}"
     for case in report["cases"]:
-        lines.append(f"case={case['label']}")
-        lines.append("name | status | prepared read | full pipeline | paired W0 pipeline | ratio [min,max] | observation | L2 | matching L2")
+        lines.append(f"case={case['label']} q_shape={case.get('shape', {}).get('q_nope')} kv_shape={case.get('shape', {}).get('kv')}")
+        lines.append("name | role | partition | status | prepared read | full pipeline | paired W0 pipeline | W0 ratio [min,max] | same-path int-sort ratio | observation | L2 | matching L2")
         for entry in list(case["baselines"].values()) + case["variants"]:
             for timing_mode in modes:
                 read = entry.get("timing_prepared_read", {}).get(timing_mode, {}).get("event_us", {})
                 item = entry.get("timing_write_read", {}).get(timing_mode, {})
                 pipe = item.get("event_us", {})
+                sort_comparison = entry.get("timing_vs_argsort_int", {}).get(timing_mode, {}).get("event_us", {})
                 row = dict(case=case["label"], name=entry["name"], status=entry["status"], role=entry["role"],
+                    partition=entry.get("partition", "none"),
                     timing=timing_mode, read_us=read.get("candidate_median", read.get("median")),
                     pipeline_us=pipe.get("candidate_median", pipe.get("median")),
                     paired_w0_pipeline_us=pipe.get("baseline_median"), paired_ratio=pipe.get("median_paired_ratio"),
                     min_ratio=pipe.get("min_paired_ratio"), max_ratio=pipe.get("max_paired_ratio"),
                     observation=item.get("observation", "NOT_PAIRED"),
+                    paired_argsort_int_pipeline_us=sort_comparison.get("baseline_median"),
+                    paired_argsort_int_candidate_us=sort_comparison.get("candidate_median"),
+                    ratio_vs_same_path_argsort_int=sort_comparison.get("median_paired_ratio"),
+                    partition_timing_reference=entry.get("partition_timing_reference"),
                     l2=entry.get("vs_bf16_math", {}).get("relative_l2"),
                     matching_l2=entry.get("kernel_vs_matching_reference", {}).get("relative_l2"),
                     production_performance="NOT_VALIDATED")
                 rows.append(row)
                 if timing_mode == display:
                     ratio = "NA" if row["paired_ratio"] is None else f"{num(row['paired_ratio'],3)} [{num(row['min_ratio'],3)},{num(row['max_ratio'],3)}]"
-                    lines.append(" | ".join([entry["name"], entry["status"], num(row["read_us"]),
-                        num(row["pipeline_us"]), num(row["paired_w0_pipeline_us"]), ratio, row["observation"],
+                    lines.append(" | ".join([entry["name"], entry["role"], row["partition"], entry["status"], num(row["read_us"]),
+                        num(row["pipeline_us"]), num(row["paired_w0_pipeline_us"]), ratio,
+                        num(row["ratio_vs_same_path_argsort_int"],3), row["observation"],
                         num(row["l2"],6), num(row["matching_l2"],6)]))
             if entry.get("traceback"):
                 lines.append("  error: " + entry["traceback"].strip().splitlines()[-1][:300])
@@ -249,6 +292,7 @@ def parser():
     p.add_argument("--keys", type=integer_list, default=[8192])
     p.add_argument("--queries", type=integer_list, default=[4])
     p.add_argument("--batch", type=int, default=1)
+    p.add_argument("--batches", type=integer_list, help="Optional batch sweep; request concurrency is not assumed to equal device batch")
     p.add_argument("--heads", type=int, default=64)
     p.add_argument("--rope-dim", type=int, choices=(0,64), default=64)
     p.add_argument("--topk", type=int, default=2048)
@@ -257,6 +301,8 @@ def parser():
     p.add_argument("--cold-recipes", type=recipe_list, default=["baseline", "alg2_max7"])
     p.add_argument("--index-capacities", type=lambda s: choices_list(s,("full","bounded")), default=["full","bounded"])
     p.add_argument("--merges", type=lambda s: choices_list(s,("torch","triton")), default=["torch","triton"])
+    p.add_argument("--partitions", type=lambda s: choices_list(s,("argsort_int","argsort_float","triton_scan")),
+                   default=["argsort_int","argsort_float","triton_scan"])
     p.add_argument("--device", default="npu:0")
     p.add_argument("--seed", type=int, default=20261120)
     p.add_argument("--timing", choices=("none","eager","graph","eager,graph"), default="graph")
@@ -287,6 +333,8 @@ def main(argv=None):
         return 0
     if 0 not in args.windows:
         p.error("--windows must include 0 for native C4 baseline")
+    if "argsort_int" not in args.partitions:
+        p.error("--partitions must include argsort_int for the same-path baseline")
     if min(args.batch,args.heads,args.topk,args.iterations,args.repeats) < 1 or args.warmup < 0:
         p.error("Positive batch/heads/TopK/iterations/repeats and nonnegative warmup required")
     if not all(np.isfinite(x) and x > 0 for x in (args.control_l2,args.pipeline_l2)):
@@ -301,9 +349,9 @@ def main(argv=None):
         write_reports(report, directory)
     try:
         cases = [load_case(args.input)] if args.input else (
-            synthetic_case(batch=args.batch,queries=q,keys=k,heads=args.heads,dim=512,
+            synthetic_case(batch=b,queries=q,keys=k,heads=args.heads,dim=512,
                            rope_dim=args.rope_dim,topk=args.topk,page=args.page,seed=args.seed)
-            for k in args.keys for q in args.queries)
+            for b in (args.batches or [args.batch]) for k in args.keys for q in args.queries)
         for index,data in enumerate(cases):
             current = run_case(data,args,directory/f"case_{index:03d}",progress=persist)
             if current["status"] == "DEVICE_ERROR":

@@ -9,7 +9,8 @@ from unittest import mock
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hotkv"))
-from kv_native_twopass import NativeTwoPassBackend, merge_torch, partition_numpy
+from kv_native_twopass import (NativeTwoPassBackend, merge_torch, partition_numpy,
+                               validate_partition_width)
 from kv_window_common import (attention_reference, flatten_queries, paged_array,
                               query_positions, row_map, synthetic_case, validate_case)
 
@@ -35,6 +36,15 @@ class Tensor(np.ndarray):
 
     def float(self):
         return self.to(np.float32)
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return np.asarray(self)
 
     def numel(self):
         return self.size
@@ -208,6 +218,16 @@ class FakeScales:
 
 
 class PartitionTests(unittest.TestCase):
+    def test_float_sort_key_exactness_guard_at_float32_integer_boundary(self):
+        width = 2**23
+        validate_partition_width("argsort_float", width)
+        keys = np.array([0, width-1, width, 2*width-2, 2*width-1], np.int64)
+        np.testing.assert_array_equal(keys.astype(np.float32).astype(np.int64), keys)
+        with self.assertRaisesRegex(ValueError, r"2\*S-1 <= 2\*\*24"):
+            validate_partition_width("argsort_float", width+1)
+        # The float restriction does not silently restrict the integer baseline.
+        validate_partition_width("argsort_int", width+1)
+
     def test_bounded_partition_keeps_order_wraps_ring_and_handles_empty_rows(self):
         indices = np.array([[[8, 0, 9, -1]], [[8, 9, -1, -1]], [[0, 1, -1, -1]]], np.int32)
         full = partition_numpy(indices, np.array([9, 9, 9]), 2, 4, "full")
@@ -238,12 +258,13 @@ class NativeAdapterTests(unittest.TestCase):
 
     def test_zero_window_does_no_partition_ring_merge_or_writer_work(self):
         with mock.patch("kv_native_twopass.fixed_ring_plan", side_effect=AssertionError("W0 allocated ring")):
-            runner = self.backend.prepare("baseline", 0, merge="triton")
+            runner = self.backend.prepare("baseline", 0, merge="triton", partition="triton_scan")
             np.testing.assert_array_equal(runner.call(), attention_reference(self.data, kv_c4=runner.decoded_kv()))
             runner.run(write=True, dynamic=True)
             self.assertFalse(hasattr(runner, "cold_cache"))
             self.assertFalse(hasattr(runner, "hot_cache"))
             self.assertFalse(hasattr(runner, "_triton_merge"))
+            self.assertFalse(hasattr(runner, "_partition_runner"))
         self.assertEqual(self.scales.base.native_calls, [("baseline", False), ("baseline", True)])
         self.assertEqual(self.scales.base.reads, [])
         self.assertEqual(self.scales.base.writes, [])
@@ -261,6 +282,149 @@ class NativeAdapterTests(unittest.TestCase):
                         np.testing.assert_array_equal(actual["recent_ring"], runner.prepared["recent_ring"])
                     self.assertEqual(actual["old"].dtype, np.int32)
                     self.assertEqual(actual["recent_global"].dtype, np.int32)
+
+    def test_float_candidate_changes_sort_key_dtype_only_and_preserves_large_token_ids(self):
+        runners = {algo: self.backend.prepare("baseline", 2, partition=algo)
+                   for algo in ("argsort_int", "argsort_float")}
+        base = self.scales.base
+        # IDs above the float32 exact-integer range must never be cast. This
+        # partition-only probe needs no KV allocation at those logical IDs.
+        base.indices = Tensor(np.full(base.indices.shape, -1, np.int32))
+        base.indices[:, 0, :3] = [2**24+1, 2**24+2, 2**24+3]
+        base.positions = Tensor(np.full(base.rows, 2**24+3, np.int32))
+        expected = partition_numpy(base.indices, base.positions, 2, runners["argsort_int"].capacity)
+        original_argsort = NumpyTorch.argsort
+        for algo, runner in runners.items():
+            observed_keys = []
+            def argsort(key, dim=-1):
+                observed_keys.append(np.array(key, copy=True))
+                return original_argsort(key, dim=dim)
+            with mock.patch.object(NumpyTorch, "argsort", side_effect=argsort):
+                actual = runner.partition()
+            self.assertEqual(len(observed_keys), 2)
+            for key in observed_keys:
+                self.assertEqual(key.dtype, np.float32 if algo == "argsort_float" else np.int32)
+                self.assertLessEqual(int(key.max()), 2*base.indices.shape[-1]-1)
+            for key in ("old", "recent_global", "recent_ring", "old_present", "recent_present"):
+                np.testing.assert_array_equal(actual[key], expected[key])
+            self.assertEqual(actual["recent_global"][0, 0, :2].tolist(), [2**24+2, 2**24+3])
+            self.assertEqual(actual["recent_global"].dtype, np.int32)
+            runner.indices_cpu = np.asarray(base.indices).copy()
+            runner.positions_cpu = np.asarray(base.positions).copy()
+            with mock.patch.object(base, "host", side_effect=AssertionError("Integer diagnostic used float-converting host()")):
+                diagnostic = runner.partition_diagnostics()
+            self.assertTrue(diagnostic["passed"])
+            self.assertEqual(diagnostic["fields"]["recent_global"]["actual_dtype"], "int32")
+            self.assertEqual(diagnostic["fields"]["recent_global"]["mismatch_count"], 0)
+        self.assertIsNot(runners["argsort_int"], runners["argsort_float"])
+
+    def test_float_partition_keeps_full_pipeline_math_for_both_modes_and_capacities(self):
+        for mode in ("mixed", "split_c4"):
+            for policy in ("full", "bounded"):
+                with self.subTest(mode=mode, policy=policy):
+                    integer = self.backend.prepare("baseline", 2, mode=mode, index_capacity=policy)
+                    floating = self.backend.prepare("baseline", 2, mode=mode, index_capacity=policy,
+                                                    partition="argsort_float")
+                    np.testing.assert_array_equal(floating.call(), integer.call())
+                    np.testing.assert_array_equal(floating.run(write=True, dynamic=True), integer.run(write=True, dynamic=True))
+                    self.assertEqual(floating.metadata["partition"], "argsort_float")
+                    self.assertEqual(floating.metadata["partition_implementation"]["performance"], "NOT_VALIDATED")
+                    self.assertTrue(floating.partition_diagnostics()["passed"])
+
+    def test_partition_diagnostic_checks_hot_indices_presence_dtype_and_optional_invalid_flags(self):
+        runner = self.backend.prepare("baseline", 2, index_capacity="bounded")
+        clean = runner.partition()
+        self.assertTrue(runner.partition_diagnostics()["passed"])
+        changes = ("recent_global", "recent_ring", "recent_present", "dtype", "nonfinite_dtype", "invalid_rows")
+        for changed in changes:
+            with self.subTest(changed=changed):
+                parts = {key: value.clone() for key, value in clean.items()}
+                if changed in ("recent_global", "recent_ring"):
+                    parts[changed][0, 0, 0] += 1
+                elif changed == "recent_present":
+                    parts[changed][0] = ~parts[changed][0]
+                elif changed in ("dtype", "nonfinite_dtype"):
+                    parts["recent_global"] = parts["recent_global"].to(np.float32)
+                    if changed == "nonfinite_dtype":
+                        parts["recent_global"][0, 0, 0] = np.nan
+                else:
+                    parts["invalid_rows"] = Tensor(np.array([False, True, False, False, False]))
+                with mock.patch.object(runner, "partition", return_value=parts):
+                    diagnostic = runner.partition_diagnostics()
+                self.assertFalse(diagnostic["passed"])
+                self.assertTrue(diagnostic["fields"]["old"]["passed"])
+                json.dumps(diagnostic, allow_nan=False)
+                if changed == "invalid_rows":
+                    self.assertEqual(diagnostic["invalid_rows"], [1])
+                elif changed in ("dtype", "nonfinite_dtype"):
+                    self.assertEqual(diagnostic["fields"]["recent_global"]["actual_dtype"], "float32")
+                else:
+                    self.assertEqual(diagnostic["fields"][changed]["mismatch_count"], 1)
+                    self.assertTrue(diagnostic["fields"][changed]["first_bad_positions"])
+
+    def test_partition_diagnostic_handles_split_ring_alias_and_skips_native_zero_window(self):
+        split = self.backend.prepare("baseline", 2, mode="split_c4", index_capacity="bounded")
+        parts = split.partition()
+        self.assertIs(parts["recent_ring"], parts["recent_global"])
+        diagnostic = split.partition_diagnostics()
+        self.assertTrue(diagnostic["passed"])
+        self.assertFalse(diagnostic["invalid_rows_checked"])
+        native = self.backend.prepare("baseline", 0, partition="triton_scan")
+        with mock.patch.object(native, "partition", side_effect=AssertionError("W0 partition invoked")):
+            self.assertEqual(native.partition_diagnostics(),
+                             {"passed": True, "skipped": True, "scope": "W0 has no partition"})
+
+    def test_triton_partition_factory_prepares_once_reuses_buffers_and_changes_no_readers(self):
+        instances = []
+        class FakePreparedPartition:
+            def __init__(self, indices, positions, **kwargs):
+                self.indices, self.positions, self.kwargs = indices, positions, kwargs
+                self.calls = 0
+                self.metadata = {"algorithm": "triton_scan", "status": "CPU_TEST_DOUBLE"}
+                parts = partition_numpy(indices, positions, kwargs["window"], kwargs["ring_capacity"],
+                                        "full" if kwargs["hot_width"] == indices.shape[-1] else "bounded")
+                self.parts = {key: Tensor(value.copy()) for key, value in parts.items() if not key.endswith("counts")}
+                if not kwargs["remap_ring"]:
+                    self.parts["recent_ring"] = self.parts["recent_global"]
+                instances.append(self)
+
+            def call(self):
+                self.calls += 1
+                return self.parts
+
+        module = types.SimpleNamespace(PreparedPartition=FakePreparedPartition)
+        with mock.patch.dict(sys.modules, kv_native_partition=module):
+            runner = self.backend.prepare("baseline", 2, index_capacity="bounded", partition="triton_scan")
+            split = self.backend.prepare("baseline", 2, mode="split_c4", partition="triton_scan")
+            self.assertIs(runner, self.backend.prepare("baseline", 2, index_capacity="bounded", partition="triton_scan"))
+            self.assertEqual(len(instances), 2)
+            self.assertEqual(instances[0].calls, 0)
+            prepared_output = runner.call()
+            self.assertEqual(instances[0].calls, 0)
+            dynamic_output = runner.run(write=True, dynamic=True)
+            self.assertEqual(instances[0].calls, 1)
+            np.testing.assert_allclose(dynamic_output, prepared_output, atol=1e-6)
+            first, second = runner.partition(), runner.partition()
+            self.assertIs(first, second)
+            self.assertIs(first["old"], second["old"])
+            self.assertIs(first["recent_ring"], second["recent_ring"])
+        self.assertIs(instances[0].indices, self.scales.base.indices)
+        self.assertIs(instances[0].positions, self.scales.base.positions)
+        self.assertEqual(instances[0].kwargs, {"window": 2, "ring_capacity": runner.capacity,
+                                             "hot_width": 2, "remap_ring": True})
+        self.assertFalse(instances[1].kwargs["remap_ring"])
+        self.assertEqual([call["kind"] for call in self.scales.base.reads], ["c4", "c8", "c4", "c8"])
+        self.assertTrue(all(call["statistics"] for call in self.scales.base.reads))
+
+    def test_partition_candidate_failure_never_falls_back_to_argsort(self):
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("TRITON_PARTITION_UNAVAILABLE")
+        with mock.patch.dict(sys.modules, kv_native_partition=types.SimpleNamespace(PreparedPartition=unavailable)):
+            with self.assertRaisesRegex(RuntimeError, "TRITON_PARTITION_UNAVAILABLE"):
+                self.backend.prepare("baseline", 2, partition="triton_scan")
+            runner = self.backend.prepare("baseline", 2, partition="argsort_float")
+            self.assertIsNone(runner._partition_runner)
+            self.assertTrue(np.isfinite(runner.run(write=True, dynamic=True)).all())
 
     def test_split_and_mixed_match_math_including_empty_subsets_ring_wrap_and_two_queries(self):
         for recipe in ("baseline", "alg2_max7"):
@@ -372,7 +536,8 @@ class NativeAdapterTests(unittest.TestCase):
 
     def test_invalid_configuration_rejected(self):
         for kwargs in ({"window": -1}, {"window": True}, {"window": 2.5}, {"window": 1, "mode": "other"},
-                       {"window": 1, "index_capacity": "compact"}, {"window": 1, "merge": "other"}):
+                       {"window": 1, "index_capacity": "compact"}, {"window": 1, "merge": "other"},
+                       {"window": 1, "partition": "other"}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 self.backend.prepare("baseline", **kwargs)
         with self.assertRaises(ValueError):

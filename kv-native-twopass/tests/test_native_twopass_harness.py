@@ -32,10 +32,13 @@ class NativeHarnessBackend(FakeBackend):
         self.calls.append((kind, "pipeline" if write else "read"))
         return output
 
-    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch"):
-        config = (recipe, window, mode, index_capacity, merge)
+    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch",
+                partition="argsort_int"):
+        config = (recipe, window, mode, index_capacity, merge, partition)
         self.prepared.append(config)
         name = f"{recipe}_w0" if window == 0 else f"{recipe}_{mode}_w{window}_{index_capacity}_{merge}"
+        if window and partition != "argsort_int":
+            name += "_" + partition
         selected = recipe == "baseline" and window > 0 and index_capacity == "full" and merge == "torch"
         if self.fault == "triton" and window and merge == "triton":
             raise RuntimeError("OPTIONAL_MERGE_COMPILATION_FAILED")
@@ -69,6 +72,11 @@ class NativeHarnessBackend(FakeBackend):
             return {"passed": not (self.fault == "diagnose" and selected and mode == "split_c4"),
                     "scope": "CPU test double, not actual native stats"}
 
+        def partition_diagnostics():
+            self.calls.append((name, "partition_diagnostics"))
+            return {"passed": not (self.fault == "partition" and selected
+                                    and partition == "argsort_float" and mode == "split_c4")}
+
         def stage_call(stage):
             self.calls.append((name, "stage_"+stage))
             return output
@@ -80,15 +88,17 @@ class NativeHarnessBackend(FakeBackend):
 
         return types.SimpleNamespace(
             metadata={"window": window, "mode": mode, "index_capacity": index_capacity,
-                      "merge": merge, "zero_window_native_bypass": not window},
+                      "merge": merge, "partition": partition, "zero_window_native_bypass": not window},
             decoded_kv=lambda: cold, decoded_hot_kv=lambda: hot,
-            call=read, run=run, zero_query_diagnostics=diagnose, component_calls=components)
+            call=read, run=run, zero_query_diagnostics=diagnose, component_calls=components,
+            partition_diagnostics=partition_diagnostics)
 
 
 class NativeHarnessTests(unittest.TestCase):
     def args(self, extra=()):
         return harness.parser().parse_args(["--windows", "0,8", "--timing", "graph",
-            "--warmup", "0", "--iterations", "1", "--repeats", "2", "--diagnose"] + list(extra))
+            "--warmup", "0", "--iterations", "1", "--repeats", "2", "--diagnose",
+            "--partitions", "argsort_int"] + list(extra))
 
     def run_fake(self, directory, args=None, fault=None):
         instances, timed = [], []
@@ -159,7 +169,7 @@ class NativeHarnessTests(unittest.TestCase):
         self.assertEqual(split["status"], "CONTROL_FAILED")
         self.assertFalse(any(item[0] == name for item in timed))
         self.assertEqual(entries["baseline_mixed_w8_full_torch"]["status"], "CONTROL_FAILED")
-        self.assertNotIn(("baseline", 8, "mixed", "full", "torch"), backend.prepared)
+        self.assertNotIn(("baseline", 8, "mixed", "full", "torch", "argsort_int"), backend.prepared)
         self.assertEqual(entries["baseline_mixed_w8_bounded_torch"]["status"], "MEASURED")
         self.assertEqual(entries["alg2_max7_mixed_w8_full_torch"]["status"], "MEASURED")
 
@@ -191,7 +201,7 @@ class NativeHarnessTests(unittest.TestCase):
         self.assertFalse(entries[name]["zero_query_statistics"]["passed"])
         self.assertEqual(entries[name]["status"], "CONTROL_FAILED")
         self.assertFalse(any(item[0] == name for item in timed))
-        self.assertNotIn(("baseline", 8, "mixed", "full", "torch"), backend.prepared)
+        self.assertNotIn(("baseline", 8, "mixed", "full", "torch", "argsort_int"), backend.prepared)
         self.assertEqual(entries["baseline_mixed_w8_bounded_torch"]["status"], "MEASURED")
 
     def test_optional_triton_failure_does_not_replace_or_block_later_torch_config(self):
@@ -211,12 +221,86 @@ class NativeHarnessTests(unittest.TestCase):
             else:
                 self.assertEqual(entry["status"], "CONTROL_FAILED")
 
+    def test_partition_mismatch_gates_its_split_and_mixed_without_blocking_other_partitions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report, backend, timed = self.run_fake(Path(tmp)/"case", self.args([
+                "--partitions", "argsort_int,argsort_float,triton_scan",
+                "--index-capacities", "full", "--merges", "torch"]), fault="partition")
+        entries = {entry["name"]: entry for entry in report["variants"]}
+        split_name = "baseline_split_c4_w8_full_torch_argsort_float"
+        mixed_name = "baseline_mixed_w8_full_torch_argsort_float"
+        self.assertEqual(report["status"], "FAILED")
+        self.assertEqual(entries[split_name]["status"], "CONTROL_FAILED")
+        self.assertFalse(entries[split_name]["partition_consistency"]["passed"])
+        self.assertNotIn("kernel_vs_matching_reference", entries[split_name])
+        self.assertNotIn((split_name, "read"), backend.calls)
+        self.assertEqual(entries[mixed_name]["status"], "CONTROL_FAILED")
+        self.assertNotIn(("baseline", 8, "mixed", "full", "torch", "argsort_float"), backend.prepared)
+        self.assertFalse(any(name in (split_name, mixed_name) for name, _ in timed))
+        for name in ("baseline_mixed_w8_full_torch",
+                     "baseline_mixed_w8_full_torch_triton_scan",
+                     "alg2_max7_mixed_w8_full_torch_argsort_float"):
+            self.assertEqual(entries[name]["status"], "MEASURED")
+
+    def test_partition_timings_pair_same_recipe_mode_capacity_and_merge(self):
+        # Request the integer baseline last; execution must put it first and
+        # never compare a mixed candidate against the cheaper split-C4 control.
+        with tempfile.TemporaryDirectory() as tmp:
+            report, backend, timed = self.run_fake(Path(tmp)/"case", self.args([
+                "--partitions", "triton_scan,argsort_float,argsort_int",
+                "--index-capacities", "full", "--merges", "torch"]))
+        self.assertEqual(report["status"], "MEASURED")
+        entries = {entry["name"]: entry for entry in report["variants"]}
+        for entry in report["variants"]:
+            if not entry["window"] or entry["partition"] == "argsort_int":
+                continue
+            reference_name = f"{entry['recipe']}_{entry['mode']}_w8_full_torch"
+            reference = entries[reference_name]
+            self.assertEqual(entry["partition_timing_reference"], reference_name)
+            for field in ("recipe", "window", "mode", "index_capacity", "merge"):
+                self.assertEqual(entry[field], reference[field])
+            self.assertEqual(reference["partition"], "argsort_int")
+            result = entry["timing_vs_argsort_int"]["graph"]
+            self.assertEqual(result["event_us"]["median_paired_ratio"], 1.)
+            self.assertEqual([r["order"] for r in result["rounds"]],
+                             [["baseline", "candidate"], ["candidate", "baseline"]])
+            calls = [i for i, call in enumerate(timed) if call == (entry["name"], "pipeline")]
+            self.assertEqual(len(calls), 4)  # Two W0 pairs, then two same-path pairs.
+            self.assertEqual(timed[calls[2]-1], (reference_name, "pipeline"))
+            self.assertEqual(timed[calls[3]+1], (reference_name, "pipeline"))
+        for recipe in ("baseline", "alg2_max7"):
+            positive = [config for config in backend.prepared if config[0] == recipe and config[1]]
+            self.assertEqual(positive[0][-1], "argsort_int")
+
+    def test_batch_and_query_sweeps_remain_distinct_reported_shapes(self):
+        observed = []
+        def validated_case(data, args, directory, progress=None):
+            observed.append((data["q_nope"].shape[0], data["q_nope"].shape[1]))
+            report = dict(label=data["label"], status="VALIDATED_ONLY", baselines={}, variants=[],
+                          shape={name: list(data[name].shape) for name in harness.ARRAY_KEYS})
+            progress(report)
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)/"sweep"
+            with mock.patch.object(harness, "run_case", side_effect=validated_case), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                status = harness.main(["--batch", "7", "--batches", "1,3", "--queries", "1,4",
+                    "--keys", "40", "--heads", "2", "--topk", "16", "--rope-dim", "0",
+                    "--partitions", "argsort_int", "--timing", "none", "--output", str(directory)])
+            saved = json.loads((directory/"results.json").read_text())
+        self.assertEqual(status, 0)
+        self.assertEqual(observed, [(1,1), (1,4), (3,1), (3,4)])
+        self.assertEqual([tuple(case["shape"]["q_nope"][:2]) for case in saved["cases"]], observed)
+        self.assertEqual(len({case["label"] for case in saved["cases"]}), 4)
+        self.assertEqual(saved["args"]["batches"], [1,3])
+
     def test_device_fault_stops_remaining_operators_and_main_stops_remaining_cases(self):
         with tempfile.TemporaryDirectory() as tmp:
             report, backend, timed = self.run_fake(Path(tmp)/"case", fault="device")
             self.assertEqual(report["status"], "DEVICE_ERROR")
             self.assertEqual(report["stopped_after_device_fault"], "baseline_mixed_w8_full_torch")
-            self.assertEqual(backend.prepared[-1], ("baseline", 8, "mixed", "full", "torch"))
+            self.assertEqual(backend.prepared[-1], ("baseline", 8, "mixed", "full", "torch", "argsort_int"))
             self.assertFalse(any(config[0] == "alg2_max7" for config in backend.prepared))
             self.assertEqual(report["variants"][-1]["failure_kind"], "DEVICE_EXECUTION_FAULT")
 
@@ -245,7 +329,10 @@ class NativeReportTests(unittest.TestCase):
         metric = {"relative_l2": .08}
         native = {"name": "baseline_w0", "role": "NATIVE_W0", "status": "MEASURED",
                   "timing_prepared_read": standalone, "timing_write_read": standalone}
-        candidate = {"name": "baseline_mixed_w8_full_torch", "role": "HOT_WINDOW", "status": "MEASURED",
+        candidate = {"name": "baseline_mixed_w8_full_torch_argsort_float", "role": "HOT_WINDOW", "status": "MEASURED",
+                     "partition": "argsort_float", "partition_timing_reference": "baseline_mixed_w8_full_torch",
+                     "timing_vs_argsort_int": {"graph": {"event_us": {"baseline_median": 30.,
+                         "candidate_median": 20., "median_paired_ratio": 2/3}}},
                      "timing_prepared_read": standalone, "timing_write_read": paired,
                      "vs_bf16_math": metric, "kernel_vs_matching_reference": {"relative_l2": .002},
                      "stage_timings": {"merge": standalone}}
@@ -263,8 +350,9 @@ class NativeReportTests(unittest.TestCase):
             self.assertEqual(json.loads((Path(tmp)/"results.json").read_text())["status"], "FAILED")
         self.assertIn("MEASURED is not a performance pass", brief)
         self.assertIn("standalone stages (do not add/subtract)", brief)
-        self.assertIn("baseline_mixed_w8_full_torch | MEASURED | 100.00 | 21.00 | 7.00 | 3.000 [2.900,3.100]", brief)
-        self.assertIn("c8 | CONTROL_FAILED", brief)
+        self.assertIn("name | role | partition | status", brief)
+        self.assertIn(candidate["name"] + " | HOT_WINDOW | argsort_float | MEASURED | 100.00 | 21.00 | 7.00 | 3.000 [2.900,3.100] | 0.667", brief)
+        self.assertIn("c8 | BASELINE | none | CONTROL_FAILED", brief)
         self.assertEqual(set(rows), {"bf16", "c8", native["name"], candidate["name"], control["name"]})
         self.assertEqual(rows[native["name"]]["pipeline_us"], "100.0")
         self.assertEqual(rows[native["name"]]["paired_w0_pipeline_us"], "")
@@ -272,6 +360,11 @@ class NativeReportTests(unittest.TestCase):
         self.assertEqual(rows[candidate["name"]]["pipeline_us"], "21.0")
         self.assertEqual(rows[candidate["name"]]["paired_ratio"], "3.0")
         self.assertEqual(rows[candidate["name"]]["observation"], "OBSERVED_SLOWDOWN")
+        self.assertEqual(rows[candidate["name"]]["partition"], "argsort_float")
+        self.assertEqual(rows[candidate["name"]]["paired_argsort_int_pipeline_us"], "30.0")
+        self.assertEqual(rows[candidate["name"]]["paired_argsort_int_candidate_us"], "20.0")
+        self.assertEqual(float(rows[candidate["name"]]["ratio_vs_same_path_argsort_int"]), 2/3)
+        self.assertEqual(rows[candidate["name"]]["partition_timing_reference"], "baseline_mixed_w8_full_torch")
         self.assertEqual(rows[control["name"]]["pipeline_us"], "")
         self.assertEqual(rows[control["name"]]["status"], "CONTROL_FAILED")
         self.assertTrue(all(row["production_performance"] == "NOT_VALIDATED" for row in rows.values()))

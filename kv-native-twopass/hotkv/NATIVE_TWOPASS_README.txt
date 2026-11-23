@@ -1,4 +1,4 @@
-Native C4 / C8 two-pass sparse-attention experiment
+Native C4 / C8 two-pass sparse-attention experiment v2
 =================================================
 
 Status: executable single-layer A5 microbenchmark, not model integration.
@@ -19,7 +19,34 @@ Measured paths
 4. mixed: native C4 old subset + native C8 recent ring + the same merge.
    Timing is gated by the corresponding split_c4 control and its own reference.
 
-Two independent optimizations are compared in the default matrix:
+Index-partition implementations (v2)
+-----------------------------------
+--partitions argsort_int,argsort_float,triton_scan
+  argsort_int is the unchanged integer-sort baseline. It is always evaluated
+  first and must be included. The placement reported by the actual deployed
+  operator/profiler is authoritative; this script does not assume an engine.
+  argsort_float converts only the unique ordinal+mask sort keys to FP32. It
+  keeps token IDs INT32 and requires 2*S-1 <= 2**24 for exact sort keys. This
+  tests a dtype-dispatch hypothesis; it does not promise an AiCore dispatch.
+  triton_scan uses one index-only NPU kernel with integer prefix scans. Output
+  buffers are preallocated. Prefix scatter, -1 suffix fill and empty-row dummy
+  writes target disjoint addresses. There is no sorting, nonzero, variable-size
+  output or host synchronization in the timed partition. It also emits invalid
+  row flags for malformed positions/indices or overflow; uniqueness is checked
+  when input cases are validated. A5 compilation and latency are unverified.
+
+Every variant first compares all device partition outputs exactly against the
+CPU oracle, including global/ring indices and empty-row masks. Integer copies
+preserve IDs above 2**24. These untimed checks and invalid-row flags gate reads
+and measurements. End-to-end output controls still run separately.
+
+Candidates retain the same-recipe native W0 comparisons. They ALSO run paired
+full-pipeline comparisons against argsort_int for the SAME recipe, window,
+index capacity, merge and split_c4/mixed mode. Never compare a split_c4 control
+against a mixed candidate and attribute the difference to a single component.
+brief.txt explicitly displays role and partition algorithm to avoid this mixup.
+
+Two other independent knobs remain available:
 --index-capacities full,bounded
   full: both index tensors retain original TopK capacity S.
   bounded: hot index capacity is min(W,S); cold stays S. Unique visible input
@@ -33,6 +60,8 @@ Two independent optimizations are compared in the default matrix:
   with preallocated output. Both attention calls still use the native reader.
   No silent fallback: a Triton compile/error is recorded and other configurations
   continue unless a device execution fault makes further device work unsafe.
+When triton_scan is selected there is also one custom INDEX kernel; neither
+custom kernel replaces or decodes native attention's KV data.
 
 Correctness
 -----------
@@ -68,6 +97,10 @@ split_c4 has no hot-cache write. W0 includes its original C4 write and one read.
 All candidates are paired against SAME-recipe W0 in alternating AB/BA rounds.
 Compilation, initial history preparation, warmup and graph capture are untimed.
 Graph replay is checked against eager output before and after measurement.
+Each captured graph contains ONE call; iterations=100 means 100 graph replays
+outside capture, not a graph containing 100 repeated calls. Fixed-shape
+argsort/gather/where and scan paths do not themselves prove a serving graph
+break. This experiment does not measure whole-model capture or recapture.
 
 --stages adds standalone partition, reader, merge and writer timings. These
 are diagnostic observations; do not add them or subtract them from full-path
@@ -85,16 +118,23 @@ W0 times, all timing samples, failure tracebacks, controls and stage timings.
 Each case retains inputs.npz and outputs.npz. Device execution error 507015
 stops further device work. Optional configurations are not silently omitted.
 
-Suggested first A5 run (in the downloaded payload directory):
+Suggested partition-isolation A5 run (in the downloaded payload directory):
   python test_kv_native_twopass_a5.py --keys 8192 --queries 4 --topk 2048 \
     --windows 0,128 --cold-recipes baseline,alg2_max7 \
-    --index-capacities full,bounded --merges torch,triton \
+    --index-capacities bounded --merges triton \
+    --partitions argsort_int,argsort_float,triton_scan \
     --timing graph --warmup 20 --iterations 100 --repeats 5 \
     --diagnose --stages --output /tmp/native-two-pass-first
 
 Expand --keys 8192,32768 --queries 1,4 --windows 0,128,256,512 after the first
 run. For original model activations use --input /path/to/capture.npz instead.
 The same capture schema as the previous KV experiments is supported.
+--batches 1,8,32 optionally sweeps batch sizes (otherwise --batch is used).
+Use actual scheduled batch/query/KV lengths when aligning with serving traces:
+request concurrency is not necessarily device batch, Q4 is four queries per
+sequence rather than four requests, and a character count is not token length.
+Multiplying per-layer latency differences by model depth is only an assumption;
+it does not attribute TPOT differences to Prolog, launch count or graph breaks.
 
 Scope limits
 ------------
