@@ -34,16 +34,21 @@ class NativeHarnessBackend(FakeBackend):
         return output
 
     def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch",
-                partition="argsort_int", writer="native"):
+                partition="argsort_int", writer="native", reader="native", hot_block_keys=16, hot_block_heads=16,
+                hot_decode="software"):
         config = (recipe, window, mode, index_capacity, merge, partition)
         if writer != "native":
             config += (writer,)
+        if reader != "native":
+            config += (reader, hot_block_keys, hot_block_heads, hot_decode)
         self.prepared.append(config)
         name = f"{recipe}_w0" if window == 0 else f"{recipe}_{mode}_w{window}_{index_capacity}_{merge}"
         if window and partition != "argsort_int":
             name += "_" + partition
         if window and writer != "native":
             name += "_" + writer
+        if window and reader != "native":
+            name += f"_{reader}_k{hot_block_keys}_h{hot_block_heads}_d{hot_decode}"
         selected = recipe == "baseline" and window > 0 and index_capacity == "full" and merge == "torch"
         if self.fault == "triton" and window and merge == "triton":
             raise RuntimeError("OPTIONAL_MERGE_COMPILATION_FAILED")
@@ -51,6 +56,12 @@ class NativeHarnessBackend(FakeBackend):
             raise RuntimeError("507015: The address for scalar to access GM is invalid")
         if self.fault == "new_merge" and merge == "triton_direct512":
             raise RuntimeError("CANDIDATE_MERGE_COMPILATION_FAILED")
+        hot_tile = reader == "hot_merge" and recipe == "baseline" and hot_block_keys == 16 and hot_block_heads == 16
+        hot_target = hot_tile and hot_decode == "software"
+        if self.fault == "hot_compile" and hot_target:
+            raise RuntimeError("FUSED_HOT_COMPILATION_FAILED")
+        if self.fault == "native_cast_compile" and hot_tile and hot_decode == "native_cast":
+            raise RuntimeError("NATIVE_CAST_COMPILATION_FAILED")
         if (self.fault == "champion" and window and recipe == "baseline" and
                 partition == "triton_scan" and merge == "triton" and writer == "native"):
             raise RuntimeError("CHAMPION_FAILED_FOR_TEST")
@@ -65,6 +76,8 @@ class NativeHarnessBackend(FakeBackend):
             elif selected and mode == "split_c4":
                 output = output*.994
         if self.fault == "mixed_output" and selected and mode == "mixed":
+            output = output+100
+        if self.fault == "split_fusion" and recipe == "baseline" and mode == "split_c4" and partition == "triton_scan":
             output = output+100
 
         def read():
@@ -93,23 +106,37 @@ class NativeHarnessBackend(FakeBackend):
                    writer == "fused_store" and partition == "triton_scan" and merge == "triton")
             return {"passed": not bad, "scope": "exact-cache CPU test double", "changed_bytes": int(bad)}
 
+        def reader_diagnostics(*, control_l2, pipeline_l2):
+            self.calls.append((name, "reader_diagnostics"))
+            return {"passed": not (self.fault == "hot_reader" and hot_target),
+                    "control_l2": control_l2, "pipeline_l2": pipeline_l2,
+                    "scope": "independent native hot reference test double"}
+
         def stage_call(stage):
             self.calls.append((name, "stage_"+stage))
             return output
 
         def components():
+            if reader == "hot_merge":
+                stages = ("partition", "cold_read", "hot_read_merge", "cold_write", "hot_write")
+                return {stage: lambda stage=stage: stage_call(stage) for stage in stages}
             return {stage: lambda stage=stage: stage_call(stage)
                     for stage in ("partition", "cold_read", "hot_read", "merge", "cold_write") +
                     (("hot_write",) if mode == "mixed" else ())}
 
         runner = types.SimpleNamespace(
             metadata={"window": window, "mode": mode, "index_capacity": index_capacity,
-                      "merge": merge, "partition": partition, "writer": writer, "zero_window_native_bypass": not window},
+                      "merge": "fused_hot_reader" if reader == "hot_merge" else merge, "partition": partition,
+                      "writer": writer, "reader": reader, "hot_decode": hot_decode if reader == "hot_merge" else None,
+                      "zero_window_native_bypass": not window},
             decoded_kv=lambda: cold, decoded_hot_kv=lambda: hot,
             call=read, run=run, zero_query_diagnostics=diagnose, component_calls=components,
-            partition_diagnostics=partition_diagnostics, writer_diagnostics=writer_diagnostics)
+            partition_diagnostics=partition_diagnostics, writer_diagnostics=writer_diagnostics,
+            reader_diagnostics=reader_diagnostics)
         if self.fault == "writer_missing" and writer != "native":
             del runner.writer_diagnostics
+        if self.fault == "hot_missing" and reader == "hot_merge":
+            del runner.reader_diagnostics
         return runner
 
 
@@ -353,6 +380,96 @@ class NativeHarnessTests(unittest.TestCase):
             self.assertEqual(timed[calls[3]+1], (champion["name"], "pipeline"))
             self.assertEqual(entry["production_performance"], "NOT_VALIDATED")
 
+    def test_reader_fusion_sweep_reuses_native_split_controls_and_pairs_all_tiles_and_decoders(self):
+        args = self.args(["--reader-fusion-sweep", "--stages"])
+        plan = harness.reader_fusion_configurations(args)
+        self.assertEqual(len(plan), 14)
+        self.assertEqual([(config["hot_block_keys"], config["hot_block_heads"], config["hot_decode"]) for config in plan[2:]],
+                         [(keys, heads, decode) for keys in (16,32,64) for heads in (16,32)
+                          for decode in ("software", "native_cast")])
+        with tempfile.TemporaryDirectory() as tmp:
+            report, backend, timed = self.run_fake(Path(tmp)/"case", args)
+        self.assertEqual(report["status"], "MEASURED")
+        self.assertEqual(len(report["variants"]), 34)  # W0×2 + native split×4 + mixed×28; +2 baselines =36.
+        entries = {entry["name"]: entry for entry in report["variants"]}
+        self.assertEqual(len(entries), len(report["variants"]))
+        self.assertEqual(len(report["configuration_plan"]), 14)
+        for recipe in args.cold_recipes:
+            selected = [entry for entry in report["variants"] if entry["recipe"] == recipe]
+            split = [entry for entry in selected if entry["mode"] == "split_c4"]
+            mixed = [entry for entry in selected if entry["mode"] == "mixed"]
+            self.assertEqual(len(split), 2)
+            self.assertEqual(len(mixed), 14)
+            self.assertTrue(all(entry["reader"] == "native" for entry in split))
+            champion = next(entry for entry in mixed if entry["comparison_role"] == "CHAMPION")
+            for entry in mixed:
+                control = entries[entry["split_control_reference"]]
+                self.assertEqual(control["mode"], "split_c4")
+                self.assertEqual(control["reader"], "native")
+                self.assertEqual(control["partition"], entry["partition"])
+                self.assertTrue(control["control_passed"])
+                if entry["comparison_role"] != "CHAMPION":
+                    self.assertEqual(entry["champion_timing_reference"], champion["name"])
+                if entry["reader"] == "hot_merge":
+                    self.assertEqual(entry["merge"], "fused_hot_reader")
+                    self.assertEqual(entry["merge_selector"], "triton")
+                    self.assertEqual(entry["writer"], "native")
+                    self.assertIn(entry["hot_decode"], ("software", "native_cast"))
+                    self.assertEqual(entry["implementation"]["hot_decode"], entry["hot_decode"])
+                    self.assertTrue(entry["name"].endswith("_d"+entry["hot_decode"]))
+                    self.assertTrue(entry["reader_consistency"]["passed"])
+                    self.assertEqual(entry["reader_consistency"]["control_l2"], args.control_l2)
+                    self.assertEqual(entry["reader_consistency"]["pipeline_l2"], args.pipeline_l2)
+                    self.assertEqual(set(entry["stage_timings"]), {"partition", "cold_read", "hot_read_merge", "cold_write", "hot_write"})
+                    calls = [i for i, call in enumerate(timed) if call == (entry["name"], "pipeline")]
+                    self.assertEqual(len(calls), 4)
+                    self.assertEqual(timed[calls[2]-1], (champion["name"], "pipeline"))
+                    self.assertEqual(timed[calls[3]+1], (champion["name"], "pipeline"))
+
+    def test_reader_diagnostic_and_compilation_failures_never_time_that_tile_or_block_others(self):
+        for fault in ("hot_reader", "hot_compile", "native_cast_compile", "hot_missing"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
+                report, backend, timed = self.run_fake(Path(tmp)/"case", self.args(["--reader-fusion-sweep"]), fault=fault)
+            self.assertEqual(report["status"], "FAILED")
+            for entry in report["variants"]:
+                failed = (entry.get("reader") == "hot_merge" and
+                          (fault == "hot_missing" or (entry["recipe"] == "baseline" and
+                           entry["hot_block_keys"] == 16 and entry["hot_block_heads"] == 16)))
+                if failed and fault != "hot_missing":
+                    failed = entry["hot_decode"] == ("native_cast" if fault == "native_cast_compile" else "software")
+                if failed:
+                    self.assertEqual(entry["status"], "ERROR" if fault in ("hot_compile", "native_cast_compile") else "CONTROL_FAILED")
+                    self.assertNotIn("timing_write_read", entry)
+                    self.assertNotIn("kernel_vs_matching_reference", entry)
+                    self.assertNotIn((entry["name"], "read"), backend.calls)
+                    self.assertFalse(any(name == entry["name"] for name, _ in timed))
+                else:
+                    self.assertEqual(entry["status"], "MEASURED")
+
+    def test_failed_native_split_is_not_retried_or_hidden_by_reader_fusion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report, backend, timed = self.run_fake(Path(tmp)/"case", self.args(["--reader-fusion-sweep"]), fault="split_fusion")
+        self.assertEqual(report["status"], "FAILED")
+        self.assertEqual(len([config for config in backend.prepared if config[:3] == ("baseline", 8, "split_c4") and config[5] == "triton_scan"]), 1)
+        entries = {entry["name"]: entry for entry in report["variants"]}
+        for entry in report["variants"]:
+            if entry["recipe"] == "baseline" and entry.get("reader") == "hot_merge":
+                self.assertEqual(entry["status"], "CONTROL_FAILED")
+                self.assertEqual(entries[entry["split_control_reference"]]["status"], "CONTROL_FAILED")
+                self.assertNotIn("implementation", entry)
+                self.assertFalse(any(name == entry["name"] for name, _ in timed))
+            elif entry.get("partition") == "argsort_desc":
+                self.assertEqual(entry["status"], "MEASURED")
+
+    def test_reader_fusion_cli_tile_override_and_preset_exclusion(self):
+        args = self.args(["--reader-fusion-sweep", "--hot-block-keys", "32", "--hot-block-heads", "16",
+                          "--hot-decodes", "software"])
+        self.assertEqual(len(harness.reader_fusion_configurations(args)), 3)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            harness.parser().parse_args(["--reader-fusion-sweep", "--optimization-sweep"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            harness.main(["--readers", "hot_merge", "--merges", "torch"])
+
     def test_writer_byte_failure_or_missing_diagnostic_is_never_timed(self):
         for fault in ("writer", "writer_missing"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp:
@@ -417,6 +534,63 @@ class NativeHarnessTests(unittest.TestCase):
 
 
 class NativeReportTests(unittest.TestCase):
+    def test_exact_paired_summary_keeps_json_pairs_separate_and_never_invents_champion_selfcheck(self):
+        def timing(candidate, baseline, ratio, low, high):
+            return {"graph": {"status": "MEASURED", "event_us": {
+                "candidate_median": candidate, "baseline_median": baseline,
+                "median_paired_ratio": ratio, "min_paired_ratio": low, "max_paired_ratio": high}}}
+        champion = dict(name="baseline_champion", recipe="baseline", optimization="champion", role="HOT_WINDOW",
+            mode="mixed", reader="native", status="MEASURED", control_passed=True, comparison_role="CHAMPION",
+            timing_write_read=timing(210., 110., 1.9, 1.89, 1.91),
+            champion_timing_reference="baseline_champion",
+            timing_vs_champion=timing(999., 333., 3., 3., 3.),
+            vs_bf16_math={"relative_l2": .08}, kernel_vs_matching_reference={"relative_l2": .002})
+        candidate = dict(name="baseline_fused", recipe="baseline", optimization="fused_tile", role="HOT_WINDOW",
+            mode="mixed", reader="hot_merge", hot_block_keys=32, hot_block_heads=16, hot_decode="native_cast",
+            status="MEASURED", control_passed=True, comparison_role="CANDIDATE",
+            timing_write_read=timing(196.8, 112.7, 1.734, 1.72, 1.75),
+            champion_timing_reference="baseline_champion",
+            timing_vs_champion=timing(200., 220., .91, .90, .92),
+            vs_bf16_math={"relative_l2": .079}, kernel_vs_matching_reference={"relative_l2": .0019})
+        split = dict(name="split", recipe="baseline", mode="split_c4", role="SPLIT_CONTROL", status="MEASURED")
+        report = {"status": "MEASURED", "args": {"timing": "graph"}, "cases": [{"label": "paired",
+            "baselines": {"bf16": {"name": "bf16", "role": "BASELINE", "status": "MEASURED"},
+                          "c8": {"name": "c8", "role": "BASELINE", "status": "MEASURED"}},
+            "variants": [champion, candidate, split]}]}
+        before = copy.deepcopy(report)
+        with tempfile.TemporaryDirectory() as tmp:
+            harness.write_reports(report, tmp)
+            text = (Path(tmp)/"paired_summary.txt").read_text()
+        self.assertEqual(report, before)
+        self.assertIn("baselines=2 variants=3 total=5 mixed=2 mixed_with_complete_measured_W0_pair=2", text)
+        champion_line = next(line for line in text.splitlines() if line.startswith("baseline | champion |"))
+        self.assertIn("210.000 | 110.000 | 1.900 | NA | NA | NA | NA", champion_line)
+        self.assertNotIn("999.000", champion_line)
+        self.assertNotIn("333.000", champion_line)
+        self.assertIn("baseline | fused_tile | hot_merge | 32/16 | native_cast | MEASURED | 196.800 | 112.700 | 1.734 | baseline_champion | 220.000 | 200.000 | 0.910[0.900,0.920] | 0.079000 | 0.001900", text)
+        self.assertNotIn("1.746", text)
+
+    def test_exact_paired_summary_excludes_stale_partial_missing_or_uncontrolled_timings(self):
+        pair = {"graph": {"status": "MEASURED", "event_us": {
+            "candidate_median": 5., "baseline_median": 10., "median_paired_ratio": .5}}}
+        def row(name):
+            return dict(name=name, recipe="baseline", optimization=name, mode="mixed", status="MEASURED",
+                        control_passed=True, timing_write_read=copy.deepcopy(pair))
+        stale, partial, missing, uncontrolled = (row(name) for name in ("stale", "partial", "missing", "uncontrolled"))
+        stale["status"] = "CONTROL_FAILED"
+        partial["timing_write_read"]["graph"]["status"] = "ERROR"
+        del missing["timing_write_read"]["graph"]["event_us"]["baseline_median"]
+        uncontrolled["control_passed"] = False
+        report = {"status": "FAILED", "cases": [{"label": "ineligible", "baselines": {},
+            "variants": [stale, partial, missing, uncontrolled]}]}
+        text = harness.paired_summary(report, "graph")
+        self.assertIn("mixed=4 mixed_with_complete_measured_W0_pair=0", text)
+        for line in text.splitlines():
+            if line.startswith("baseline |"):
+                self.assertIn(" | NA | NA | NA | NA | NA | NA | NA |", line)
+        self.assertNotIn("5.000", text)
+        self.assertNotIn("0.500", text)
+
     def test_short_summary_selects_only_measured_mixed_by_same_mode_paired_ratio(self):
         def entry(name, recipe, mode, ratio, candidate_us, baseline_us, status="MEASURED", control=True):
             return dict(name=name, recipe=recipe, mode=mode, role="HOT_WINDOW" if mode == "mixed" else "SPLIT_CONTROL",

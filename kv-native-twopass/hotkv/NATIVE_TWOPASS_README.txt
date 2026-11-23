@@ -1,4 +1,4 @@
-Native C4 / C8 two-pass sparse-attention experiment v3
+Native C4 / C8 sparse-attention experiment v4
 =================================================
 
 Status: executable single-layer A5 microbenchmark, not model integration.
@@ -7,6 +7,83 @@ The author has not run this payload on A5. Use the current working container's
 native operators and environment. The launcher installs/upgrades nothing and
 does not source another vendor package. Native reader and quantizer adapters
 are byte-identical to the previous payload. No custom cold attention is used.
+
+Native cold + fused hot reader/merge sweep (v4)
+----------------------------------------------
+--reader-fusion-sweep uses bounded indices and the original native writers.
+For each recipe/window it evaluates the original native two-pass champion,
+an optimized descending-sort control, and twelve C8 hot-reader/merge choices:
+  --hot-block-keys 16,32,64 --hot-block-heads 16,32
+  --hot-decodes software,native_cast
+These sizes are candidates; compiler resource limits and speed need A5 tests.
+No single tile or this finite search is asserted to be a theoretical optimum.
+The native cold reader, W0, and both quantizers are unchanged.
+
+The argsort_desc control uses exactly representable FP32 ORDINAL sort keys,
+descending=True, and trims the hot order tensor before gathering IDs. Token
+IDs stay INT32 and stable selection order is preserved. This incorporates the
+reported ideas; it is not a copy or measured parity with a colleague's source.
+
+The hot_merge candidate performs one native C4 cold read, then one custom
+kernel that reads only C8 hot tokens, computes their attention, and merges
+with the native cold output/max/sum. It does not decode cold C4 or replace its
+fast reader. It removes the separate hot native API call and standalone merge
+by combining their work, not by omitting required tokens or writes.
+Native API-call count is not a claim about total device kernel count.
+
+The new reader uses the installed Ascend Triton API
+  triton.language.extra.cann.extension.insert_slice
+to assemble decoded BF16 tiles. This API, compilation and UB use must be
+verified in the current working A5 environment. The launcher installs nothing.
+An unavailable API or failing tile is reported, never silently replaced.
+The native_cast candidate bitcasts original uint8 bytes to E4M3FN
+(tl.float8e4nv), converts to FP32, multiplies the unchanged FP32 scale, and
+rounds to BF16. The software decoder is a separately measured control, not a
+silent fallback. Current official 950 cast support does not establish support
+in the deployed compiler. Both decoders are checked against all 256 byte
+encodings in CPU tests; actual device correctness remains gated by references.
+Both readers validate the trailing -1 index prefix on device and stop the
+hot QK/PV loop at its actual selected count. Padding holes/invalid addresses
+produce NaN for controls to reject. Tail trimming is data-dependent device
+work with fixed buffers; no host synchronization or variable-shape allocation
+is introduced. Presence-false dummy rows bypass the hot loop.
+
+Before timing, the fused reader must match the native two-pass output within
+the existing pipeline tolerance (0.1% global and worst-row L2), the native hot
+output within the existing control tolerance (1%), and forced cold-only and
+both-empty controls. An independent zero-query specialization must give
+exp(hot_max)*hot_sum = selected-hot count. Q/cache inputs are not mutated by
+these diagnostics. The original full matching-reference and graph-replay
+checks also remain. Hot normalized-output BF16 rounding is retained when the
+actual installed native hot reader returns BF16; FP32 outputs remain FP32.
+
+The native split-C4 controls are reused only for identical partition/merge/
+writer configurations. A failed split blocks the associated mixed candidates.
+Fused candidates are paired with the same-recipe original mixed champion as
+well as W0. With the default one shape/two recipes, there are 34 variant rows
+(2 W0 + 4 split controls + 28 mixed) plus 2 BF16/C8 baseline rows = 36 entries.
+Optional compile failures do not stop other configurations; device execution
+faults still stop the run. Native W0 is never redefined as a slower baseline.
+paired_summary.txt lists each mixed candidate's exact W0 pair and champion
+pair, including all displayed medians and ratio range, and explicit counts.
+Champion self-comparisons remain NA. Reported paired ratios are medians of
+per-round ratios, not the quotient of the two displayed medians. Use this
+file directly instead of reconstructing or relabeling results by hand.
+
+Suggested first A5 run:
+  python test_kv_native_twopass_a5.py --reader-fusion-sweep \
+    --batch 1 --keys 8192 --queries 4 --topk 2048 --windows 0,128 \
+    --cold-recipes baseline,alg2_max7 --hot-block-keys 16,32,64 \
+    --hot-block-heads 16,32 --hot-decodes software,native_cast --timing graph \
+    --warmup 20 --iterations 100 --repeats 5 --diagnose --stages \
+    --output /tmp/native-hot-reader-v4
+
+The measured full pipeline still includes current-token C4/C8 quantization,
+both writes, dynamic partition, cold read and fused hot-read/merge. Prepared
+read excludes partition/writes and is explicitly a separate metric. All
+reference/history preparation, compilation and checks remain outside events.
+Framework step-level reuse, PrologV3 integration, colleague 27-op count and
+end-to-end TPOT are not measured by this fixed-input experiment.
 
 Optimization sweep (v3)
 -----------------------
@@ -38,7 +115,7 @@ stable log formulation. No approximate exp or relaxed numerical tolerance is
 introduced. Any candidate compilation or correctness failure is reported,
 never silently replaced. MEASURED is still not a performance acceptance.
 
-This version does NOT replace the two attention calls with an unverified
+The v3 optimization-sweep mode does NOT replace the two attention calls with an unverified
 mixed_quant_sparse_flash_mla invocation. Existing dual-KV API names alone do
 not establish support for these MXFP4-400B/FP8-656B layouts and BF16 RoPE.
 inspect_kv_fusion_capability.py collects installed source/header/version

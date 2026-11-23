@@ -23,7 +23,7 @@ class NativeLauncherTests(unittest.TestCase):
                  "kv_window_backend.py", "kv_window_capture.py", "kv_window_common.py",
                  "test_kv_hot_fused_a5.py", "kv_native_twopass.py", "kv_native_merge.py",
                  "test_kv_native_twopass_a5.py", "kv_native_partition.py", "kv_native_store.py",
-                 "inspect_kv_fusion_capability.py")
+                 "inspect_kv_fusion_capability.py", "kv_native_hot_merge.py")
         self.payload = {n: (ROOT / "hotkv" / n).read_bytes() for n in names}
         self.hashes = {n: hashlib.sha256(v).hexdigest() for n,v in self.payload.items()}
 
@@ -43,7 +43,7 @@ class NativeLauncherTests(unittest.TestCase):
         self.assertEqual(len(runs),1)
         report = json.loads((runs[0] / "launcher.json").read_text())
         self.assertEqual(report["status"],"COMPLETED")
-        self.assertEqual(len(report["files"]),13)
+        self.assertEqual(len(report["files"]),14)
         self.assertIn("no A5 execution",(runs[0] / "run.log").read_text())
 
     def test_corrupt_payload_never_executes(self):

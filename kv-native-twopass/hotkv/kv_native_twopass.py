@@ -10,15 +10,17 @@ import copy
 import numpy as np
 
 from kv_hot_backend import fixed_ring_plan
-from kv_window_common import flatten_queries, paged_array, query_positions, validate_case
+from kv_window_common import (compare_outputs, flatten_queries, paged_array,
+                              query_positions, row_map, validate_case)
 
 
 RECIPES = ("baseline", "alg2_max7")
 MODES = ("split_c4", "mixed")
 INDEX_CAPACITIES = ("full", "bounded")
 MERGES = ("torch", "triton", "triton_log512", "triton_direct512")
-PARTITIONS = ("argsort_int", "argsort_float", "triton_scan", "triton_scan_packed")
+PARTITIONS = ("argsort_int", "argsort_float", "argsort_desc", "triton_scan", "triton_scan_packed")
 WRITERS = ("native", "fused_store")
+READERS = ("native", "hot_merge")
 
 
 def validate_partition_width(partition, width):
@@ -27,7 +29,7 @@ def validate_partition_width(partition, width):
         raise ValueError("Unsupported partition algorithm")
     if isinstance(width, (bool, np.bool_)) or not isinstance(width, (int, np.integer)) or width < 1:
         raise ValueError("Partition index capacity must be a positive integer")
-    if partition == "argsort_float" and 2*int(width)-1 > 2**24:
+    if partition in ("argsort_float", "argsort_desc") and 2*int(width)-1 > 2**24:
         raise ValueError("argsort_float requires 2*S-1 <= 2**24 for exact unique sort keys")
 
 
@@ -137,28 +139,40 @@ class NativeTwoPassBackend:
     def baseline_decoded(self, kind):
         return self.data["kv"].copy() if kind == "bf16" else self.base.decoded_kv(kind)
 
-    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch", partition="argsort_int", writer="native"):
-        if recipe not in RECIPES or mode not in MODES or index_capacity not in INDEX_CAPACITIES or merge not in MERGES or partition not in PARTITIONS or writer not in WRITERS:
-            raise ValueError("Unsupported recipe/mode/index_capacity/merge/partition/writer")
+    def prepare(self, recipe, window, mode="mixed", index_capacity="full", merge="torch", partition="argsort_int", writer="native",
+                reader="native", hot_block_keys=16, hot_block_heads=16, hot_decode="software"):
+        if recipe not in RECIPES or mode not in MODES or index_capacity not in INDEX_CAPACITIES or merge not in MERGES or partition not in PARTITIONS or writer not in WRITERS or reader not in READERS:
+            raise ValueError("Unsupported recipe/mode/index_capacity/merge/partition/writer/reader")
         if isinstance(window, (bool, np.bool_)) or not isinstance(window, (int, np.integer)) or window < 0:
             raise ValueError("window must be an integer >= 0")
-        key = (recipe, int(window), mode, index_capacity, merge, partition, writer)
+        if reader == "hot_merge" and window > 0 and (mode != "mixed" or merge != "triton"):
+            raise ValueError("hot_merge requires mixed mode and merge=triton; merge is inside the hot reader")
+        if isinstance(hot_block_keys, bool) or hot_block_keys not in (16, 32, 64) or isinstance(hot_block_heads, bool) or hot_block_heads not in (16, 32):
+            raise ValueError("Experimental hot tiles require keys=16/32/64 and heads=16/32")
+        if hot_decode not in ("software", "native_cast"):
+            raise ValueError("hot_decode must be software or native_cast")
+        key = (recipe, int(window), mode, index_capacity, merge, partition, writer, reader, hot_block_keys, hot_block_heads, hot_decode)
         if key not in self._runners:
             self._runners[key] = NativeTwoPassRunner(self, self.scales.prepare(recipe), int(window),
-                                                     mode, index_capacity, merge, partition, writer)
+                                                     mode, index_capacity, merge, partition, writer, reader,
+                                                     hot_block_keys, hot_block_heads, hot_decode)
         return self._runners[key]
 
 
 class NativeTwoPassRunner:
-    def __init__(self, backend, variant, window, mode, index_capacity, merge, partition="argsort_int", writer="native"):
+    def __init__(self, backend, variant, window, mode, index_capacity, merge, partition="argsort_int", writer="native",
+                 reader="native", hot_block_keys=16, hot_block_heads=16, hot_decode="software"):
         self.backend, self.base, self.variant = backend, backend.base, variant
         self.window, self.mode = window, mode
         self.index_capacity, self.merge_kind = index_capacity, merge
         self.partition_algo = partition
         self.writer_kind, self._store_runner = writer, None
+        self.reader_kind, self._hot_merge = reader, None
         self.metadata = dict(variant.metadata)
         self.metadata.update(window=window, mode=mode, index_capacity=index_capacity, merge=merge,
-                             partition=partition, writer=writer,
+                             partition=partition, writer=writer, reader_selector=reader,
+                             hot_block_keys=hot_block_keys, hot_block_heads=hot_block_heads,
+                             hot_decode=hot_decode,
                              production_validation="NOT_VALIDATED",
                              lifetime_scope="fixed trailing query batch only")
         if window == 0:
@@ -181,13 +195,17 @@ class NativeTwoPassRunner:
                                 device=base.device).reshape(1, 1, -1)
         self._partition_runner = None
         partition_metadata = {
-            "algorithm": partition, "sort_key_dtype": "float32" if partition == "argsort_float" else "int32",
+            "algorithm": partition, "sort_key_dtype": "float32" if partition in ("argsort_float", "argsort_desc") else "int32",
             "source_indices_dtype": "int32", "source_shape": list(self.indices_cpu.shape),
             "old_shape": list(parts["old"].shape), "hot_shape": list(parts["recent_global"].shape),
             "sort_key": "ordinal + (!selected)*S; token IDs are never cast to float",
             "max_unique_sort_key": 2*self.indices_cpu.shape[-1]-1,
             "device_execution": "NOT_VERIFIED; inspect profiler and full-pipeline measurement",
             "performance": "NOT_VALIDATED"}
+        if partition == "argsort_desc":
+            partition_metadata.update(sort_key="(2*S-1)-(ordinal+(!selected)*S); descending FP32 unique keys",
+                                      descending=True, truncate_order_before_gather=True,
+                                      comparison="colleague-inspired ideas, not a reproduction of unavailable colleague source")
         if partition in ("triton_scan", "triton_scan_packed"):
             from kv_native_partition import PreparedPartition
             options = dict(variant="packed_one_scan") if partition == "triton_scan_packed" else {}
@@ -211,13 +229,24 @@ class NativeTwoPassRunner:
             self.hot_slots = base.tensor(self.plan["current_slots"], t.int64)
             ring_bytes = int(hot.nbytes)
         self._triton_merge = None
-        if merge.startswith("triton"):
+        if reader == "native" and merge.startswith("triton"):
             from kv_native_merge import merge_states
             self._triton_merge = merge_states
             # Installed bindings may return FP32 even with BF16 queries. Use
             # the actual native output contract; this template read is setup.
             template = self._cold_read(self.prepared)[0]
             self.merge_output = t.empty_like(template)
+        if reader == "hot_merge":
+            from kv_native_hot_merge import PreparedHotMerge
+            cold_template, hot_template = self._cold_read(self.prepared), self._hot_read(self.prepared)
+            self._native_hot_output_dtype = hot_template[0].dtype
+            self.reader_row_batch = base.tensor(np.asarray([b for b, _ in row_map(backend.data)], np.int32), t.int32)
+            self._hot_merge = PreparedHotMerge(
+                base.q_nope, base.q_rope, self.hot_cache.view(t.uint8), self.ring_table,
+                self.reader_row_batch, cold_template, page=base.page, ring_capacity=self.capacity,
+                hot_width=self.hot_width, scale=base.scale, block_keys=hot_block_keys,
+                block_heads=hot_block_heads, hot_output_dtype=hot_template[0].dtype, decode=hot_decode)
+            self.metadata["hot_reader_implementation"] = dict(self._hot_merge.metadata)
         if writer == "fused_store":
             from kv_native_store import NativeQuantizedStore
             self._store_runner = NativeQuantizedStore(
@@ -254,6 +283,12 @@ class NativeTwoPassRunner:
                         (" + original BF16 -> C8 quantization/ring scatter" if mode == "mixed" else "") +
                         ("; native quantizers unchanged; fused packing/scatter" if writer == "fused_store" else ""),
             component_timing_scope="diagnostic stages with prepared inputs; do not sum as full pipeline latency")
+        if reader == "hot_merge":
+            self.metadata.update(reader="native_c4_plus_fused_c8_hot_merge", native_attention_calls_per_read=1,
+                                 custom_hot_attention_merge_launches=1, merge_calls_per_read=0,
+                                 merge="fused_hot_reader", merge_selector=merge,
+                                 prepared_read_scope="one native C4 stats-on read + custom C8 hot attention/merge",
+                                 dynamic_read_scope="device partition + native C4 read + custom C8 hot attention/merge")
 
     def decoded_kv(self):
         return self.variant.decoded_kv()
@@ -272,9 +307,13 @@ class NativeTwoPassRunner:
 
         def pack(mask, width):
             key = self.ordinal+(~mask).to(t.int32)*base.indices.shape[-1]
-            if self.partition_algo == "argsort_float":
-                key = key.to(t.float32)
-            order = t.argsort(key, dim=-1)
+            if self.partition_algo == "argsort_desc":
+                key = (2*base.indices.shape[-1]-1-key).to(t.float32)
+                order = t.argsort(key, dim=-1, descending=True)[:, :, :width]
+            else:
+                if self.partition_algo == "argsort_float":
+                    key = key.to(t.float32)
+                order = t.argsort(key, dim=-1)
             values = t.gather(t.where(mask, base.indices, t.full_like(base.indices, -1)), -1, order)
             values = values[:, :, :width]
             present = mask.any(dim=-1).reshape(-1)
@@ -356,6 +395,9 @@ class NativeTwoPassRunner:
         return merge_torch(self.base.torch, left, right, parts["old_present"], parts["recent_present"])
 
     def _read(self, parts):
+        if self._hot_merge is not None:
+            return self._hot_merge.call(self._cold_read(parts), parts["recent_ring"],
+                                        parts["old_present"], parts["recent_present"])
         return self._merge(self._cold_read(parts), self._hot_read(parts), parts)
 
     def _cold_write(self):
@@ -422,6 +464,63 @@ class NativeTwoPassRunner:
                 value.copy_(saved[name])
         return result
 
+    def reader_diagnostics(self, control_l2=.01, pipeline_l2=.001):
+        """Untimed fused-reader controls against native states and zero query.
+
+        These checks never update KV or the original Q. Output copies happen
+        immediately because the fused reader deliberately reuses its buffer.
+        """
+        if self.window == 0 or self._hot_merge is None:
+            return dict(passed=True, skipped=True, scope="unchanged native readers")
+        if not all(np.isfinite(x) and x > 0 for x in (control_l2, pipeline_l2)):
+            raise ValueError("Reader control tolerances must be finite and positive")
+        base, t, parts = self.base, self.base.torch, self.prepared
+        left, right = self._cold_read(parts), self._hot_read(parts)
+        old_present, hot_present = parts["old_present"], parts["recent_present"]
+        zeros = t.zeros_like(old_present)
+        native_merged = base.host(merge_torch(t, left, right, old_present, hot_present))
+        cold_reference = np.where(np.asarray(self.metadata["old_counts"])[:, None, None] > 0,
+                                  base.host(left[0]), 0.)
+        hot_reference = np.where(np.asarray(self.metadata["hot_counts"])[:, None, None] > 0,
+                                 base.host(right[0]), 0.)
+        result = dict(passed=True, scope="fused hot attention/merge vs native states; forced empty sides; zero-query counts",
+                      checks={})
+        for name, cp, hp, reference, tolerance in (
+                ("combined_vs_native_twopass", old_present, hot_present, native_merged, pipeline_l2),
+                ("hot_only_vs_native_hot", zeros, hot_present, hot_reference, control_l2),
+                ("cold_only_vs_native_cold", old_present, zeros, cold_reference, pipeline_l2),
+                ("both_empty", zeros, zeros, np.zeros_like(native_merged), pipeline_l2)):
+            output = base.host(self._hot_merge.call(left, parts["recent_ring"], cp, hp))
+            metric = compare_outputs(output, reference)
+            passed = bool(metric["finite"] and metric["relative_l2"] <= tolerance and
+                          metric["max_row_relative_l2"] <= tolerance)
+            metric.update(passed=passed, tolerance=tolerance)
+            result["checks"][name] = metric
+            result["passed"] &= passed
+        zero = type(self._hot_merge)(
+            t.zeros_like(base.q_nope), t.zeros_like(base.q_rope), self.hot_cache.view(t.uint8),
+            self.ring_table, self.reader_row_batch, left, page=base.page, ring_capacity=self.capacity,
+            hot_width=self.hot_width, scale=base.scale, block_keys=self.metadata["hot_block_keys"],
+            block_heads=self.metadata["hot_block_heads"], hot_output_dtype=self._native_hot_output_dtype,
+            decode=self.metadata["hot_decode"])
+        zero_output = base.host(zero.call(left, parts["recent_ring"], zeros, hot_present, statistics=True))
+        maximum, total = (base.host(value).astype(np.float64) for value in zero.hot_statistics)
+        counts = np.asarray(self.metadata["hot_counts"], np.int64)
+        present = counts > 0
+        with np.errstate(over="ignore", invalid="ignore"):
+            actual = np.exp(maximum)*total
+        finite = bool(np.isfinite(zero_output).all() and np.isfinite(actual[present]).all() and
+                      np.isfinite(maximum[present]).all() and np.isfinite(total[present]).all() and
+                      (total[present] > 0).all())
+        error = np.abs(actual[present]-counts[present, None, None])
+        passed = bool(finite and np.all(error <= np.maximum(.02, counts[present, None, None]*1e-4)))
+        result["checks"]["zero_query_hot_counts"] = dict(
+            passed=passed, finite=finite, expected_counts=counts.tolist(),
+            max_abs_count_error=float(error.max()) if error.size and finite else (0. if not error.size else None),
+            ignored_empty_rows=int(np.count_nonzero(~present)), tolerance="max(0.02,count*1e-4)")
+        result["passed"] &= passed
+        return result
+
     def run(self, write=False, dynamic=True):
         if self.window == 0:
             return self.variant.run(write=write)
@@ -434,12 +533,17 @@ class NativeTwoPassRunner:
         if self.window == 0:
             return {"cold_read": self.variant.call}
         parts = self.prepared
-        left, right = self._cold_read(parts), self._hot_read(parts)
+        left = self._cold_read(parts)
         result = {
             "partition": lambda: self.partition()["old"],
-            "cold_read": lambda: self._cold_read(parts)[0],
-            "hot_read": lambda: self._hot_read(parts)[0],
-            "merge": lambda: self._merge(left, right, parts)}
+            "cold_read": lambda: self._cold_read(parts)[0]}
+        if self._hot_merge is not None:
+            result["hot_read_merge"] = lambda: self._hot_merge.call(
+                left, parts["recent_ring"], parts["old_present"], parts["recent_present"])
+        else:
+            right = self._hot_read(parts)
+            result["hot_read"] = lambda: self._hot_read(parts)[0]
+            result["merge"] = lambda: self._merge(left, right, parts)
         if self._store_runner is not None:
             result["quantize_and_fused_store"] = self._write
         else:

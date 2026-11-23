@@ -96,8 +96,8 @@ class NumpyTorch:
     def isfinite(value):
         return Tensor(np.isfinite(value))
     @staticmethod
-    def argsort(value, dim=-1):
-        return Tensor(np.argsort(value, axis=dim))
+    def argsort(value, dim=-1, descending=False):
+        return Tensor(np.argsort(-value if descending else value, axis=dim))
     @staticmethod
     def gather(value, dim, order):
         return Tensor(np.take_along_axis(value, order, axis=dim))

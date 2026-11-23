@@ -20,7 +20,7 @@ from test_kv_hot_fused_a5 import (DeviceExecutionAborted, SUCCESS_STATUSES, acce
     compare, error_record, evaluate, identity, integer_list, paired_benchmark,
     recipe_list, standalone_benchmark, success_status, timing_failed)
 
-VERSION = "kv-native-twopass-a5-v3"
+VERSION = "kv-native-twopass-a5-v4"
 
 
 class PartitionControlFailed(RuntimeError):
@@ -28,6 +28,10 @@ class PartitionControlFailed(RuntimeError):
 
 
 class WriterControlFailed(RuntimeError):
+    pass
+
+
+class ReaderControlFailed(RuntimeError):
     pass
 
 
@@ -54,15 +58,37 @@ def optimization_configurations():
             for label, changed in changes]
 
 
+def reader_fusion_configurations(args):
+    champion = dict(merge="triton", partition="triton_scan", writer="native", reader="native")
+    changes = [
+        ("champion", {}),
+        ("descending_partition_only", {"partition": "argsort_desc"}),
+    ]
+    configs = [dict(champion, **{"optimization": label, "changed_knobs": list(changed),
+                                 "champion": label == "champion"}) | changed
+               for label, changed in changes]
+    for keys, heads, decode in itertools.product(args.hot_block_keys, args.hot_block_heads, args.hot_decodes):
+        configs.append(dict(champion, reader="hot_merge", hot_block_keys=keys, hot_block_heads=heads,
+            hot_decode=decode, optimization=f"hot_read_merge_k{keys}_h{heads}_d{decode}", champion=False,
+            changed_knobs=["reader", "hot_block_keys", "hot_block_heads", "hot_decode"]))
+    return configs
+
+
 def configuration_groups(args):
     """Explicit A/B configurations; the preset avoids a Cartesian explosion."""
+    if args.reader_fusion_sweep:
+        return [("bounded", reader_fusion_configurations(args))]
     if args.optimization_sweep:
         return [("bounded", optimization_configurations())]
     partitions = ["argsort_int"] + [x for x in args.partitions if x != "argsort_int"]
-    return [(capacity, [dict(merge=merge, partition=partition, writer=writer,
-                            optimization="matrix", changed_knobs=[], champion=False)
-                       for merge, partition, writer in itertools.product(args.merges, partitions, args.writers)])
-            for capacity in args.index_capacities]
+    configurations = []
+    for merge, partition, writer, reader in itertools.product(args.merges, partitions, args.writers, args.readers):
+        tiles = itertools.product(args.hot_block_keys, args.hot_block_heads, args.hot_decodes) if reader == "hot_merge" else [(None, None, None)]
+        for keys, heads, decode in tiles:
+            configurations.append(dict(merge=merge, partition=partition, writer=writer, reader=reader,
+                hot_block_keys=keys, hot_block_heads=heads, hot_decode=decode,
+                optimization="matrix", changed_knobs=[], champion=False))
+    return [(capacity, configurations) for capacity in args.index_capacities]
 
 
 def run_case(data, args, directory, *, backend_factory=None, benchmark=None, progress=None):
@@ -162,25 +188,44 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
             references = {}
             partition_baselines = {}
             champions = {}
+            split_controls = {}
             for window in sorted(w for w in args.windows if w > 0):
                 for capacity, configurations in configuration_groups(args):
                     for config in configurations:
                         merge, partition, writer = config["merge"], config["partition"], config["writer"]
+                        requested_reader = config.get("reader", "native")
+                        split_key = (window, capacity, merge, partition, writer)
+                        split_record = split_controls.get(split_key)
+                        split_reference = split_record["name"] if split_record is not None else None
+                        modes = ("mixed",) if split_record is not None else ("split_c4", "mixed")
                         split_passed = False
-                        for mode in ("split_c4", "mixed"):
+                        if split_record is not None:
+                            split_passed = split_record.get("control_passed", False) and split_record["status"] in SUCCESS_STATUSES
+                        for mode in modes:
+                            reader = "native" if mode == "split_c4" else requested_reader
                             name = f"{recipe}_{mode}_w{window}_{capacity}_{merge}"
                             if partition != "argsort_int":
                                 name += "_" + partition
                             if writer != "native":
                                 name += "_" + writer
+                            if reader != "native":
+                                name += f"_{reader}_k{config['hot_block_keys']}_h{config['hot_block_heads']}_d{config['hot_decode']}"
                             entry = dict(name=name, recipe=recipe, window=window, mode=mode,
-                                         index_capacity=capacity, merge=merge, partition=partition, writer=writer,
-                                         optimization=config["optimization"], changed_knobs=config["changed_knobs"],
+                                         index_capacity=capacity, merge="fused_hot_reader" if reader == "hot_merge" else merge,
+                                         merge_selector=merge, partition=partition, writer=writer, reader=reader,
+                                         requested_reader=requested_reader,
+                                         hot_block_keys=config.get("hot_block_keys") if reader == "hot_merge" else None,
+                                         hot_block_heads=config.get("hot_block_heads") if reader == "hot_merge" else None,
+                                         hot_decode=config.get("hot_decode") if reader == "hot_merge" else None,
+                                         optimization=config["optimization"], changed_knobs=config["changed_knobs"] if mode == "mixed" else
+                                             [knob for knob in config["changed_knobs"] if knob not in ("reader", "hot_block_keys", "hot_block_heads", "hot_decode")],
                                          comparison_role="CHAMPION" if config["champion"] else "CANDIDATE",
                                          status="RUNNING",
                                          role="SPLIT_CONTROL" if mode == "split_c4" else "HOT_WINDOW",
                                          timing_reference=f"{recipe}_w0", production_performance="NOT_VALIDATED",
                                          selection=window_selection_stats(data, window))
+                            if mode == "mixed":
+                                entry["split_control_reference"] = split_reference
                             report["variants"].append(entry)
                             try:
                                 dependency = controls_ok and native_entry.get("control_passed", False)
@@ -190,9 +235,13 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                     entry.update(status="CONTROL_FAILED", control_passed=False,
                                         control_failure_reason="BF16/C8, matching native W0, or same-configuration split C4 control failed")
                                 else:
+                                    reader_options = dict(reader=reader)
+                                    if reader == "hot_merge":
+                                        reader_options.update(hot_block_keys=config["hot_block_keys"], hot_block_heads=config["hot_block_heads"],
+                                                              hot_decode=config["hot_decode"])
                                     runner = backend.prepare(recipe, window, mode=mode,
                                                              index_capacity=capacity, merge=merge, partition=partition,
-                                                             writer=writer)
+                                                             writer=writer, **reader_options)
                                     entry["implementation"] = runner.metadata
                                     entry["partition_consistency"] = runner.partition_diagnostics()
                                     if not entry["partition_consistency"]["passed"]:
@@ -203,6 +252,13 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                             raise WriterControlFailed("Writer cache bytes differ from the native writer")
                                     elif writer != "native":
                                         raise WriterControlFailed("Candidate writer lacks exact-cache writer_diagnostics")
+                                    if reader == "hot_merge":
+                                        if not hasattr(runner, "reader_diagnostics"):
+                                            raise ReaderControlFailed("Fused hot reader lacks independent reader_diagnostics")
+                                        entry["reader_consistency"] = runner.reader_diagnostics(
+                                            control_l2=args.control_l2, pipeline_l2=args.pipeline_l2)
+                                        if not entry["reader_consistency"]["passed"]:
+                                            raise ReaderControlFailed("Fused hot read/merge failed independent native-hot controls")
                                     key = (window, mode)
                                     if key not in references:
                                         references[key] = (cold_reference if mode == "split_c4" else
@@ -228,8 +284,11 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                         entry["timing_write_read"] = paired_benchmark(
                                             lambda: native.run(write=True), pipeline, args, benchmark)
                                         entry["status"] = "TIMING_ERROR" if timing_failed(entry) else success_status(args)
-                                        baseline_key = (window, capacity, merge, mode, writer)
-                                        if partition != "argsort_int" and not args.optimization_sweep:
+                                        baseline_key = (window, capacity, merge, mode, writer, reader,
+                                                        config.get("hot_block_keys") if reader == "hot_merge" else None,
+                                                        config.get("hot_block_heads") if reader == "hot_merge" else None,
+                                                        config.get("hot_decode") if reader == "hot_merge" else None)
+                                        if partition != "argsort_int" and not (args.optimization_sweep or args.reader_fusion_sweep):
                                             matched = partition_baselines.get(baseline_key)
                                             if matched is not None:
                                                 baseline_runner, baseline_record = matched
@@ -241,7 +300,7 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                                     entry["status"] = "TIMING_ERROR"
                                             else:
                                                 entry["partition_timing_comparison"] = "UNAVAILABLE: matching integer-sort control did not pass"
-                                        if args.optimization_sweep and not config["champion"]:
+                                        if (args.optimization_sweep or args.reader_fusion_sweep) and not config["champion"]:
                                             matched = champions.get((window, mode))
                                             if matched is not None:
                                                 champion_runner, champion_record = matched
@@ -264,16 +323,21 @@ def run_case(data, args, directory, *, backend_factory=None, benchmark=None, pro
                                             1-entry["vs_bf16_math"]["relative_l2"]/original if original else None)
                                     else:
                                         entry["status"] = "CONTROL_FAILED"
-                            except (PartitionControlFailed, WriterControlFailed) as exc:
+                            except (PartitionControlFailed, WriterControlFailed, ReaderControlFailed) as exc:
                                 entry.update(status="CONTROL_FAILED", control_passed=False, control_failure_reason=str(exc))
                             except Exception:
                                 entry.update(error_record())
                             if partition == "argsort_int" and entry["status"] in SUCCESS_STATUSES:
-                                partition_baselines[(window, capacity, merge, mode, writer)] = (runner, entry)
+                                partition_baselines[(window, capacity, merge, mode, writer, reader,
+                                    config.get("hot_block_keys") if reader == "hot_merge" else None,
+                                    config.get("hot_block_heads") if reader == "hot_merge" else None,
+                                    config.get("hot_decode") if reader == "hot_merge" else None)] = (runner, entry)
                             if config["champion"] and entry["status"] in SUCCESS_STATUSES:
                                 champions[(window, mode)] = (runner, entry)
                             if mode == "split_c4":
                                 split_passed = entry.get("control_passed", False) and entry["status"] in SUCCESS_STATUSES
+                                split_controls[split_key] = entry
+                                split_reference = entry["name"]
                             finish(entry)
         entries = list(report["baselines"].values()) + report["variants"]
         report["status"] = success_status(args) if all(e["status"] in SUCCESS_STATUSES for e in entries) else "FAILED"
@@ -325,6 +389,7 @@ def short_summary(report, timing_mode):
                 f"recipe={recipe} best={best.get('optimization', best['name'])} "
                 f"W={best.get('window')} cap={best.get('index_capacity')} "
                 f"partition={best.get('partition')} merge={best.get('merge')} writer={best.get('writer', 'native')} "
+                f"reader={best.get('reader', 'native')} tile={best.get('hot_block_keys')}/{best.get('hot_block_heads')} decode={best.get('hot_decode', 'NA')} "
                 f"L2={number(best.get('vs_bf16_math', {}).get('relative_l2'),6)} "
                 f"pipeline_us={number(event['candidate_median'])} paired_W0_us={number(event['baseline_median'])} "
                 f"ratio={number(event['median_paired_ratio'])} champion_ratio={number(champion_ratio)}")
@@ -339,6 +404,54 @@ def short_summary(report, timing_mode):
     return "\n".join(lines) + "\n"
 
 
+def paired_summary(report, timing_mode):
+    """Exact named paired measurements for mixed rows, without ranking them."""
+    def numeric(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value)
+
+    def number(value, digits=3):
+        return f"{value:.{digits}f}" if numeric(value) else "NA"
+
+    def measured_pair(entry, field):
+        timing = entry.get(field, {}).get(timing_mode, {})
+        event = timing.get("event_us", {})
+        if (entry.get("status") != "MEASURED" or not entry.get("control_passed")
+                or timing.get("status") != "MEASURED"):
+            return {}
+        if not all(numeric(event.get(key)) and event[key] > 0 for key in
+                   ("candidate_median", "baseline_median", "median_paired_ratio")):
+            return {}
+        return event
+
+    lines = [f"{VERSION} status={report['status']} timing={timing_mode}",
+             "Event us. W0 and champion columns are separate recorded pairs; ratios are recorded paired medians, not divided medians. NA means unavailable/ineligible; champion self-comparisons are never generated."]
+    for case in report["cases"]:
+        mixed = [entry for entry in case["variants"] if entry.get("mode") == "mixed"]
+        measured = sum(bool(measured_pair(entry, "timing_write_read")) for entry in mixed)
+        baseline_count, variant_count = len(case["baselines"]), len(case["variants"])
+        lines.append(f"case={case['label']} counts: baselines={baseline_count} variants={variant_count} total={baseline_count+variant_count} mixed={len(mixed)} mixed_with_complete_measured_W0_pair={measured}")
+        lines.append("recipe | configuration | reader | tile | decode | status | pipeline_us | paired_W0_us | W0_ratio | champion_reference | champion_baseline_us | champion_candidate_us | champion_ratio[min,max] | L2 | matching_L2")
+        for entry in mixed:
+            w0 = measured_pair(entry, "timing_write_read")
+            reference = entry.get("champion_timing_reference")
+            champion = {}
+            if entry.get("comparison_role") != "CHAMPION" and reference and reference != entry["name"]:
+                champion = measured_pair(entry, "timing_vs_champion")
+            if not champion:
+                reference = None
+            ratio = (f"{number(champion.get('median_paired_ratio'))}"
+                     f"[{number(champion.get('min_paired_ratio'))},{number(champion.get('max_paired_ratio'))}]") if champion else "NA"
+            tile = (f"{entry['hot_block_keys']}/{entry['hot_block_heads']}"
+                    if entry.get("hot_block_keys") is not None and entry.get("hot_block_heads") is not None else "NA")
+            lines.append(" | ".join((entry.get("recipe", "NA"), entry.get("optimization", entry["name"]),
+                entry.get("reader", "native"), tile, entry.get("hot_decode") or "NA", entry["status"],
+                number(w0.get("candidate_median")), number(w0.get("baseline_median")), number(w0.get("median_paired_ratio")),
+                reference or "NA", number(champion.get("baseline_median")), number(champion.get("candidate_median")), ratio,
+                number(entry.get("vs_bf16_math", {}).get("relative_l2"), 6),
+                number(entry.get("kernel_vs_matching_reference", {}).get("relative_l2"), 6))))
+    return "\n".join(lines) + "\n"
+
+
 def write_reports(report, directory):
     directory = Path(directory)
     (directory / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
@@ -348,13 +461,14 @@ def write_reports(report, directory):
              "All times us; paired ratios use same-recipe native W0. MEASURED is not a performance pass.",
              "Full pipeline includes dynamic partition, current-token writes, native reads and merge.",
              "Champion comparisons pair the same recipe/window/mode; native W0 remains the performance baseline.",
-             "fused_store retains native quantizers and fuses packing/scatter; it does not fuse quantization."]
+             "fused_store retains native quantizers and fuses packing/scatter; it does not fuse quantization.",
+             "hot_merge retains the native C4 cold reader; its Triton kernel combines C8 hot attention and merge. Split controls always use native readers."]
     rows = []
     def num(x, digits=2):
         return "NA" if x is None else f"{x:.{digits}f}"
     for case in report["cases"]:
         lines.append(f"case={case['label']} q_shape={case.get('shape', {}).get('q_nope')} kv_shape={case.get('shape', {}).get('kv')}")
-        lines.append("name | role | partition | status | prepared read | full pipeline | paired W0 pipeline | W0 ratio [min,max] | same-path int-sort ratio | observation | L2 | matching L2 | optimization | merge | writer | champion ratio")
+        lines.append("name | role | partition | status | prepared read | full pipeline | paired W0 pipeline | W0 ratio [min,max] | same-path int-sort ratio | observation | L2 | matching L2 | optimization | merge | writer | champion ratio | reader | hot tile | decode")
         for entry in list(case["baselines"].values()) + case["variants"]:
             for timing_mode in modes:
                 read = entry.get("timing_prepared_read", {}).get(timing_mode, {}).get("event_us", {})
@@ -368,6 +482,12 @@ def write_reports(report, directory):
                     index_capacity=entry.get("index_capacity"),
                     partition=entry.get("partition", "none"),
                     merge=entry.get("merge", "none"), writer=entry.get("writer", "native"),
+                    merge_selector=entry.get("merge_selector", entry.get("merge")),
+                    reader=entry.get("reader", "native"), requested_reader=entry.get("requested_reader", "native"),
+                    hot_block_keys=entry.get("hot_block_keys"), hot_block_heads=entry.get("hot_block_heads"),
+                    hot_decode=entry.get("hot_decode"),
+                    split_control_reference=entry.get("split_control_reference"),
+                    reader_control_passed=entry.get("reader_consistency", {}).get("passed"),
                     optimization=entry.get("optimization", "none"),
                     comparison_role=entry.get("comparison_role", "NATIVE_BASELINE"),
                     changed_knobs=",".join(entry.get("changed_knobs", [])),
@@ -400,7 +520,8 @@ def write_reports(report, directory):
                         num(row["pipeline_us"]), num(row["paired_w0_pipeline_us"]), ratio,
                         num(row["ratio_vs_same_path_argsort_int"],3), row["observation"],
                         num(row["l2"],6), num(row["matching_l2"],6), row["optimization"],
-                        row["merge"], row["writer"], num(row["ratio_vs_champion"],3)]))
+                        row["merge"], row["writer"], num(row["ratio_vs_champion"],3), row["reader"],
+                        f"{row['hot_block_keys']}/{row['hot_block_heads']}", row["hot_decode"] or "NA"]))
             if entry.get("traceback"):
                 lines.append("  error: " + entry["traceback"].strip().splitlines()[-1][:300])
             if entry.get("control_failure_reason"):
@@ -419,6 +540,7 @@ def write_reports(report, directory):
     text = "\n".join(lines) + "\n"
     (directory / "brief.txt").write_text(text, encoding="utf-8")
     (directory / "short_summary.txt").write_text(short_summary(report, display), encoding="utf-8")
+    (directory / "paired_summary.txt").write_text(paired_summary(report, display), encoding="utf-8")
     return text
 
 
@@ -438,11 +560,19 @@ def parser():
     p.add_argument("--cold-recipes", type=recipe_list, default=["baseline", "alg2_max7"])
     p.add_argument("--index-capacities", type=lambda s: choices_list(s,("full","bounded")), default=["full","bounded"])
     p.add_argument("--merges", type=lambda s: choices_list(s,("torch","triton","triton_log512","triton_direct512")), default=["torch","triton"])
-    p.add_argument("--partitions", type=lambda s: choices_list(s,("argsort_int","argsort_float","triton_scan","triton_scan_packed")),
+    p.add_argument("--partitions", type=lambda s: choices_list(s,("argsort_int","argsort_float","argsort_desc","triton_scan","triton_scan_packed")),
                    default=["argsort_int","argsort_float","triton_scan"])
     p.add_argument("--writers", type=lambda s: choices_list(s,("native","fused_store")), default=["native"])
-    p.add_argument("--optimization-sweep", action="store_true",
+    p.add_argument("--readers", type=lambda s: choices_list(s,("native","hot_merge")), default=["native"])
+    p.add_argument("--hot-block-keys", type=integer_list, default=[16,32,64], help="Hot-reader tile key sizes; used only by hot_merge candidates")
+    p.add_argument("--hot-block-heads", type=integer_list, default=[16,32], help="Hot-reader tile head sizes; used only by hot_merge candidates")
+    p.add_argument("--hot-decodes", type=lambda s: choices_list(s,("software","native_cast")),
+                   default=["software","native_cast"], help="Explicit FP8 decoder candidates; native_cast compilation failure is reported without fallback")
+    presets = p.add_mutually_exclusive_group()
+    presets.add_argument("--optimization-sweep", action="store_true",
                    help="Run 7 bounded configurations: champion, isolated partition/merge/writer changes and two stacked candidates; overrides capacities/merges/partitions/writers lists")
+    presets.add_argument("--reader-fusion-sweep", action="store_true",
+                   help="Bounded native champion + descending-sort native control + hot_merge tile/decoder sweep with triton_scan; reuse native split controls, keep native writers")
     p.add_argument("--device", default="npu:0")
     p.add_argument("--seed", type=int, default=20261120)
     p.add_argument("--timing", choices=("none","eager","graph","eager,graph"), default="graph")
@@ -473,8 +603,10 @@ def main(argv=None):
         return 0
     if 0 not in args.windows:
         p.error("--windows must include 0 for native C4 baseline")
-    if not args.optimization_sweep and "argsort_int" not in args.partitions:
+    if not (args.optimization_sweep or args.reader_fusion_sweep) and "argsort_int" not in args.partitions:
         p.error("--partitions must include argsort_int for the same-path baseline")
+    if not (args.optimization_sweep or args.reader_fusion_sweep) and "hot_merge" in args.readers and args.merges != ["triton"]:
+        p.error("hot_merge requires --merges triton; its actual merge executes inside the fused hot reader")
     if min(args.batch,args.heads,args.topk,args.iterations,args.repeats) < 1 or args.warmup < 0:
         p.error("Positive batch/heads/TopK/iterations/repeats and nonnegative warmup required")
     if not all(np.isfinite(x) and x > 0 for x in (args.control_l2,args.pipeline_l2)):
@@ -504,8 +636,10 @@ def main(argv=None):
     finally:
         persist()
     detail = write_reports(report,directory)
-    print((directory / "short_summary.txt").read_text() if args.optimization_sweep else detail, flush=True)
+    print((directory / "short_summary.txt").read_text() if args.optimization_sweep or args.reader_fusion_sweep else detail, flush=True)
     print(f"Results: {directory / 'results.json'}\nShort summary: {directory / 'short_summary.txt'}\nDetails: {directory / 'brief.txt'}",flush=True)
+    if args.reader_fusion_sweep:
+        print(f"Exact paired summary: {directory / 'paired_summary.txt'}", flush=True)
     return 0 if report["status"] in SUCCESS_STATUSES else 1
 
 
