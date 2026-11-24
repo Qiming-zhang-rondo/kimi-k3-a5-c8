@@ -1,0 +1,20 @@
+{
+  "source_parent": "2168be3e421c8fb87775d1248fdb8747b1483334",
+  "scope": "host_source_contract_reference_and_launcher_controls",
+  "validated_at_utc": "2026-11-24T10:59:29.658348+00:00",
+  "status": "HOST_CHECKS_PASS",
+  "tests_run": 108,
+  "passed": 107,
+  "skipped": 1,
+  "failures": 0,
+  "errors": 0,
+  "skip_reasons": [
+    "Real fatal signals require explicit Linux opt-in; disabled on user desktops"
+  ],
+  "log": "phase_b_host_validation.log",
+  "log_sha256": "381146de9ed6aa41afbcc1f34a497f3258259c20a7937762164910e3a37761cd",
+  "cann_compiled_here": false,
+  "npu_executed_here": false,
+  "fusion_performance_measured": false,
+  "existing_original_a5_evidence_commit": "2ddc6631a2beaccd9892c09896229370521a7eca"
+}

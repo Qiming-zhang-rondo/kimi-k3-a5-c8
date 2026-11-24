@@ -175,6 +175,9 @@ __aicore__ inline void MergeMode(
             DataCopyPadExtParams<float> pad = {};
             DataCopyPad(cold, coldOutputGm[(flatOffset + start) * 512], copy, pad);
             copy.blockLen = count * sizeof(float);
+            // count is only 1..4 (4..16 bytes). Plain DataCopy rounds down to
+            // a 32-byte transfer, so it would silently copy no max/sum data.
+            // Keep byte-length DataCopyPad for these bounded GM->UB tails.
             pad.isPad = true;
             pad.rightPadding = 8 - count;
             pad.paddingValue = 0.0F;

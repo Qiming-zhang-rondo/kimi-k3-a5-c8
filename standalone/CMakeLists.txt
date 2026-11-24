@@ -13,6 +13,8 @@ set(SFA_SDK_ROOT "$ENV{ASCEND_HOME_PATH}" CACHE PATH "Active toolkit root matchi
 set(SFA_ASC_ROOT "${SFA_SDK_ROOT}/aarch64-linux/asc" CACHE PATH "ASC root in the same toolkit")
 set(SFA_SDK_INCLUDE_DIRS "" CACHE STRING "Additional includes from this same SDK only")
 option(SFA_BUILD_DEVICE_SMOKE "Build fixed original BF16 direct-launch smoke executable" OFF)
+option(SFA_BUILD_FUSION_PROBE "Compile isolated FP32-output fusion candidate (no device validation claim)" OFF)
+option(SFA_BUILD_FUSION_SMOKE "Build isolated FP32-output fusion device-smoke executable" OFF)
 get_filename_component(SFA_BUNDLE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 function(configure_sfa target)
@@ -20,7 +22,6 @@ function(configure_sfa target)
         $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)
     target_compile_definitions(${target} PRIVATE SFA_PROBE_TEMPLATE_MODE=${SFA_PROBE_TEMPLATE_MODE})
     target_include_directories(${target} PRIVATE
-        "${SFA_BUNDLE_ROOT}/experimental/arch35"
         "${CMAKE_CURRENT_SOURCE_DIR}" "${SFA_BUNDLE_ROOT}/original"
         "${SFA_BUNDLE_ROOT}/original/arch35"
         "${SFA_BUNDLE_ROOT}/deps/sparse_flash_attention/arch35"
@@ -30,8 +31,7 @@ function(configure_sfa target)
                 "/include/interface" "/include/tiling" "/include/utils" "/include/comm_api"
                 "/impl" "/impl/basic_api")
             if(EXISTS "${SFA_ASC_ROOT}${suffix}")
-                target_include_directories(${target} PRIVATE
-        "${SFA_BUNDLE_ROOT}/experimental/arch35" "${SFA_ASC_ROOT}${suffix}")
+                target_include_directories(${target} PRIVATE "${SFA_ASC_ROOT}${suffix}")
             endif()
         endforeach()
     endif()
@@ -42,7 +42,19 @@ add_library(sfa_standalone STATIC sfa_standalone_entry.asc)
 configure_sfa(sfa_standalone)
 add_executable(sfa_host_preflight sfa_direct_launch.cpp)
 
-if(SFA_BUILD_DEVICE_SMOKE)
+# Candidate entry uses an explicit experimental header path. Never add the
+# experimental directory to configure_sfa: the verified original shares names.
+if(SFA_BUILD_FUSION_PROBE OR SFA_BUILD_FUSION_SMOKE)
+    if(NOT SFA_PROBE_TEMPLATE_MODE STREQUAL "0")
+        message(FATAL_ERROR "Fixed fusion compile probe requires template mode 0")
+    endif()
+endif()
+if(SFA_BUILD_FUSION_PROBE)
+    add_library(sfa_fusion_probe STATIC sfa_fusion_entry.asc)
+    configure_sfa(sfa_fusion_probe)
+endif()
+
+if(SFA_BUILD_DEVICE_SMOKE OR SFA_BUILD_FUSION_SMOKE)
     if(NOT SFA_PROBE_TEMPLATE_MODE STREQUAL "0")
         message(FATAL_ERROR "Fixed smoke launcher requires template mode 0")
     endif()
@@ -56,11 +68,20 @@ if(SFA_BUILD_DEVICE_SMOKE)
     if(NOT SFA_ACL_INCLUDE_DIR OR NOT SFA_ACL_LIBRARY)
         message(FATAL_ERROR "Matching ACL header/library not found in SFA_SDK_ROOT")
     endif()
-    # One ASC TU includes the kernel. Do not link the archive again or compile
-    # the deprecated C++ file as another device launcher.
+endif()
+
+# Each smoke executable owns exactly one ASC TU including its chosen kernel.
+# Do not link the probe archive again or compile the deprecated C++ launcher.
+if(SFA_BUILD_DEVICE_SMOKE)
     add_executable(sfa_launch sfa_direct_launch.asc)
     configure_sfa(sfa_launch)
     target_include_directories(sfa_launch PRIVATE "${SFA_ACL_INCLUDE_DIR}")
     target_link_libraries(sfa_launch PRIVATE m "${SFA_ACL_LIBRARY}" ascendc_runtime)
+endif()
+if(SFA_BUILD_FUSION_SMOKE)
+    add_executable(sfa_fusion_launch sfa_fusion_launch.asc)
+    configure_sfa(sfa_fusion_launch)
+    target_include_directories(sfa_fusion_launch PRIVATE "${SFA_ACL_INCLUDE_DIR}")
+    target_link_libraries(sfa_fusion_launch PRIVATE m "${SFA_ACL_LIBRARY}" ascendc_runtime)
 endif()
 message(STATUS "SFA explicit-user-scratch fixed contract; SDK=${SFA_SDK_ROOT}; compiler=${CMAKE_ASC_COMPILER}")

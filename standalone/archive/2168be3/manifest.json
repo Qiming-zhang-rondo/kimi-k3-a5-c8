@@ -1,0 +1,20 @@
+{
+  "source_commit": "2168be3e421c8fb87775d1248fdb8747b1483334",
+  "files": {
+    "sparse_flash_attention_service_vector_mla.h.snapshot": {
+      "source_path": "standalone/arch35/sparse_flash_attention_service_vector_mla.h",
+      "bytes": 54638,
+      "sha256": "78e4f533fe9d3d02da5ee6dec5fd113bc969eca47d148cb44349d368b5a03efa"
+    },
+    "sparse_flash_attention_kernel_mla.h.snapshot": {
+      "source_path": "standalone/arch35/sparse_flash_attention_kernel_mla.h",
+      "bytes": 31278,
+      "sha256": "e15514e3dbd06d2247a7574480e7df8076f3a1fc04fbe46003b4778fb2bbaedd"
+    },
+    "cold_state_merge_device.h.snapshot": {
+      "source_path": "standalone/arch35/cold_state_merge_device.h",
+      "bytes": 11894,
+      "sha256": "44bb04b0c6ea3dbeb285d470b60db0a0c3708bc8b3e0b706938e3318e8b05907"
+    }
+  }
+}

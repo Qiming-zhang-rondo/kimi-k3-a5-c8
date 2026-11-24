@@ -789,13 +789,15 @@ __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>::Bmm2DataCopyOut (RunInfo
     SetFlag<HardEvent::V_MTE3>(vToMte3AttnOutId);
     WaitFlag<HardEvent::V_MTE3>(vToMte3AttnOutId);
 
-    DataCopyExtParams dataCopyParams;
+    DataCopyExtParams dataCopyParams = {};
     dataCopyParams.blockLen = constInfo.dSizeV * sizeof(OUTPUT_T);
     // Source stride is in 32-byte blocks; fixed D=512 means zero stride.
     dataCopyParams.srcStride = (dSizeAligned64 - constInfo.dSizeV) * sizeof(float) / 32;
     dataCopyParams.dstStride = constInfo.attentionOutStride;
     dataCopyParams.blockCount = runInfo.vec2MRealSize;
 
+    // UB->GM uses the three-argument overload. Padding options belong only to
+    // the opposite GM->UB direction; OUTPUT_T and VEC2_RES_T are FP32 above.
     DataCopyPad(this->attentionOutGm[runInfo.attentionOutOffset], vec2ResUb, dataCopyParams);
 }
 

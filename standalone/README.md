@@ -1,10 +1,18 @@
-# Isolated arch35 compile probe
+# 当前 Phase B 入口
+
+原版 `2ddc663` 的 3 项 A5 DEVICE_VALIDATED 已提交。当前使用
+[PHASE_B_2168_REVIEW.md](../PHASE_B_2168_REVIEW.md) 中的隔离构建/运行命令，
+修复 `2168be3` 的集成问题并运行新 `sfa_fusion_launch`；不要重复从原版 SDK 恢复开始。
+融合首版 FP32 输出，给定冷态的 8 项 smoke 尚待 A5 验证，不能误用原版 BF16 输出分配。
+
+## 原版隔离编译与启动背景
 
 The default library target is a **baseline source compilation probe**, not a
 working fused operator or private-package launch ABI. Optional `sfa_launch`
 performs fixed original-BF16 device checks only with `--run --device N`; its
-default is CPU preflight. After the reported 507015, follow
-[`REPAIR_507015.md`](../REPAIR_507015.md) before returning to the full task.
+default is CPU preflight. The fixed original passed three A5 checks at `2ddc663`.
+Keep [`REPAIR_507015.md`](../REPAIR_507015.md) as the historical repair record;
+do not restart original recovery when continuing the isolated fusion target.
 
 The corrected entry uses the archived private arch35 `BaseApi` cube/vector
 services, BF16 inputs/output, FP32 accumulation and the original six template

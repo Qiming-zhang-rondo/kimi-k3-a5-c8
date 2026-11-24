@@ -1,6 +1,8 @@
 # 单次完整执行入口
 
 **当前优先任务：[POST_COMPILE_EXECUTION_TASK.md](POST_COMPILE_EXECUTION_TASK.md)。**
+本轮先按 [PHASE_B_2168_REVIEW.md](PHASE_B_2168_REVIEW.md) 编译并运行新增
+`sfa_fusion_launch`，修复 `2168be3` 的 dtype/DMA/头文件遮蔽；这是可直接执行的融合入口。
 `2ddc663`已提交3组原版A5结果，状态DEVICE_VALIDATED，L2约0.00175–0.00191；
 当前继续阶段B融合接入和阶段C配对性能，不重复从头修原版启动。
 此前507015的修复记录及复现入口保留在 [REPAIR_507015.md](REPAIR_507015.md)；设备故障门禁继续有效。

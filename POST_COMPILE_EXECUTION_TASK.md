@@ -3,8 +3,10 @@
 ## 接手后直接继续
 
 仓库 `Qiming-zhang-rondo/kimi-k3-a5-c8`，分支 `sfa-cold-merge`。
-用户已反馈：`1a34a76` 的 host/device 头文件隔离解决 MicroAPI 编译错误，内网构建通过。
-这是用户转述的机器结果，原始产物尚未提交；把实际日志补进本轮证据，继续运行验证。
+`2ddc663` 已提交原版 A5 实测：3 项 DEVICE_VALIDATED，L2 0.00175–0.00191。
+阶段 A 已有固定 smoke 证据；当前先执行 [PHASE_B_2168_REVIEW.md](PHASE_B_2168_REVIEW.md)
+修后的融合构建及 8 项隔离设备检查，再完成真实 C4 两遍对照和阶段 C。
+`2168be3` 的输出类型、DMA 和头文件遮蔽问题已修源码，尚需现场 SDK/A5 验证。
 保留已成功的 SDK、CMake 参数及构建目录，不重新开始 SoC/namespace 排查。
 
 你在内网拥有执行环境，负责连续完成以下三个阶段及普通实现/构建修复。

@@ -269,3 +269,19 @@ updated for CANN 9.2.1 DataCopyPad API compatibility. Key changes:
 ### Fusion entry (sfa_fusion_entry.asc): compiles correctly through template
 instantiation (SFA_PROBE_TYPES macro pattern matches verified original).
 The blocker is ONLY in the experimental vector service's API compatibility.
+
+## Phase B：2168be3 修复与可执行设备 smoke（待现场构建/运行）
+
+按用户要求暂停 DSH receiver 适配，优先修本轮融合构建。
+源码问题并非单纯 SDK 版本：修正 BF16/FP32 输出类型、UB→GM 三参 DataCopyPad，
+恢复 4–16 字节 max/sum 的非对齐搬入；不能用普通 DataCopy 消掉编译错误而漏搬统计量。
+归档并移除 standalone/arch35 三份遮蔽原版的副本；原版源/入口和 libm 修复保留。
+融合 entry 独立 device-only 头隔离，新增独立 probe 及 sfa_fusion_launch executable。
+
+新增 FP32 输出524288B、returnSoftmaxLse=0、compact128、8项给定冷态控制，包含输入变化、
+zero-query、冷热单侧/双空、极端有限 max 和逐query不同 presence；每轮输出NaN哨兵。
+本轮本地宿主/模型回归结果见 PHASE_B_2168_REVIEW.md 与 phase_b_host_validation.json。
+完整108项：107通过，1项显式致命信号测试跳过，失败与错误为0。
+未在本机调用CANN编译器或NPU，不能标注融合 BUILD_PASS、DEVICE_VALIDATED 或 MEASURED。
+内网从 PHASE_B_2168_REVIEW.md 直接构建/运行，随后继续真实C4对照、direct bridge及三臂性能。
+
