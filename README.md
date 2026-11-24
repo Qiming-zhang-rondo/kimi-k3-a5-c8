@@ -1,5 +1,8 @@
 # SFA cold-state merge: reviewed source contract
 
+**内网代理执行入口：[START_HERE.md](START_HERE.md)。**
+按其中的完整任务自主完成依赖、实现、构建和设备验证，将结果直接提交此分支。
+
 This branch contains an original packaged kernel snapshot, a corrected scalar
 merge contract helper, and integration notes. It is **not yet a buildable or
 callable fused attention operator**.

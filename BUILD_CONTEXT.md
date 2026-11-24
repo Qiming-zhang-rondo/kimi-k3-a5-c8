@@ -1,5 +1,12 @@
 # BUILD_CONTEXT.md — SFA Cold-State Merge: Build Chain and Dependencies
 
+> 执行入口已统一为 [START_HERE.md](START_HERE.md) 和
+> [完整执行任务](AUTONOMOUS_EXECUTION_TASK.md)。下面保留的是上传时的定位记录，
+> 不是已经验证成功的完整构建链。审查确认：所附 `sparse_flash_mla.cpp` 调用
+> `aclnnSparseFlashMla`，不是 Cloud 三输出 SFA 的绑定；dynamic Python 文件是编译适配器，
+> 没有提供 host tiling 算法；文中 `cold_merge_custom/` 工程未随该提交上传。
+> 后续由内网执行代理自主补齐、构建和实测，将命令、日志及源码直接提交此分支。
+
 ## 1. Source-to-deployment correspondence
 
 | Layer | Version | Location (in c4 container, 10.83.89.178) |
