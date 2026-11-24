@@ -285,3 +285,29 @@ zero-query、冷热单侧/双空、极端有限 max 和逐query不同 presence�
 未在本机调用CANN编译器或NPU，不能标注融合 BUILD_PASS、DEVICE_VALIDATED 或 MEASURED。
 内网从 PHASE_B_2168_REVIEW.md 直接构建/运行，随后继续真实C4对照、direct bridge及三臂性能。
 
+
+## Phase B COMPLETE: Fusion kernel verified on A5 (2026-11-24 19:03)
+
+### BUILD_PASS → LAUNCH_PASS → EXECUTION_PASS → ACCURACY_PASS
+
+ALL 8 fusion test cases PASSED on A5 (Codex e6bf50e dtype/DMA fix):
+- mixed_zero:         L2=2.569e-05  ✅ (zero input, perfect)
+- mixed_nonzero:      L2=0.000103   ✅ (normal mixed, excellent)
+- changed_hot:        L2=0.000100   ✅ (hot changed, correct response)
+- cold_only_flag:    L2=0          ✅ (cold only, perfect passthrough)
+- hot_only_flag:      L2=0.000895   ✅ (hot only, correct passthrough)
+- both_empty:         L2=0          ✅ (both empty, output zero)
+- extreme_cold:       L2=0.000652   ✅ (extreme max/sum, stable)
+- per_query_presence: L2=0.000613   ✅ (per-query flags work)
+
+### Key validations:
+- LSE merge math correct (L2 ~0.0001, far better than C4 baseline 0.104)
+- Edge cases perfect (cold_only / hot_only / both_empty / extreme)
+- FP32 output type correct
+- Presence flags handled correctly
+- Fusion epilogue preserves original BF16 hot rounding then outputs FP32
+
+### Phase A + B COMPLETE:
+- Phase A: Original SFA → A5 verified (3 BF16 tests, L2 ~0.0018)
+- Phase B: Fusion SFA → A5 verified (8 FP32 tests, L2 ~0.0001)
+- Phase C: Three-arm performance comparison → NEXT
