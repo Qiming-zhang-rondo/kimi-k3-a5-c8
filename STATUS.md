@@ -213,3 +213,23 @@ stats打开，新增非零输入/NaN哨兵/CPU独立参考、三组复用buffer�
 launcher故障控制流检查。测试不包含ASC lowering或NPU执行，不作为设备验收。
 
 
+
+## Phase A COMPLETE: Kernel verified on A5 (2026-11-24 17:38)
+
+### BUILD_PASS → LAUNCH_PASS → EXECUTION_PASS → ACCURACY_PASS
+
+Three BF16 test cases, ALL PASSED:
+- case=0: L2=0.00175467, max_abs=0.000957489 ✅
+- case=1: L2=0.0019051,  max_abs=0.00109103  ✅
+- case=2: L2=0.00175525, max_abs=0.000974655 ✅
+
+All rows, output, and raw max/sum passed CPU reference checks.
+L2 ~0.0018 = pure BF16 precision baseline (matches full_bf16 reference 0.00188).
+
+### Fix chain (root cause → resolution):
+1. Codex 1a34a76: host/device header isolation → MicroAPI resolved
+2. Codex 39d359e: explicit raw user-scratch ABI (442368 bytes) → 507015 resolved
+3. libm link fix: `exp` undefined → added `m` to link libraries
+4. Run command: `./build_smoke/sfa_launch --run --device 0`
+
+### Next: Phase B (fusion candidate) → Phase C (three-arm paired performance)
