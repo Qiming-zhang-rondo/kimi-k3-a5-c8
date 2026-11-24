@@ -55,7 +55,12 @@ using namespace AscendC;
 using namespace AscendC::Impl::Detail;
 using namespace regbaseutil;
 
+#if SFA_MERGE_BF16_IO
+namespace BaseApiBf16ColdIo {
+using namespace ::BaseApi;
+#else
 namespace BaseApi {
+#endif
 template <typename CubeBlockType, typename VecBlockType> class SparseFlashAttentionKernelMla {
 public:
     ARGS_TRAITS;

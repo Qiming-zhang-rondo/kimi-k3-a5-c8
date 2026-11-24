@@ -15,7 +15,7 @@ import traceback
 
 from pinned_payload import activate_payload
 
-VERSION = "sfa-direct-c4-bf16-ab-v1"
+VERSION = "sfa-direct-c4-bf16-ab-v2"
 ARMS = ("c4_w0", "installed_native_twopass", "direct_native_twopass", "direct_fused")
 DIRECT_ARMS = ("direct_native_twopass", "direct_fused")
 PAIRS = (("c4_w0", "installed_native_twopass"),
@@ -41,15 +41,24 @@ def make_direct_runner_class(bf16_runner_class):
         def __init__(self, backend, bridge, *, fused, writer="hot_store_partition"):
             super().__init__(backend, recipe="baseline", window=128, writer=writer)
             self.direct_fused = fused
+            # The pinned parent allocated this from an actual native cold read.
+            # Select the compiled IO specialization; never convert cold states.
+            self.expected_output_dtype = str(self.merge_output.dtype)
+            if self.expected_output_dtype not in ("torch.bfloat16", "torch.float32"):
+                raise ValueError("Native cold/final output must be BF16 or FP32")
+            bf16_io = fused and self.expected_output_dtype == "torch.bfloat16"
             self.direct_plan = bridge.prepare(self.base.q_nope, float(self.base.scale),
-                                              fused, not fused)
+                                              fused, not fused, bf16_io)
             self.direct_last_state = None
             self.metadata.update(
                 direct_bridge=True, direct_fused=fused,
                 native_c4_read_inside_every_pipeline=True,
                 native_c4_writer_unchanged=True,
                 cold_state_pointer_policy="runtime tensors passed every invocation",
-                direct_output_dtype="float32" if fused else "bfloat16",
+                direct_output_dtype=self.expected_output_dtype if fused else "torch.bfloat16",
+                expected_cold_output_dtype=self.expected_output_dtype,
+                expected_pipeline_output_dtype=self.expected_output_dtype,
+                compiled_fused_bf16_io=bf16_io, cold_state_cast_kernel_calls=0,
                 merge="native_hot_epilogue" if fused else "unchanged payload Triton",
                 production_validation="NOT_VALIDATED")
 
@@ -84,6 +93,59 @@ def strict_compare(actual, reference, services, limit):
     return result
 
 
+def require_same_dtype(actual, reference, label):
+    require(str(actual.dtype) == str(reference.dtype),
+            f"{label}: actual dtype {actual.dtype} != reference dtype {reference.dtype}")
+
+
+def state_diagnostics(state, host, bytes_host=None, arrays=None, prefix="state"):
+    """Record original dtypes and values before rejecting a state contract.
+
+    Numeric NPZ views are FP32 host copies; optional byte arrays preserve the
+    exact BF16/FP32 device representation. All copies are outside measurement.
+    """
+    import numpy as np
+    fields = {}
+    for field, tensor in zip(("out", "max", "sum"), state):
+        values = host(tensor)
+        finite_values = values[np.isfinite(values)]
+        fields[field] = dict(dtype=str(tensor.dtype), shape=list(tensor.shape),
+            stride=list(tensor.stride()), contiguous=bool(tensor.is_contiguous()),
+            nonfinite_count=int(values.size-finite_values.size),
+            min=float(finite_values.min()) if finite_values.size else None,
+            max=float(finite_values.max()) if finite_values.size else None)
+        if arrays is not None:
+            arrays[f"{prefix}_{field}"] = values
+            if bytes_host is not None:
+                arrays[f"{prefix}_{field}_raw_bytes"] = bytes_host(tensor)
+    return fields
+
+
+def validate_cold_state(state, expected_dtype):
+    require(str(state[0].dtype) in ("torch.bfloat16", "torch.float32"),
+            "Native C4 output must be BF16 or FP32; no implicit conversion")
+    require(str(state[0].dtype) == expected_dtype,
+            "Native C4 output dtype changed after bridge specialization selection")
+    require(all(str(t.dtype) == "torch.float32" for t in state[1:]),
+            "Native C4 maximum and sum must remain FP32")
+    require(all(t.is_contiguous() for t in state), "Native C4 states must already be contiguous")
+
+
+def evaluate_output_contract(prepared_tensor, pipeline, matching, bf16_math,
+                             args, backend, arrays, name, evaluate, round_reference, compare):
+    """Round only the host mathematical oracle, never the device cold tensor."""
+    rounded = round_reference(matching, prepared_tensor.dtype)
+    metrics, output = evaluate(lambda: prepared_tensor, pipeline, rounded, bf16_math, None,
+                               args, backend, arrays, name)
+    metrics.update(output_dtype=str(prepared_tensor.dtype),
+        matching_reference_contract="Mathematical output rounded once to this arm's actual destination dtype",
+        kernel_vs_unrounded_matching_reference=compare(output, matching),
+        pipeline_vs_unrounded_matching_reference=compare(arrays[name+"_write_read"], matching),
+        destination_rounding_vs_unrounded_matching_reference=compare(rounded, matching))
+    arrays[name+"_unrounded_matching_reference"] = matching
+    return metrics, output
+
+
 def graph_replay_control(call, buffers, torch, host, services):
     """Poison both bridge intermediates and final output before graph replay.
 
@@ -91,11 +153,13 @@ def graph_replay_control(call, buffers, torch, host, services):
     was captured. If the direct hot launch is absent, poisoned hot states survive
     (two-pass) or the poisoned final output survives (fused), failing this gate.
     """
-    reference = host(call()).copy()
+    eager_output = call()
+    reference = host(eager_output).copy()
     torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         output = call()
+    require_same_dtype(output, eager_output, "Graph/eager output contract")
     poisoned = []
     for tensor in (*buffers(), output):
         if tensor.numel() and tensor.is_floating_point():
@@ -136,7 +200,7 @@ def readonly_preflight(runner):
                 ring_slots=256, compact=True, real_empty_dispatch_validated=False)
 
 
-def reader_controls(runner, native_plan, services, arrays=None, label="direct"):
+def reader_controls(runner, native_plan, services, arrays=None, label="direct", progress=None):
     """Use real native C4 states and independent installed BF16 hot states."""
     import numpy as np
     base, host, torch = runner.base, runner.backend.host, runner.base.torch
@@ -154,22 +218,30 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct"):
                 view.raw_result_shapes = {}
         parts = runner.prepared
         left = runner._cold_read(parts, base=view)
-        require(str(left[0].dtype) == "torch.float32", "Native C4 output must be FP32; no implicit conversion")
-        require(all(t.is_contiguous() for t in left), "Native C4 states must already be contiguous")
+        prefix = "zero_query" if zero else "nonzero_query"
+        # Persist this before any dtype/shape gate so a new installed binding
+        # contract is diagnosable without rerunning or casting its output.
+        checks[prefix+"_cold_state"] = state_diagnostics(
+            left, host, base.bytes_host, arrays, f"{label}_{prefix}_cold")
+        if progress:
+            progress(checks)
+        validate_cold_state(left, runner.expected_output_dtype)
         installed = runner._hot_read(parts, base=view)
         direct = native_plan.native_hot(*hot_inputs(runner, parts, view))
-        prefix = "zero_query" if zero else "nonzero_query"
         if arrays is not None:
             for side, state in (("cold", left), ("installed_hot", installed), ("direct_hot", direct)):
                 for field, tensor in zip(("out", "max", "sum"), state):
                     arrays[f"{label}_{prefix}_{side}_{field}"] = host(tensor)
+        require_same_dtype(direct[0], installed[0], "Direct/installed native hot")
         checks[prefix+"_direct_hot_vs_installed"] = strict_compare(host(direct[0]), host(installed[0]), services, .001)
-        reference = host(runner._merge(left, installed, parts)).copy()
+        reference_tensor = runner._merge(left, installed, parts)
+        reference = host(reference_tensor).copy()
         if runner.direct_fused:
             actual = runner.direct_plan.fused_hot(*hot_inputs(runner, parts, view),
                 *left, parts["old_present"], parts["recent_present"])[0]
         else:
             actual = runner._merge(left, direct, parts)
+        require_same_dtype(actual, reference_tensor, "Fused or direct two-pass / installed merge")
         checks[prefix+"_same_native_states_merge"] = strict_compare(host(actual), reference, services, .001)
         if arrays is not None:
             arrays[f"{label}_{prefix}_actual"] = host(actual)
@@ -184,7 +256,7 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct"):
                 error = float(np.max(np.abs(actual_count-count))) if finite else None
                 checks["zero_query_"+label+"_counts"] = dict(passed=finite and error <= max(.02, count*1e-4),
                     expected_count=count, max_abs_count_error=error, finite=finite)
-    checks["passed"] = all(item["passed"] for item in checks.values())
+    checks["passed"] = all(item["passed"] for item in checks.values() if "passed" in item)
     return checks
 
 
@@ -213,7 +285,7 @@ def execute(args, report, persist):
     import numpy as np
     report["payload"] = activate_payload(args.payload_dir)
     from kv_native_twopass import NativeTwoPassBackend
-    from kv_bf16_hot_ab import Bf16HotRunner
+    from kv_bf16_hot_ab import Bf16HotRunner, merge_reference_for_dtype
     from kv_window_common import attention_reference, load_case, save_case, synthetic_case
     from test_kv_bf16_hot_ab_a5 import validate_fixed_case
     from test_kv_hot_fused_a5 import compare, acceptable, evaluate, paired_benchmark, identity
@@ -246,7 +318,8 @@ def execute(args, report, persist):
         report["controls"]["installed_"+label] = method()
         persist()
         require(report["controls"]["installed_"+label]["passed"], "Installed native control failed: "+label)
-    installed_output = backend.host(installed.run(write=True, dynamic=True)).copy()
+    installed_output_tensor = installed.run(write=True, dynamic=True)
+    installed_output = backend.host(installed_output_tensor).copy()
     arrays["installed_native_twopass"] = installed_output
     bf16_math = attention_reference(data)
     cold = runners["c4_w0"].decoded_kv()
@@ -263,20 +336,27 @@ def execute(args, report, persist):
             for label, method in (("partition", runner.partition_diagnostics), ("writer", runner.writer_diagnostics)):
                 checks[label] = method()
                 require(checks[label]["passed"], name+" "+label+" failed")
-            checks["reader"] = reader_controls(runner, native_plan, services, arrays, name)
+            def reader_progress(partial):
+                checks["reader"] = partial
+                np.savez_compressed(args.output/"outputs.npz", **arrays)
+                persist()
+            checks["reader"] = reader_controls(runner, native_plan, services, arrays, name, reader_progress)
             np.savez_compressed(args.output/"outputs.npz", **arrays)
             persist()
             require(checks["reader"]["passed"], name+" direct hot/native-state comparison failed")
-        metrics, output = evaluate(runner.call, calls[name], matching[name], bf16_math, None,
-                                  args, backend, arrays, name)
+        prepared_tensor = runner.call()
+        metrics, output = evaluate_output_contract(prepared_tensor, calls[name], matching[name], bf16_math,
+            args, backend, arrays, name, evaluate, merge_reference_for_dtype, compare)
         checks.update(metrics)
         np.savez_compressed(args.output/"outputs.npz", **arrays)
         persist()
         require(metrics["control_passed"], name+" matching mathematical reference failed")
         outputs[name] = output
         if name in DIRECT_ARMS:
+            pipeline_tensor = calls[name]()
+            require_same_dtype(pipeline_tensor, installed_output_tensor, "Full pipeline / installed native two-pass")
             checks["pipeline_vs_installed_native_twopass"] = strict_compare(
-                backend.host(calls[name]()), installed_output, services, .001)
+                backend.host(pipeline_tensor), installed_output, services, .001)
             require(checks["pipeline_vs_installed_native_twopass"]["passed"], name+" strict installed two-pass mismatch")
         passed[name] = True
         persist()

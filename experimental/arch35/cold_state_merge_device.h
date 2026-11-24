@@ -1,16 +1,29 @@
 // Experimental AscendC epilogue: NOT yet compiled or measured with the A5 SDK.
-// Contract: TND, N2=1, H=64, D=512, contiguous FP32 cold output/statistics.
+// Contract: TND, N2=1, H=64, D=512, contiguous FP32 cold statistics.
+// Default cold/output storage remains FP32. SFA_MERGE_BF16_IO=1 is a separate
+// compiled variant with BF16 cold storage and final BF16 output; math stays FP32.
 // hotOutput contains the FINAL normalized FP32 hot result; this epilogue preserves
 // the original native BF16 CAST_ROUND before merging, then leaves FP32 in UB.
 // A call covers head rows of ONE token: flatOffset/H == (flatOffset+rows-1)/H.
-// Caller validates shapes, bounds, disjoint storage and owns the final FP32 store.
+// Caller validates shapes, bounds, disjoint storage and owns the selected final store.
 // This bounded native-state implementation is not a generic arbitrary-sum merge:
 // present hot/cold sums must be approximately [1,128] / [1,2048], respectively.
 #ifndef SFA_EXPERIMENTAL_COLD_STATE_MERGE_DEVICE_H
 #define SFA_EXPERIMENTAL_COLD_STATE_MERGE_DEVICE_H
 
 #include "kernel_operator.h"
+#ifndef SFA_MERGE_BF16_IO
+#define SFA_MERGE_BF16_IO 0
+#endif
+#if SFA_MERGE_BF16_IO != 0 && SFA_MERGE_BF16_IO != 1
+#error "SFA_MERGE_BF16_IO must be 0 or 1"
+#endif
 namespace AscendC {
+#if SFA_MERGE_BF16_IO
+// The two IO variants coexist in one shared library. Give every differing
+// inline/helper symbol a distinct name rather than relying on weak coalescing.
+namespace Bf16ColdMerge {
+#endif
 
 #if defined(__DAV_C310_CUBE__)
 // The shared entry includes the vector-service template on both cores. AIC
@@ -28,6 +41,12 @@ __aicore__ void MergeColdStateDevice(
     int64_t rows, int64_t dim, int64_t ubStride, ColdMergeDeviceScratch &scratch);
 #else
 
+#if SFA_MERGE_BF16_IO
+using ColdOutputType = bfloat16_t;
+#else
+using ColdOutputType = float;
+#endif
+
 struct ColdMergeDeviceScratch {
     static constexpr uint32_t ROWS = 4;
     static constexpr uint32_t DIM = 512;
@@ -38,7 +57,7 @@ struct ColdMergeDeviceScratch {
 
     __aicore__ inline void Init(TPipe *pipe)
     {
-        pipe->InitBuffer(coldBuffer, ROWS * DIM * sizeof(float));
+        pipe->InitBuffer(coldBuffer, ROWS * DIM * sizeof(ColdOutputType));
         pipe->InitBuffer(statsBuffer, 64); // Two separately padded 32-byte rows.
         mte2ToVector = pipe->AllocEventID<HardEvent::MTE2_V>();
         vectorToMte2 = pipe->AllocEventID<HardEvent::V_MTE2>();
@@ -56,7 +75,7 @@ constexpr MicroAPI::CastTrait BF16_TO_FLOAT = {
 template <bool COLD_PRESENT, bool HOT_PRESENT>
 __simd_vf__ inline void MergeRowsVF(
     __ubuf__ float *hotOutput, __ubuf__ float *hotSum, __ubuf__ float *hotMax,
-    __ubuf__ float *coldOutput, __ubuf__ float *coldSum, __ubuf__ float *coldMax,
+    __ubuf__ ColdOutputType *coldOutput, __ubuf__ float *coldSum, __ubuf__ float *coldMax,
     const uint16_t rows, const uint16_t hotStride, const float nanValue)
 {
     using namespace MicroAPI;
@@ -66,6 +85,9 @@ __simd_vf__ inline void MergeRowsVF(
     RegTensor<float> hs, hm, cs, cm, common, hw, cw, denominator;
     RegTensor<float> hot, hotRaw, cold, result, coldTerm;
     RegTensor<bfloat16_t> hotBf16;
+#if SFA_MERGE_BF16_IO
+    RegTensor<bfloat16_t> coldBf16;
+#endif
     Duplicate(zero, 0.0F);
     Duplicate(one, 1.0F);
     Duplicate(nan, nanValue);
@@ -123,7 +145,16 @@ __simd_vf__ inline void MergeRowsVF(
                 Select(hot, hot, hotRaw, check);
             }
             if constexpr (COLD_PRESENT) {
+#if SFA_MERGE_BF16_IO
+                // Native dependency vf_flashupdate_new.h uses this exact B16
+                // unpack-load form. ZERO-layout casts consume its even lanes.
+                LoadAlign<uint16_t, LoadDist::DIST_UNPACK_B16>(
+                    (RegTensor<uint16_t> &)coldBf16,
+                    (__ubuf__ uint16_t *)(coldOutput + row * 512 + column));
+                Cast<float, bfloat16_t, BF16_TO_FLOAT>(cold, coldBf16, all);
+#else
                 LoadAlign(cold, coldOutput + row * 512 + column);
+#endif
             }
             if constexpr (COLD_PRESENT && HOT_PRESENT) {
                 Mul(result, hot, hw, all);
@@ -151,13 +182,14 @@ __aicore__ inline void MergeMode(
     const __gm__ uint8_t *coldSumAddress, int64_t flatOffset, int64_t rows,
     int64_t ubStride, ColdMergeDeviceScratch &scratch)
 {
-    GlobalTensor<float> coldOutputGm, coldMaxGm, coldSumGm;
+    GlobalTensor<ColdOutputType> coldOutputGm;
+    GlobalTensor<float> coldMaxGm, coldSumGm;
     if constexpr (COLD_PRESENT) {
-        coldOutputGm.SetGlobalBuffer((__gm__ float *)coldOutputAddress);
+        coldOutputGm.SetGlobalBuffer((__gm__ ColdOutputType *)coldOutputAddress);
         coldMaxGm.SetGlobalBuffer((__gm__ float *)coldMaxAddress);
         coldSumGm.SetGlobalBuffer((__gm__ float *)coldSumAddress);
     }
-    LocalTensor<float> cold = scratch.coldBuffer.Get<float>();
+    LocalTensor<ColdOutputType> cold = scratch.coldBuffer.Get<ColdOutputType>();
     LocalTensor<float> stats = scratch.statsBuffer.Get<float>();
     union { uint32_t bits; float value; } nanBits;
     nanBits.bits = 0x7FC00000U;
@@ -171,10 +203,11 @@ __aicore__ inline void MergeMode(
             WaitFlag<HardEvent::V_MTE2>(scratch.vectorToMte2);
             DataCopyExtParams copy = {};
             copy.blockCount = 1;
-            copy.blockLen = count * 512 * sizeof(float);
-            DataCopyPadExtParams<float> pad = {};
-            DataCopyPad(cold, coldOutputGm[(flatOffset + start) * 512], copy, pad);
+            copy.blockLen = count * 512 * sizeof(ColdOutputType);
+            DataCopyPadExtParams<ColdOutputType> coldPad = {};
+            DataCopyPad(cold, coldOutputGm[(flatOffset + start) * 512], copy, coldPad);
             copy.blockLen = count * sizeof(float);
+            DataCopyPadExtParams<float> pad = {};
             // count is only 1..4 (4..16 bytes). Plain DataCopy rounds down to
             // a 32-byte transfer, so it would silently copy no max/sum data.
             // Keep byte-length DataCopyPad for these bounded GM->UB tails.
@@ -197,7 +230,7 @@ __aicore__ inline void MergeMode(
         MergeRowsVF<COLD_PRESENT, HOT_PRESENT>(
             (__ubuf__ float *)hotOutput.GetPhyAddr() + start * ubStride,
             hotSumAddress, hotMaxAddress,
-            (__ubuf__ float *)cold.GetPhyAddr(),
+            (__ubuf__ ColdOutputType *)cold.GetPhyAddr(),
             (__ubuf__ float *)stats.GetPhyAddr() + 8,
             (__ubuf__ float *)stats.GetPhyAddr(), count, static_cast<uint16_t>(ubStride), nanBits.value);
     }
@@ -240,5 +273,8 @@ __aicore__ inline void MergeColdStateDevice(
     }
 }
 #endif // __DAV_C310_CUBE__: AIV implementation / AIC declarations only.
+#if SFA_MERGE_BF16_IO
+} // namespace Bf16ColdMerge
+#endif
 } // namespace AscendC
 #endif

@@ -390,3 +390,18 @@ DEVICE_SMOKE_VALIDATED；真实C4流水线/原生两遍对照仍为false，完�
 - Phase B: ✅ Fusion SFA compiled, launched, verified on A5 (8 FP32 tests)
 - Phase C: ⚠️ Framework built, dtype mismatch blocking proper paired comparison
 - All source code, build evidence, and results pushed to GitHub
+
+## d92f2f59 冷态dtype适配修复（新增BF16 IO，待现场重编）
+
+已核对原始evidence/results.json：设备库/Torch桥编译成功，已安装C4、分区、写环、
+零Q冷热质量与两遍数学参考均通过；尚无有效性能数据。
+冷attention输出和已安装两遍最终输出实际为BF16，前一版FP32-only约束是外部接线假设不符。
+
+新增独立BF16冷入/最终BF16变体：冷态在同一内核中展开到FP32寄存器参与合并，
+最终RNE（CAST_RINT）写BF16；保留热端原生舍入，max/sum继续FP32。
+FP32冷入/FP32输出旧变体保持，三份ASC入口/模板namespace隔离，direct ABI升为2。
+Torch/Python按实际dtype选择变体，不额外插入cold.float转换kernel，不放宽0.001门槛。
+数学参考按实际目标dtype舍入且单独保留未舍入误差，dtype gate前保存原始冷态/字节诊断。
+重编设备库后使用新Python进程和新输出目录，按PERF_REPAIR_5407.md继续；不要改CANN或重做已通过的SDK排查。
+本轮本地169项：168通过、1项桌面致命信号测试跳过。新增BF16变体未在本机SDK/A5执行，
+没有新增性能结论；详细范围与原始日志见direct_bridge/bf16_io_validation.json。

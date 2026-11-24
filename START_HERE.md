@@ -1,6 +1,9 @@
 # 单次完整执行入口
 
 **当前优先任务：[POST_COMPILE_EXECUTION_TASK.md](POST_COMPILE_EXECUTION_TASK.md)。**
+最新d92f2f59已通过原C4与已安装两遍控制，卡点为FP32-only冷态假设。
+本轮已补BF16冷入/最终BF16的原生融合变体与ABI2，按PERF_REPAIR_5407.md重编设备库，
+用新Python进程/新输出目录继续严格精度与性能；不要在计时路径外加.float()掩盖合同差异。
 **5407a8e 的305.84µs及历史比值已撤销性能验收资格。当前按
 [PERF_REPAIR_5407.md](PERF_REPAIR_5407.md) 构建真实current-stream桥，
 运行真实C4三臂的精度门禁，再做同轮完整流水线计时。旧PhaseC入口已封禁。**

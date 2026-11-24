@@ -120,7 +120,8 @@ endif()
 if(SFA_BUILD_TORCH_DIRECT)
     add_library(sfa_torch_direct SHARED
         sfa_direct_original_wrapper.asc
-        sfa_direct_fused_wrapper.asc)
+        sfa_direct_fused_wrapper.asc
+        sfa_direct_fused_bf16_wrapper.asc)
     configure_sfa(sfa_torch_direct)
     set_target_properties(sfa_torch_direct PROPERTIES POSITION_INDEPENDENT_CODE ON
         UNITY_BUILD OFF)

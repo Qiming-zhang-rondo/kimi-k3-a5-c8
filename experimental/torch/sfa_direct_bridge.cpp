@@ -40,8 +40,8 @@ uint8_t *Address(const at::Tensor &tensor)
 
 class Prepared {
 public:
-    Prepared(const at::Tensor &query, double scale, bool fused, bool returnStats)
-        : device_(query.device()), fused_(fused), returnStats_(returnStats)
+    Prepared(const at::Tensor &query, double scale, bool fused, bool returnStats, bool bf16Io = false)
+        : device_(query.device()), fused_(fused), returnStats_(returnStats), bf16Io_(bf16Io)
     {
         TORCH_CHECK(device_.type() == c10::DeviceType::PrivateUse1,
                     "An Ascend NPU query tensor is required");
@@ -51,10 +51,12 @@ public:
                     "Scale must remain finite and positive in FP32");
         TORCH_CHECK(!fused || !returnStats,
                     "The fused direct entry returns final output only; no combined stats ABI");
-        TORCH_CHECK(SfaDirectAbiVersion() == 1 && SfaDirectBuffersBytes() == sizeof(SfaDirectBuffers),
+        TORCH_CHECK(!bf16Io || fused,
+                    "bf16_io selects fused BF16 cold/output; native_hot already has its original BF16 contract");
+        TORCH_CHECK(SfaDirectAbiVersion() == 2 && SfaDirectBuffersBytes() == sizeof(SfaDirectBuffers),
                     "Compiled direct-library ABI does not match this bridge; rebuild the exact sources");
         c10_npu::NPUGuard guard(device_);
-        output_ = at::empty({4,64,512}, query.options().dtype(fused ? at::kFloat : at::kBFloat16));
+        output_ = at::empty({4,64,512}, query.options().dtype(fused && !bf16Io ? at::kFloat : at::kBFloat16));
         // Keep valid full-size pointers even when the entry is not returning stats.
         maximum_ = at::empty({4,64,1}, query.options().dtype(at::kFloat));
         sum_ = at::empty_like(maximum_);
@@ -101,8 +103,9 @@ public:
     {
         TORCH_CHECK(fused_, "This Prepared object is for native_hot");
         auto arguments = HotArguments(query,key,value,indices,table,queryLengths,kvLengths,queryRope,keyRope);
-        // Never hide an old BF16-output binding by converting the cold result.
-        CheckTensor(coldOutput,device_,{4,64,512},at::kFloat,"cold_output");
+        // Preserve the ACTUAL native cold-output contract. The selected ASC
+        // entry loads BF16 or FP32 directly; no timed Python/Torch cast occurs.
+        CheckTensor(coldOutput,device_,{4,64,512},bf16Io_ ? at::kBFloat16 : at::kFloat,"cold_output");
         CheckTensor(coldMax,device_,{4,64,1},at::kFloat,"cold_max");
         CheckTensor(coldSum,device_,{4,64,1},at::kFloat,"cold_sum");
         CheckTensor(coldPresent,device_,{4},at::kBool,"cold_present");
@@ -119,7 +122,11 @@ public:
         void *raw = stream.stream();
         Record(stream,{query,key,value,indices,table,queryLengths,kvLengths,queryRope,keyRope,
                        coldOutput,coldMax,coldSum,coldPresent,hotPresent});
-        SfaLaunchFused(raw, &arguments);
+        if (bf16Io_) {
+            SfaLaunchFusedBf16(raw, &arguments);
+        } else {
+            SfaLaunchFused(raw, &arguments);
+        }
         return Outputs();
     }
 
@@ -185,7 +192,7 @@ private:
     }
 
     c10::Device device_;
-    bool fused_, returnStats_;
+    bool fused_, returnStats_, bf16Io_;
     at::Tensor output_, maximum_, sum_, empty_, scratch_, tiling_;
 };
 } // namespace
@@ -196,9 +203,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module)
         .def("native_hot",&Prepared::NativeHot)
         .def("fused_hot",&Prepared::FusedHot)
         .def("outputs",&Prepared::Outputs);
-    module.def("prepare",[](const at::Tensor &query,double scale,bool fused,bool returnStats) {
+    module.def("prepare",[](const at::Tensor &query,double scale,bool fused,bool returnStats,bool bf16Io) {
         TORCH_CHECK(query.defined(), "Query must be defined");
-        return std::make_shared<Prepared>(query,scale,fused,returnStats);
+        return std::make_shared<Prepared>(query,scale,fused,returnStats,bf16Io);
     },pybind11::arg("query"),pybind11::arg("scale"),pybind11::arg("fused"),
-      pybind11::arg("return_stats")=false);
+      pybind11::arg("return_stats")=false,pybind11::arg("bf16_io")=false);
 }

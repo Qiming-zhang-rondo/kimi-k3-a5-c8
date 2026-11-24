@@ -1,0 +1,25 @@
+{
+  "reviewed_commit": "d92f2f59e9dcc9311777f9d7c5da3bdf537e7202",
+  "status": "HOST_CHECKS_PASS",
+  "validated_at_utc": "2026-11-24T12:10:36.523569+00:00",
+  "tests_run": 169,
+  "passed": 168,
+  "skipped": 1,
+  "failures": 0,
+  "errors": 0,
+  "direct_abi_version": 2,
+  "compiled_variants": [
+    "BF16 hot with FP32 cold/FP32 final",
+    "BF16 hot with BF16 cold/BF16 final"
+  ],
+  "cold_stats_dtype": "float32",
+  "python_cold_cast_added": false,
+  "native_equivalence_limit": 0.001,
+  "scope": "host API models of actual device header, C++ bridge and ASC entry; harness CPU tests; not SDK or A5 validation",
+  "cann_compiled_here": false,
+  "torch_npu_cpp_compiled_here": false,
+  "npu_executed_here": false,
+  "new_performance_measured": false,
+  "log": "bf16_io_validation.log",
+  "log_sha256": "ae363a5ad0c628b23dccf5441e584bee2f49f58dc65bf5fc49f808ffb89b5aa1"
+}

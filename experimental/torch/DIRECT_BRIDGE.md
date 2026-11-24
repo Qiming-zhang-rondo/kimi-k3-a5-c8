@@ -40,7 +40,12 @@ bridge = load_sfa_direct(
     verbose=True,
 )
 original = bridge.prepare(base.q_nope, base.scale, False, True)
-fused = bridge.prepare(base.q_nope, base.scale, True, False)
+# 只在 setup 探测真实 dtype，不把这个冷态结果复用于 timed pipeline。
+cold_template = runner._cold_read(runner.prepared)[0]
+if cold_template.dtype not in (base.torch.bfloat16, base.torch.float32):
+    raise ValueError("Unsupported actual native C4 output dtype")
+fused = bridge.prepare(base.q_nope, base.scale, True, False,
+                       bf16_io=cold_template.dtype == base.torch.bfloat16)
 ```
 
 加载只让 `torch.utils.cpp_extension.load` 编译 `sfa_direct_bridge.cpp`；不会重新编译 ASC、
@@ -51,8 +56,11 @@ JIT 目录内的 `sfa_direct_bridge_build.json` 保存库、bridge 源码哈希�
 
 `Prepared` 必须活到 eager 操作和 graph replay 全部结束。它持有预分配的输出、tiling、
 442368 字节 raw user scratch 和内部统计 buffer；prepare 完成后才能捕图/计时。
-原版输出 BF16，融合输出 FP32；融合不返回 combined stats。不要把原版 BF16 的
-262144 字节 output 分配借给需要 524288 字节 FP32 output 的融合入口。
+原版输出 BF16；融合按真实冷态选择 BF16输入/输出或 FP32输入/输出，stats始终FP32。
+`bf16_io=True` 仅用于融合，直接从 BF16 cold buffer 搬入，不增加 Python `.float()`/`.to()`
+或独立转换 kernel；最终 BF16 输出为262144字节。默认 `bf16_io=False` 保留原有FP32
+输入/输出实验合同，output为524288字节。融合不返回 combined stats。桥要求设备库ABI2，
+旧ABI1库即使尺寸仍为19指针也会拒绝；修改后须重建设备库并启动新的Python进程。
 
 运行方法接收本次 Tensor 对象，读取本次 `data_ptr()`。冷算子每次新分配输出时，不能
 把首次冷态指针固定在 prepare 中。桥使用 query 设备的 `NPUGuard` 和
@@ -84,7 +92,8 @@ JIT 目录内的 `sfa_direct_bridge_build.json` 保存库、bridge 源码哈希�
 | KV lengths | `runner.ring_lengths` | `[1]` int32，值256 |
 | query RoPE | `base.q_rope` | `[4,64,64]` BF16 |
 | key RoPE | `runner.hot_rope` | `[2,128,1,64]` BF16 |
-| cold state | 本次 `runner._cold_read(parts)` 的三项 | output `[4,64,512]`，max/sum `[4,64,1]`，全部 FP32 |
+| cold output | 本次 `runner._cold_read(parts)[0]` | `[4,64,512]`，保留实际 BF16/FP32，与所选融合入口一致 |
+| cold max/sum | 本次 `runner._cold_read(parts)[1:]` | `[4,64,1]`，始终 FP32 |
 | presence | `parts["old_present"]` / `parts["recent_present"]` | `[4]` bool |
 | scale | `base.scale`，prepare 时传入 | 使用真实值，不改为其他默认值 |
 
@@ -105,8 +114,11 @@ out, _, _ = fused.fused_hot(
 ```
 
 原生两遍对照用同九个热输入调用 `original.native_hot(...)`，得到 BF16 hot output 和
-`[4,64,1]` FP32 max/sum，再运行原来的 Triton merge。已安装 BF16 reader 的输出另作严格
-参考，确保重编原版正确。不要把合成冷态 smoke、仅热段调用或“组件耗时求和”当完整流水线。
+`[4,64,1]` FP32 max/sum，再运行原来的 Triton merge。最终保留真实冷态的输出dtype；
+设备证据 `d92f2f59` 的 C4 cold 与已安装两遍 merge 均为BF16，此前固定FP32断言已纠正。
+两侧先以FP32参与合并，最终一次BF16 RNE舍入；热端匹配原版BF16输出的舍入仍是独立步骤，
+不能把两次舍入混成一个，也不能把FP32未舍入输出直接拿来验收BF16目标的0.001门槛。
+独立参考必须按相同最终dtype舍入，严格门槛不变。
 
 `run(write=True,dynamic=True)` 仍必须每次执行真实冷写和 `hot_store_partition`，读取它的
 动态输出 buffers；prepared read 另行报告。图捕获后 poison 输出再 replay，检查新 ASC

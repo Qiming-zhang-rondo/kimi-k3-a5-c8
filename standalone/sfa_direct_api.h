@@ -43,6 +43,8 @@ extern "C" {
 // Launch is asynchronous; allocation lifetimes belong to the caller's stream.
 SFA_DIRECT_EXPORT void SfaLaunchOriginal(void *stream, const SfaDirectBuffers *buffers);
 SFA_DIRECT_EXPORT void SfaLaunchFused(void *stream, const SfaDirectBuffers *buffers);
+// BF16 cold output and BF16 final output; max/sum and internal arithmetic FP32.
+SFA_DIRECT_EXPORT void SfaLaunchFusedBf16(void *stream, const SfaDirectBuffers *buffers);
 SFA_DIRECT_EXPORT uint32_t SfaDirectAbiVersion(void);
 SFA_DIRECT_EXPORT uint32_t SfaDirectBuffersBytes(void);
 

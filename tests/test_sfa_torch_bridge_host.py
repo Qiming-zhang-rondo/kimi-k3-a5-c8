@@ -126,15 +126,15 @@ DRIVER = r'''
 #include <array>
 #include <set>
 namespace Probe {
-inline uint32_t abi=1,descriptorBytes=sizeof(SfaDirectBuffers);
-inline SfaDirectBuffers last{};inline bool lastFused=false;
+inline uint32_t abi=2,descriptorBytes=sizeof(SfaDirectBuffers);
+inline SfaDirectBuffers last{};inline bool lastFused=false,lastBf16=false;
 void Require(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
 void Begin(){flushed=false;records.clear();order.clear();}
-void Launched(void* stream,const SfaDirectBuffers* buffers,bool fused){
+void Launched(void* stream,const SfaDirectBuffers* buffers,bool fused,bool bf16=false){
  Require(stream==rawStream,"launch did not use current stream");
  Require(flushed&&!order.empty()&&order.front()=="flush","launch before stream drain");
  Require(order.back()=="record","missing allocator records before launch");
- last=*buffers;lastFused=fused;++launches;order.push_back("launch");
+ last=*buffers;lastFused=fused;lastBf16=bf16;++launches;order.push_back("launch");
  const std::array<uint8_t*,19> fields{{buffers->query,buffers->key,buffers->value,buffers->indices,
   buffers->blockTable,buffers->actualQuery,buffers->actualKv,buffers->queryRope,buffers->keyRope,
   buffers->output,buffers->maximum,buffers->sum,buffers->workspace,buffers->tiling,buffers->coldOutput,
@@ -148,6 +148,7 @@ extern "C" uint32_t SfaDirectAbiVersion(void){return Probe::abi;}
 extern "C" uint32_t SfaDirectBuffersBytes(void){return Probe::descriptorBytes;}
 extern "C" void SfaLaunchOriginal(void* stream,const SfaDirectBuffers* buffers){Probe::Launched(stream,buffers,false);}
 extern "C" void SfaLaunchFused(void* stream,const SfaDirectBuffers* buffers){Probe::Launched(stream,buffers,true);}
+extern "C" void SfaLaunchFusedBf16(void* stream,const SfaDirectBuffers* buffers){Probe::Launched(stream,buffers,true,true);}
 at::Tensor Make(std::initializer_list<int64_t> shape,at::ScalarType dtype){
  return at::empty(shape,at::TensorOptions().device(c10::Device(c10::DeviceType::PrivateUse1,3)).dtype(dtype));
 }
@@ -178,20 +179,31 @@ void CheckTiling(bool stats){
 }
 void Layout(){
  Inputs x;Prepared native(x.q,1./24.,false,true),fused(x.q,1./24.,true,false);
+ Prepared bf16(x.q,1./24.,true,false,true);
  auto n=native.Outputs(),f=fused.Outputs();
  Probe::Require(std::get<0>(n).bytes->size()==262144,"native output is not BF16-sized");
  Probe::Require(std::get<0>(f).bytes->size()==524288,"fused output is not FP32-sized");
+ Probe::Require(std::get<0>(bf16.Outputs()).bytes->size()==262144&&
+  std::get<0>(bf16.Outputs()).type==at::kBFloat16,"BF16 fused output allocation or dtype mismatch");
  Probe::Require(std::get<1>(n).shape==std::vector<int64_t>({4,64,1})&&
   std::get<2>(n).shape==std::vector<int64_t>({4,64,1}),"native stats shape");
  Probe::Require(std::get<1>(f).shape==std::vector<int64_t>({0})&&
   std::get<2>(f).shape==std::vector<int64_t>({0}),"fused stats must be empty");
  Probe::Begin();Native(native,x);CheckTiling(true);
  Probe::Begin();Fused(fused,x);CheckTiling(false);
+ Probe::Require(Probe::lastFused&&!Probe::lastBf16,"FP32 mode selected wrong entry");
+ Inputs xb;xb.co=Make({4,64,512},at::kBFloat16);
+ Probe::Begin();Fused(bf16,xb);CheckTiling(false);
+ Probe::Require(Probe::lastFused&&Probe::lastBf16,"BF16 mode did not select BF16 kernel entry");
+ Probe::Require(std::get<1>(bf16.Outputs()).shape==std::vector<int64_t>({0})&&
+  std::get<2>(bf16.Outputs()).shape==std::vector<int64_t>({0}),"BF16 fused stats must be empty");
  Prepared noStats(x.q,1./24.,false,false);Probe::Begin();Native(noStats,x);CheckTiling(false);
  Probe::Require(std::get<1>(noStats.Outputs()).shape==std::vector<int64_t>({0}),"native no-stats result");
 }
-void Dynamic(){
- Inputs first,second;Prepared plan(first.q,1./24.,true,false);
+void Dynamic(bool bf16=false){
+ Inputs first,second;
+ if(bf16){first.co=Make({4,64,512},at::kBFloat16);second.co=Make({4,64,512},at::kBFloat16);}
+ Prepared plan(first.q,1./24.,true,false,bf16);
  const int allocations=Probe::emptyCalls,copies=Probe::toCalls;
  Probe::Begin();Fused(plan,first);const auto saved=Probe::last;
  Probe::rawStream=reinterpret_cast<void*>(uintptr_t{456});Probe::Begin();Fused(plan,second);
@@ -201,6 +213,7 @@ void Dynamic(){
  Probe::Require(Probe::last.coldOutput!=saved.coldOutput&&Probe::last.output==saved.output&&
   Probe::last.workspace==saved.workspace&&Probe::last.tiling==saved.tiling,"prepared/dynamic ownership mismatch");
  Probe::Require(Probe::emptyCalls==allocations&&Probe::toCalls==copies,"allocation or H2D copy in run path");
+ Probe::Require(Probe::lastBf16==bf16,"dynamic call selected wrong cold/output dtype entry");
 }
 void Invalid(){
  Inputs good;Prepared native(good.q,1./24.,false,true),fused(good.q,1./24.,true,false);
@@ -211,10 +224,12 @@ void Invalid(){
   Reject([&]{Prepared bad(x.q,1./24.,false,true);});
  }
  Reject([&]{Prepared bad(good.q,1./24.,true,true);});
+ Reject([&]{Prepared bad(good.q,1./24.,true,true,true);});
+ Reject([&]{Prepared bad(good.q,1./24.,false,false,true);});
  for(double scale:{0.,-1.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN(),
                     std::numeric_limits<double>::max(),std::numeric_limits<double>::denorm_min()})
   Reject([&]{Prepared bad(good.q,scale,false,true);});
- Probe::abi=2;Reject([&]{Prepared bad(good.q,1./24.,false,true);});Probe::abi=1;
+ Probe::abi=1;Reject([&]{Prepared bad(good.q,1./24.,false,true);});Probe::abi=2;
  Probe::descriptorBytes=1;Reject([&]{Prepared bad(good.q,1./24.,false,true);});Probe::descriptorBytes=sizeof(SfaDirectBuffers);
  for(int kind=0;kind<12;++kind){Inputs x;switch(kind){
   case 0:x.q.type=at::kFloat;break;case 1:x.idx.shape={4,1,2048};break;
@@ -227,11 +242,19 @@ void Invalid(){
   Reject([&]{Fused(fused,x);});
  }
  Reject([&]{Native(fused,good);});Reject([&]{Fused(native,good);});
+ Prepared bf16(good.q,1./24.,true,false,true);
+ Reject([&]{Fused(bf16,good);}); // FP32 cold cannot silently enter BF16 mode.
+ Inputs xb;xb.co=Make({4,64,512},at::kBFloat16);
+ Reject([&]{Fused(fused,xb);}); // Nor can BF16 enter the legacy FP32 mode.
+ xb.co=std::get<0>(bf16.Outputs());Reject([&]{Fused(bf16,xb);});
+ xb.co=Make({4,64,512},at::kBFloat16);xb.cm.type=at::kBFloat16;
+ Reject([&]{Fused(bf16,xb);}); // Statistics remain FP32 in both modes.
  Probe::Require(Probe::launches==0,"rejected matrix must never launch");
 }
 int main(int argc,char** argv){try{
  Probe::Require(argc==2,"choose host test case");const std::string mode=argv[1];
- if(mode=="layout")Layout();else if(mode=="dynamic")Dynamic();else if(mode=="reject")Invalid();else return 2;
+ if(mode=="layout")Layout();else if(mode=="dynamic")Dynamic();else if(mode=="dynamic_bf16")Dynamic(true);
+ else if(mode=="reject")Invalid();else return 2;
  std::cout<<"HOST_REAL_BRIDGE_"<<mode<<"_PASS\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what();return 1;}}
 '''
@@ -273,6 +296,9 @@ class RealTorchBridgeHostTests(unittest.TestCase):
 
     def test_current_step_pointers_stream_drain_and_allocator_records(self):
         self.run_case("dynamic")
+
+    def test_bf16_variant_uses_current_cold_pointers_without_cast_or_allocation(self):
+        self.run_case("dynamic_bf16")
 
     def test_metadata_tensor_alias_and_abi_errors_reject_before_launch(self):
         self.run_case("reject")

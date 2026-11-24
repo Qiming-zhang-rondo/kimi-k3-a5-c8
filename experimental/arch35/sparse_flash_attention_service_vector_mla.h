@@ -68,7 +68,12 @@ using namespace AscendC::Impl::Detail;
 using namespace regbaseutil;
 using namespace matmul;
 
+#if SFA_MERGE_BF16_IO
+namespace BaseApiBf16ColdIo {
+using namespace ::BaseApi;
+#else
 namespace BaseApi {
+#endif
 
 TEMPLATES_DEF
 class SFAVectorService {
@@ -176,7 +181,11 @@ private:
     const __gm__ uint8_t *coldSumGm = nullptr;
     const __gm__ uint8_t *coldPresentGm = nullptr;
     const __gm__ uint8_t *hotPresentGm = nullptr;
+#if SFA_MERGE_BF16_IO
+    AscendC::Bf16ColdMerge::ColdMergeDeviceScratch coldMergeScratch;
+#else
     AscendC::ColdMergeDeviceScratch coldMergeScratch;
+#endif
     GlobalTensor<OUTPUT_T> attentionOutGm;
     GlobalTensor<KV_T> keyGm;
     GlobalTensor<KV_T> keyRopeGm;
@@ -768,7 +777,11 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>:
         // hot FP32->BF16->FP32 to match the standalone native BF16 reader.
         LocalTensor<float> sumUb = this->softmaxSumBuf[runInfo.multiCoreIdxMod2].template Get<float>();
         static_assert(FaVectorApi::REDUCE_SIZE == 1, "Hot max/sum must be contiguous per flattened row");
+#if SFA_MERGE_BF16_IO
+        AscendC::Bf16ColdMerge::MergeColdStateDevice(vec2ResUb, sumUb, maxUb,
+#else
         AscendC::MergeColdStateDevice(vec2ResUb, sumUb, maxUb,
+#endif
             coldOutputGm, coldMaxGm, coldSumGm, coldPresentGm, hotPresentGm,
             runInfo.attentionOutOffset / constInfo.dSizeV, constInfo.gSize,
             runInfo.vec2MRealSize, constInfo.dSizeV, dTemplateAlign64, coldMergeScratch);
@@ -782,6 +795,26 @@ template <typename VEC2_RES_T>
 __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>::Bmm2DataCopyOut (RunInfo &runInfo, ConstInfo &constInfo,
     LocalTensor<VEC2_RES_T> &vec2ResUb, int64_t vec2S1Idx, int64_t vec2CalcSize)
 {
+#if SFA_MERGE_BF16_IO
+    static_assert(IsSameType<VEC2_RES_T, float>::value && IsSameType<OUTPUT_T, bfloat16_t>::value,
+        "BF16 IO variant must merge in FP32 and store BF16");
+    LocalTensor<OUTPUT_T> attenOut;
+    int64_t dSizeAligned64 = (int64_t)dTemplateAlign64;
+    // Same legal in-place narrowing/layout as the native BF16 reader. Final
+    // merge rounding is RNE (CAST_RINT), matching Triton/PyTorch BF16 output;
+    // the earlier native-hot CAST_ROUND remains a separate contract.
+    attenOut.SetAddr(vec2ResUb.address_);
+    Cast(attenOut, vec2ResUb, RoundMode::CAST_RINT, vec2CalcSize);
+    SetFlag<HardEvent::V_MTE3>(vToMte3AttnOutId);
+    WaitFlag<HardEvent::V_MTE3>(vToMte3AttnOutId);
+
+    DataCopyExtParams dataCopyParams = {};
+    dataCopyParams.blockLen = constInfo.dSizeV * sizeof(OUTPUT_T);
+    dataCopyParams.srcStride = (dSizeAligned64 - constInfo.dSizeV) * sizeof(OUTPUT_T) / 32;
+    dataCopyParams.dstStride = constInfo.attentionOutStride;
+    dataCopyParams.blockCount = runInfo.vec2MRealSize;
+    DataCopyPad(this->attentionOutGm[runInfo.attentionOutOffset], attenOut, dataCopyParams);
+#else
     static_assert(IsSameType<VEC2_RES_T, float>::value && IsSameType<OUTPUT_T, float>::value,
         "Cold merge must preserve FP32 cold output through the final store");
     int64_t dSizeAligned64 = (int64_t)dTemplateAlign64;
@@ -799,6 +832,7 @@ __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>::Bmm2DataCopyOut (RunInfo
     // UB->GM uses the three-argument overload. Padding options belong only to
     // the opposite GM->UB direction; OUTPUT_T and VEC2_RES_T are FP32 above.
     DataCopyPad(this->attentionOutGm[runInfo.attentionOutOffset], vec2ResUb, dataCopyParams);
+#endif
 }
 
 TEMPLATES_DEF_NO_DEFAULT

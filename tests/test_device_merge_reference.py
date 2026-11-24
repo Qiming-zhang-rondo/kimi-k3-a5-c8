@@ -84,7 +84,7 @@ inline float fromBf(uint16_t b) {uint32_t u=uint32_t(b)<<16;float f;std::memcpy(
 namespace MicroAPI {
 enum class RegLayout {ZERO}; enum class SatMode {SAT,UNKNOWN};
 enum class MaskMergeMode {ZEROING}; enum class MaskPattern {ALL};
-enum class LoadDist {DIST_NORM,DIST_BRC_B32}; enum class StoreDist {DIST_NORM_B32};
+enum class LoadDist {DIST_NORM,DIST_BRC_B32,DIST_UNPACK_B16}; enum class StoreDist {DIST_NORM_B32};
 struct CastTrait {RegLayout layout;SatMode sat;MaskMergeMode mask;RoundMode round;};
 template<class T> struct RegTensor {std::array<T,128> x{};};
 struct MaskReg {std::array<bool,64> x{};};
@@ -93,7 +93,10 @@ template<MemType,MemType> void LocalMemBar() {}
 template<class T> void Duplicate(RegTensor<T>& v,T a) {v.x.fill(a);}
 template<class T,LoadDist L=LoadDist::DIST_NORM> void LoadAlign(RegTensor<T>& v,T* p) {
  if(!p) throw std::runtime_error("absent VF load");
- for(int i=0;i<64;++i) v.x[i]=p[L==LoadDist::DIST_BRC_B32?0:i];
+ for(int i=0;i<64;++i) {
+  if constexpr(L==LoadDist::DIST_UNPACK_B16) v.x[2*i]=p[i];
+  else v.x[i]=p[L==LoadDist::DIST_BRC_B32?0:i];
+ }
 }
 template<class T,StoreDist> void StoreAlign(T* p,RegTensor<T>& v,MaskReg& m) {
  for(int i=0;i<64;++i) if(m.x[i]) p[i]=v.x[i];
@@ -128,6 +131,9 @@ DRIVER = r'''
 #include <cstdlib>
 #include "cold_state_merge_device.h"
 using namespace AscendC;
+#if SFA_MERGE_BF16_IO
+using namespace AscendC::Bf16ColdMerge;
+#endif
 void read(std::vector<float>& v) {std::cin.read(reinterpret_cast<char*>(v.data()),v.size()*4);}
 int main(int argc,char** argv) {
  try {
@@ -136,8 +142,15 @@ int main(int argc,char** argv) {
   std::vector<float> hot(rows*stride),hs(rows),hm(rows),cin(rows*512),csin(rows),cmin(rows);
   read(hot);read(hs);read(hm);read(cin);read(csin);read(cmin);
   if(!std::cin) throw std::runtime_error("input");
-  std::vector<float> cold((offset+rows)*512,-12345),cs(offset+rows,-1),cm(offset+rows,-1);
+  std::vector<ColdOutputType> cold((offset+rows)*512);
+  std::vector<float> cs(offset+rows,-1),cm(offset+rows,-1);
+#if SFA_MERGE_BF16_IO
+  for(auto& element:cold) element.bits=toBf(-12345.);
+  for(size_t i=0;i<cin.size();++i) cold[offset*512+i].bits=toBf(cin[i]);
+#else
+  std::fill(cold.begin(),cold.end(),-12345.);
   std::copy(cin.begin(),cin.end(),cold.begin()+offset*512);
+#endif
   std::copy(csin.begin(),csin.end(),cs.begin()+offset);std::copy(cmin.begin(),cmin.end(),cm.begin()+offset);
   std::vector<uint8_t> cps(offset/64+1,0),hps(offset/64+1,0);cps.back()=cp;hps.back()=hp;
   TPipe pipe;ColdMergeDeviceScratch scratch;scratch.Init(&pipe);
@@ -166,6 +179,8 @@ def bf16(x):
 
 
 class DeviceMergeReferenceTest(unittest.TestCase):
+    bf16_io = False
+
     @classmethod
     def setUpClass(cls):
         compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
@@ -177,7 +192,8 @@ class DeviceMergeReferenceTest(unittest.TestCase):
         (root / "kernel_operator.h").write_text(STUB)
         (root / "driver.cpp").write_text(DRIVER)
         cls.exe = root / "driver"
-        subprocess.run([compiler, "-std=c++17", "-O0", "-ffp-contract=off", "-I", str(root),
+        subprocess.run([compiler, "-std=c++17", "-O0", "-ffp-contract=off",
+                        "-DSFA_MERGE_BF16_IO=" + str(int(cls.bf16_io)), "-I", str(root),
                         "-I", str(HEADER.parent), str(root / "driver.cpp"), "-o", str(cls.exe)],
                        check=True, capture_output=True, text=True)
 
@@ -204,7 +220,7 @@ class DeviceMergeReferenceTest(unittest.TestCase):
         dma, reads, allocated = struct.unpack("3i", proc.stdout[-12:])
         self.assertEqual(dma, 3*((c["rows"]+3)//4) if c["cp"] else 0)
         self.assertEqual(reads, 2)
-        self.assertEqual(allocated, 4*512*4+64)
+        self.assertEqual(allocated, 4*512*(2 if self.bf16_io else 4)+64)
         return output
 
     def reference(self, c, row, col):
@@ -216,6 +232,8 @@ class DeviceMergeReferenceTest(unittest.TestCase):
             if present and (not math.isfinite(m) or not math.isfinite(s) or not .9999 <= s <= upper):
                 return math.nan
         cold = c["cold"][row*512+col] if cp else 0.
+        if self.bf16_io and cp:
+            cold = bf16(cold)
         hot = bf16(c["hot"][row*c["stride"]+col]) if hp else 0.
         if not hp:
             return cold
@@ -326,6 +344,56 @@ template<class T> struct UninstantiatedVectorService {
         cube=HEADER.read_text().split("#if defined(__DAV_C310_CUBE__)",1)[1].split("#else",1)[0]
         self.assertNotIn("MicroAPI::",cube)
         self.assertNotIn("return;",cube)
+
+
+class DeviceMergeBf16ReferenceTest(DeviceMergeReferenceTest):
+    """Execute the distinct BF16-input header variant with typed 2-byte DMA."""
+    bf16_io = True
+
+    def test_final_bf16_rne_halfway_contract_and_actual_fp32_merge(self):
+        c = self.case(rows=1, offset=63, stride=512)
+        c["hs"] = [1.]
+        c["cs"] = [1.]
+        c["hm"] = [0.]
+        c["cm"] = [0.]
+        c["hot"][:4] = [1., 1.0078125, -1., -1.0078125]
+        c["cold"][:4] = [1.0078125, 1.015625, -1.0078125, -1.015625]
+        merged = self.assert_matches(c)
+        self.assertEqual(merged[:4], [1.00390625, 1.01171875, -1.00390625, -1.01171875])
+        # Final store is part of the vector service. This CPU oracle does not
+        # claim that the SDK lowered CAST_RINT or in-place narrowing correctly.
+        self.assertEqual([bf16(x) for x in merged[:4]], [1., 1.015625, -1., -1.015625])
+        service = HEADER.with_name("sparse_flash_attention_service_vector_mla.h").read_text()
+        store = service.split("::Bmm2DataCopyOut", 1)[1].split("::CopyOutAttentionOut", 1)[0]
+        bf16_store, fp32_store = store.split("#if SFA_MERGE_BF16_IO", 1)[1].split("#else", 1)
+        self.assertIn("Cast(attenOut, vec2ResUb, RoundMode::CAST_RINT, vec2CalcSize)", bf16_store)
+        self.assertIn("attenOut.SetAddr(vec2ResUb.address_)", bf16_store)
+        self.assertIn("DataCopyPad(this->attentionOutGm[runInfo.attentionOutOffset], attenOut, dataCopyParams)", bf16_store)
+        self.assertNotIn("Cast(", fp32_store)
+
+    def test_bf16_helper_and_vector_have_distinct_symbol_namespaces(self):
+        helper = HEADER.read_text()
+        self.assertIn("namespace Bf16ColdMerge", helper)
+        self.assertIn("LoadAlign<uint16_t, LoadDist::DIST_UNPACK_B16>", helper)
+        self.assertIn("using ColdOutputType = bfloat16_t", helper)
+        service = HEADER.with_name("sparse_flash_attention_service_vector_mla.h").read_text()
+        self.assertIn("namespace BaseApiBf16ColdIo", service)
+        self.assertIn("AscendC::Bf16ColdMerge::MergeColdStateDevice", service)
+        with tempfile.TemporaryDirectory(prefix="sfa-bf16-cube-parse-") as tmp:
+            root = Path(tmp)
+            (root / "kernel_operator.h").write_text('''#pragma once
+#include <cstdint>
+#define __aicore__
+#define __gm__
+namespace AscendC { struct TPipe; template<class T> struct LocalTensor; }
+''')
+            (root / "cube.cpp").write_text('''#include "cold_state_merge_device.h"
+using Signature=decltype(&AscendC::Bf16ColdMerge::MergeColdStateDevice);
+static_assert(sizeof(AscendC::Bf16ColdMerge::ColdMergeDeviceScratch)>0,"complete AIC declaration");
+''')
+            subprocess.run([self.compiler, "-std=c++17", "-D__DAV_C310_CUBE__", "-DSFA_MERGE_BF16_IO=1",
+                            "-fsyntax-only", "-I", str(root), "-I", str(HEADER.parent), str(root / "cube.cpp")],
+                           check=True, capture_output=True, text=True)
 
 
 if __name__ == "__main__":

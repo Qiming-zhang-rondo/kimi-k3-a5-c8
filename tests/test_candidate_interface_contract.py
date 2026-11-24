@@ -45,8 +45,9 @@ class CandidateInterfaceTests(unittest.TestCase):
         self.assertLess(process.index("ZeroInvalidAttnOut("), process.index("MergeColdStateDevice("))
         self.assertLess(process.index("MergeColdStateDevice("), process.index("CopyOutAttentionOut("))
         store = vector.split("::Bmm2DataCopyOut", 1)[1].split("::CopyOutAttentionOut", 1)[0]
-        self.assertNotRegex(store, r"\bCast\s*\(")
-        self.assertIn("IsSameType<OUTPUT_T, float>::value", store)
+        default_store = store.split("#else", 1)[1].split("#endif", 1)[0]
+        self.assertNotRegex(default_store, r"\bCast\s*\(")
+        self.assertIn("IsSameType<OUTPUT_T, float>::value", default_store)
         entry = (EXP / "sparse_flash_attention_cold_merge.cpp").read_text()
         self.assertIn("bfloat16_t, bfloat16_t, float, float,", entry)
 

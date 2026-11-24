@@ -42,6 +42,7 @@ class ParentRunner:
         self.hot_cache, self.hot_rope = "ring", "rope"
         self.ring_table, self.ring_lengths = "table", "kvlength"
         self.metadata, self.events, self.n = {}, [], 0
+        self.merge_output = types.SimpleNamespace(dtype=backend or "torch.float32")
 
     def _cold_read(self, parts):
         self.events.append("cold_read")
@@ -60,8 +61,9 @@ class ParentRunner:
 
 
 class FakeTensor:
-    def __init__(self, value):
+    def __init__(self, value, dtype="torch.float32"):
         self.value, self.shape = value, (1,)
+        self.dtype = dtype
 
     def numel(self):
         return 1
@@ -71,6 +73,12 @@ class FakeTensor:
 
     def fill_(self, value):
         self.value = value
+
+    def is_contiguous(self):
+        return True
+
+    def stride(self):
+        return (1,)
 
 
 class CopyScalar(float):
@@ -94,7 +102,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_fused_uses_every_new_cold_state_and_runtime_partition(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)(None, bridge, fused=True)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False)))
+        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, False)))
         self.assertEqual(runner.run(write=True), "fused_fp32")
         self.assertEqual(runner.run(write=True), "fused_fp32")
         calls = [args for kind,args in bridge.calls if kind == "fused"]
@@ -107,10 +115,76 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_twopass_keeps_original_merge_and_requests_native_statistics(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)(None, bridge, fused=False)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, False, True)))
+        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, False, True, False)))
         self.assertEqual(runner.run(write=True), "triton_merged")
         self.assertEqual(runner.events[-1], ("merge", ("cold_out_1", "cold_max_1", "cold_sum_1"),
                                             ("direct_bf16", "hot_max", "hot_sum")))
+
+    def test_native_bf16_cold_selects_bf16_io_without_python_conversion(self):
+        bridge = Bridge()
+        runner = harness.make_direct_runner_class(ParentRunner)("torch.bfloat16", bridge, fused=True)
+        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, True)))
+        self.assertEqual(runner.metadata["expected_pipeline_output_dtype"], "torch.bfloat16")
+        self.assertEqual(runner.metadata["cold_state_cast_kernel_calls"], 0)
+        runner.run(write=True)
+        self.assertEqual(bridge.calls[-1][1][9], "cold_out_1")
+        native_bridge = Bridge()
+        harness.make_direct_runner_class(ParentRunner)("torch.bfloat16", native_bridge, fused=False)
+        self.assertFalse(native_bridge.calls[0][1][-1], "Native BF16 hot reader uses its original specialization")
+
+    def test_dtype_validation_preserves_cold_but_never_narrows_stats(self):
+        for dtype in ("torch.bfloat16", "torch.float32"):
+            state = (FakeTensor(1., dtype), FakeTensor(2.), FakeTensor(3.))
+            harness.validate_cold_state(state, dtype)
+            wrong_stats = (state[0], FakeTensor(2., "torch.bfloat16"), state[2])
+            with self.assertRaisesRegex(harness.ControlFailed, "maximum and sum must remain FP32"):
+                harness.validate_cold_state(wrong_stats, dtype)
+        with self.assertRaisesRegex(harness.ControlFailed, "dtype changed"):
+            harness.validate_cold_state((FakeTensor(1.), FakeTensor(2.), FakeTensor(3.)), "torch.bfloat16")
+        with self.assertRaisesRegex(harness.ControlFailed, "actual dtype"):
+            harness.require_same_dtype(FakeTensor(1.), FakeTensor(1., "torch.bfloat16"), "strict output")
+
+    def test_raw_state_recording_retains_dtype_bytes_before_rejection(self):
+        import numpy as np
+        state = (FakeTensor(1., "torch.bfloat16"), FakeTensor(float("nan")), FakeTensor(0.))
+        arrays = {}
+        description = harness.state_diagnostics(state, lambda t: np.asarray([t.value], np.float32),
+            lambda t: np.asarray([0x80, 0x3f] if t.dtype == "torch.bfloat16" else [0,0,0,0], np.uint8), arrays, "cold")
+        self.assertEqual(description["out"]["dtype"], "torch.bfloat16")
+        self.assertEqual(description["max"]["nonfinite_count"], 1)
+        self.assertIsNone(description["max"]["min"])
+        self.assertEqual(arrays["cold_out_raw_bytes"].tolist(), [0x80, 0x3f])
+        with self.assertRaises(harness.ControlFailed):
+            harness.validate_cold_state(state, "torch.float32")
+        self.assertIn("cold_sum", arrays)
+
+    def test_destination_rounding_does_not_hide_unrounded_error_or_change_baseline(self):
+        import numpy as np
+        reference = np.asarray([1.003], np.float64)
+        bf16_baseline = np.asarray([1.2], np.float64)
+        output = FakeTensor(1., "torch.bfloat16")
+        arrays = {}
+        def compare(actual, expected):
+            return dict(relative_l2=float(np.linalg.norm(np.asarray(actual)-expected)/np.linalg.norm(expected)))
+        def round_reference(values, dtype):
+            self.assertEqual(dtype, "torch.bfloat16")
+            # These fixture values are below the midpoint between 1 and
+            # 1+1/128, so BF16 round-to-nearest gives exactly 1.
+            np.testing.assert_array_equal(values, reference)
+            return np.asarray([1.], np.float32)
+        def evaluate(call, pipeline, matching, full_bf16, _, args, backend, records, name):
+            self.assertIs(call(), output)
+            self.assertIs(full_bf16, bf16_baseline, "Quantization-error baseline must remain unrounded")
+            values = np.asarray([pipeline().value])
+            records[name+"_write_read"] = values
+            return dict(kernel_vs_matching_reference=compare(values, matching),
+                        vs_bf16_math=compare(values, full_bf16)), values
+        metrics, _ = harness.evaluate_output_contract(output, lambda: output, reference, bf16_baseline,
+            None, None, arrays, "bf16", evaluate, round_reference, compare)
+        self.assertEqual(metrics["kernel_vs_matching_reference"]["relative_l2"], 0.)
+        self.assertGreater(metrics["kernel_vs_unrounded_matching_reference"]["relative_l2"], .001)
+        self.assertGreater(metrics["destination_rounding_vs_unrounded_matching_reference"]["relative_l2"], .001)
+        self.assertAlmostEqual(metrics["vs_bf16_math"]["relative_l2"], 1/6)
 
     def test_no_timing_after_failed_controls_and_five_required_pairs_when_valid(self):
         calls = {name: object() for name in harness.ARMS}

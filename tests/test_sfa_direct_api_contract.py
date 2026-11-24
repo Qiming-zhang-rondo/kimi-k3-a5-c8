@@ -64,6 +64,7 @@ class DirectApiContractTests(unittest.TestCase):
             for wrapper, entry, count, fused in (
                 ("sfa_direct_original_wrapper.asc", "sfa_standalone_entry.asc", 14, False),
                 ("sfa_direct_fused_wrapper.asc", "sfa_fusion_entry.asc", 19, True),
+                ("sfa_direct_fused_bf16_wrapper.asc", "sfa_fusion_bf16_entry.asc", 19, True),
             ):
                 source = (STANDALONE / wrapper).read_text()
                 transformed, replacements = re.subn(
@@ -72,7 +73,8 @@ class DirectApiContractTests(unittest.TestCase):
                 self.assertEqual(replacements, 1, "must replace exactly the known ASC launch")
                 self.assertNotIn("<<<", transformed)
                 (directory / (wrapper + ".cpp")).write_text(transformed)
-                symbol = "sfa_cold_merge_probe" if fused else "sfa_arch35_bf16_user_scratch_probe"
+                symbol = ("sfa_cold_merge_bf16_probe" if "bf16" in wrapper else
+                          "sfa_cold_merge_probe" if fused else "sfa_arch35_bf16_user_scratch_probe")
                 args = ",".join("uint8_t* p" + str(i) for i in range(count))
                 forwarding = ",".join("p" + str(i) for i in range(count))
                 (directory / entry).write_text(
@@ -105,10 +107,11 @@ int main() {
   SfaDirectBuffers buffers{};
   for(unsigned i=0;i<19;++i) Probe::expected[i]=sentinel.data()+i;
   SETTERS
-  if(SfaDirectAbiVersion()!=1 || SfaDirectBuffersBytes()!=sizeof(buffers)) return 2;
+  if(SfaDirectAbiVersion()!=2 || SfaDirectBuffersBytes()!=sizeof(buffers)) return 2;
   SfaLaunchOriginal(Probe::expectedStream,&buffers);
   SfaLaunchFused(Probe::expectedStream,&buffers);
-  if(Probe::originalCalls!=1 || Probe::fusedCalls!=1) return 3;
+  SfaLaunchFusedBf16(Probe::expectedStream,&buffers);
+  if(Probe::originalCalls!=1 || Probe::fusedCalls!=2) return 3;
   std::cout<<"HOST_DIRECT_API_ROUTING_PASS\n";
  } catch(const std::exception& e) {std::cerr<<e.what();return 1;}
 }
@@ -162,7 +165,7 @@ int main() {
         self.assertNotIn("/usr/local/Ascend/", cmake)
         target = cmake.split("if(SFA_BUILD_TORCH_DIRECT)\n", 1)[1].split("endif()", 1)[0]
         self.assertIn("add_library(sfa_torch_direct SHARED", target)
-        for source in ("sfa_direct_original_wrapper.asc", "sfa_direct_fused_wrapper.asc"):
+        for source in ("sfa_direct_original_wrapper.asc", "sfa_direct_fused_wrapper.asc", "sfa_direct_fused_bf16_wrapper.asc"):
             self.assertIn(source, target)
         self.assertIn("configure_sfa(sfa_torch_direct)", target)
         self.assertIn("POSITION_INDEPENDENT_CODE ON", target)
