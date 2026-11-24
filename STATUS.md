@@ -286,6 +286,7 @@ zero-query、冷热单侧/双空、极端有限 max 和逐query不同 presence�
 内网从 PHASE_B_2168_REVIEW.md 直接构建/运行，随后继续真实C4对照、direct bridge及三臂性能。
 
 
+
 ## Phase B COMPLETE: Fusion kernel verified on A5 (2026-11-24 19:03)
 
 ### BUILD_PASS → LAUNCH_PASS → EXECUTION_PASS → ACCURACY_PASS
@@ -311,3 +312,24 @@ ALL 8 fusion test cases PASSED on A5 (Codex e6bf50e dtype/DMA fix):
 - Phase A: Original SFA → A5 verified (3 BF16 tests, L2 ~0.0018)
 - Phase B: Fusion SFA → A5 verified (8 FP32 tests, L2 ~0.0001)
 - Phase C: Three-arm performance comparison → NEXT
+
+## DSH 0.2.2-rc.1 事件接收器源码交付
+
+新增 tools/github_push_notify_dsh.py、版本固定的依赖、配置示例及双平台说明。
+协议核对自官方 deepseek-harness 66491b05；复用现有 GitHub 验签/路由/持久去重，
+通过 /connect Cookie + 短生命周期WS向已有会话 session/prompt(mode=queue) 投递。
+按 Host/仓库/分支/会话/SHA 生成稳定requestId，超时重投不另生成模型输入身份。
+check仅只读state，test仅签名ping，sessions只读列表，不创建会话、不建立轮询或定时器。
+
+本轮安装指定依赖的隔离环境完整126项：125通过、1项桌面致命信号测试跳过。
+其中DSH18项真实本机HTTP/RFC6455协议集成与CLI子进程测试全部执行通过，
+原Codex14项亦通过。日志与范围见 tools/github_push_notify_dsh.validation.json。
+没有运行真实DSH Host或向真实会话发送消息，尚未配置公网Webhook，不能标记现场投递接通。
+部署按 tools/GITHUB_PUSH_NOTIFY_DSH.md，从正常入口取得目标Host启动URL及已有会话ID，
+私有凭据保存在仓库外；最后以正常push/合法delivery重投核对同SHA在目标会话出现。
+
+另核对5a36184原始结果：8项给定冷态融合smoke均通过、nonfinite=0，状态为
+DEVICE_SMOKE_VALIDATED；真实C4流水线/原生两遍对照仍为false，完成这两项后才进入性能验收。
+此处0.0001是融合隔离计算相对匹配参考的误差，不能与C4量化相对BF16的0.104直接比较。
+
+

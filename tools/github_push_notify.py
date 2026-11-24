@@ -92,11 +92,25 @@ def scope_for(repo, branch, thread):
     return json.dumps([repo.lower(), branch, thread], separators=(",", ":"))
 
 
+class NotificationError(Exception):
+    """A credential-free backend failure safe to store in the delivery journal."""
+    def __init__(self, code):
+        self.code = code if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,80}", code) else "backend_failed"
+        super().__init__(self.code)
+
+
 class Receiver:
     def __init__(self, *, thread, secret, state_dir, codex, repo=DEFAULT_REPO,
                  branch=DEFAULT_BRANCH, runner=None, codex_remote=None,
-                 message_template=None, ignore_commit_prefixes=None, queue_timeout=QUEUE_TIMEOUT):
-        self.thread, self.repo, self.branch = valid_uuid(thread), valid_repo(repo), valid_branch(branch)
+                 message_template=None, ignore_commit_prefixes=None, queue_timeout=QUEUE_TIMEOUT,
+                 notifier=None, backend_scope=None):
+        if notifier is None:
+            thread = valid_uuid(thread)
+        elif (not isinstance(thread, str) or not thread or len(thread) > 512
+              or any(ord(c) < 32 or ord(c) == 127 for c in thread)
+              or not isinstance(backend_scope, str) or not backend_scope):
+            raise ValueError("Backend requires an exact target ID and nonempty backend_scope")
+        self.thread, self.repo, self.branch = thread, valid_repo(repo), valid_branch(branch)
         if not isinstance(secret, bytes) or len(secret) < 32:
             raise ValueError("Webhook secret must contain at least 32 bytes")
         if type(queue_timeout) not in (int, float) or not 0 < queue_timeout <= QUEUE_TIMEOUT:
@@ -107,6 +121,9 @@ class Receiver:
         self.prefixes = tuple(valid_prefixes(["[codex-review]"] if ignore_commit_prefixes is None else ignore_commit_prefixes))
         self.timeout, self.runner = queue_timeout, runner or subprocess.run
         self.scope = scope_for(self.repo, self.branch, self.thread)
+        self.notifier = notifier
+        if notifier is not None:
+            self.scope = json.dumps([backend_scope, self.repo.lower(), self.branch, self.thread], separators=(",", ":"))
         state = Path(state_dir)
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.database = state / "deliveries.sqlite3"
@@ -172,7 +189,14 @@ class Receiver:
                     self._record(db, "duplicate")
                     return 200, "duplicate"
                 try:
-                    result = self.runner(argv, shell=False, capture_output=True, text=True, timeout=self.timeout)
+                    if self.notifier is not None:
+                        self.notifier(message=message, sha=sha, delivery=delivery, timeout=self.timeout)
+                        result = subprocess.CompletedProcess([], 0)
+                    else:
+                        result = self.runner(argv, shell=False, capture_output=True, text=True, timeout=self.timeout)
+                except NotificationError as error:
+                    self._record(db, "queue_failed", error=error.code)
+                    return 503, "queue_failed"
                 except subprocess.TimeoutExpired:
                     self._record(db, "queue_failed", error="queue_timeout")
                     return 503, "queue_failed"
@@ -320,7 +344,7 @@ def read_status(config):
     result = {"status": "not_started", "accepted": 0}
     if not database.exists():
         return result
-    scope = scope_for(config["repo"], config["branch"], config["thread"])
+    scope = config.get("_scope") or scope_for(config["repo"], config["branch"], config["thread"])
     with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1) as db:
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "accepted_v2" not in tables:

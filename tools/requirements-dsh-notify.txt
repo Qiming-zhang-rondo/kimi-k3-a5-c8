@@ -1,0 +1,2 @@
+# The notifier uses only this small WebSocket transport dependency.
+websocket-client==1.9.0

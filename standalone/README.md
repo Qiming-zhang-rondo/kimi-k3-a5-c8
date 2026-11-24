@@ -1,9 +1,14 @@
 # 当前 Phase B 入口
 
 原版 `2ddc663` 的 3 项 A5 DEVICE_VALIDATED 已提交。当前使用
-[PHASE_B_2168_REVIEW.md](../PHASE_B_2168_REVIEW.md) 中的隔离构建/运行命令，
-修复 `2168be3` 的集成问题并运行新 `sfa_fusion_launch`；不要重复从原版 SDK 恢复开始。
-融合首版 FP32 输出，给定冷态的 8 项 smoke 尚待 A5 验证，不能误用原版 BF16 输出分配。
+[融合结果提交5a361849](https://github.com/Qiming-zhang-rondo/kimi-k3-a5-c8/blob/5a361849953a35b22695f98abcbe42e17623f777/standalone/sfa_fusion_device_results.json)
+已确认 `sfa_fusion_launch` 的 8 项全部通过、nonfinite全为0，状态 `DEVICE_SMOKE_VALIDATED`。
+该结果只覆盖 `given_fp32_cold_state_plus_native_bf16_hot`；真实C4流水线、原生两遍对照、
+真正hot=0调度均尚未验证。融合输出仍为FP32 524288字节，不能误用原版BF16分配。
+**下一步按 [当前执行任务](../POST_COMPILE_EXECUTION_TASK.md) 接真实C4冷态、当前NPU stream的
+direct bridge和原生两遍严格对照，通过后做三臂性能。**
+[PHASE_B_2168_REVIEW.md](../PHASE_B_2168_REVIEW.md) 中的smoke命令仅保留作复现；
+不要重复从原版SDK恢复或停在重跑已通过的8项。
 
 ## 原版隔离编译与启动背景
 
@@ -89,8 +94,9 @@ cannot establish API signatures and is intentionally removed.
 Require real 3510 AIC and AIV context/artifacts; a host-only archive containing
 the guarded signature is not an SFA device build pass. If a 3510 device pass
 still fails, retain that exact first error and investigate its actual resolved
-headers. The host-pass fix is a hypothesis pending SDK execution, not a claim
-that all current build errors are solved.
+headers. This isolation was initially a hypothesis; the fixed original and
+given-state fusion smoke now have A5 results. Those results do not certify
+other SDK versions, shapes or execution contracts.
 
 ## Before device execution
 
@@ -111,11 +117,11 @@ claim. The pinned SGL/vLLM **main arch35 headers in this repository differ** fro
 `original/`; see `upstream/PROVENANCE.md`. A matching packaged file is a narrower
 claim and must identify its scope.
 
-Once the isolated baseline builds and passes its mathematical reference on A5,
-apply the existing `experimental/` cold-state epilogue and finish its matching
-host/API bridge. Run correctness controls before paired performance, preserving
-the baseline quantization recipe. No speedup has yet been measured for this
-native fusion candidate.
+The fixed baseline and the given-state fusion smoke have passed on A5. Finish
+the direct bridge and feed actual native C4 states into this same candidate;
+compare against the actual native two-pass result before paired performance,
+preserving the baseline quantization recipe. No speedup has yet been measured
+for this native fusion candidate.
 
 References: [SGL GM-to-local loading example](https://github.com/sgl-project/sgl-kernel-npu/blob/597250fcc1b31f2607bf817d42bd0699ea60b8eb/csrc/sparse_flash_attention/op_kernel/sparse_flash_attention.cpp#L79),
 [official tiling macro contract](https://asc.gitcode.com/api/SIMD-API/basic_api/tool_interface/tiling_data_acquisition/GET_TILING_DATA_WITH_STRUCT.html),

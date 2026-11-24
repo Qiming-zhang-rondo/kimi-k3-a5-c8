@@ -1,12 +1,17 @@
-# 当前执行任务：从编译通过推进到 A5 运行、融合及配对性能
+# 当前执行任务：真实 C4 融合对照与三臂配对性能
 
 ## 接手后直接继续
 
 仓库 `Qiming-zhang-rondo/kimi-k3-a5-c8`，分支 `sfa-cold-merge`。
 `2ddc663` 已提交原版 A5 实测：3 项 DEVICE_VALIDATED，L2 0.00175–0.00191。
-阶段 A 已有固定 smoke 证据；当前先执行 [PHASE_B_2168_REVIEW.md](PHASE_B_2168_REVIEW.md)
-修后的融合构建及 8 项隔离设备检查，再完成真实 C4 两遍对照和阶段 C。
-`2168be3` 的输出类型、DMA 和头文件遮蔽问题已修源码，尚需现场 SDK/A5 验证。
+提交 `5a361849953a35b22695f98abcbe42e17623f777` 的
+[融合结果](https://github.com/Qiming-zhang-rondo/kimi-k3-a5-c8/blob/5a361849953a35b22695f98abcbe42e17623f777/standalone/sfa_fusion_device_results.json)
+已确认 8 项全部 passed、nonfinite_count 全为0，状态 `DEVICE_SMOKE_VALIDATED`，范围
+`given_fp32_cold_state_plus_native_bf16_hot`。三项范围标志
+`c4_pipeline_validated`、`native_twopass_compared`、`real_hot_empty_dispatch_validated` 均为 false。
+阶段 A 已有固定 smoke 证据，阶段 B 已有给定冷态的融合设备证据；**下一步直接接真实 C4
+冷态和原生两遍对照，再做阶段 C**。不要把重跑这8项作为新的交付终点，也不要宣称阶段B已全面验收。
+[PHASE_B_2168_REVIEW.md](PHASE_B_2168_REVIEW.md) 的构建命令保留作复现背景。
 保留已成功的 SDK、CMake 参数及构建目录，不重新开始 SoC/namespace 排查。
 
 你在内网拥有执行环境，负责连续完成以下三个阶段及普通实现/构建修复。
@@ -28,7 +33,10 @@
   融合最终 output 为 FP32；不得把冷输出降为 BF16。stats 每 head 一个 float，stride1。
 - 当前融合首版不返回 combined stats，明确 `return_softmax_lse=false`。
 
-## 阶段 A：把已编译原版真正运行起来
+## 阶段 A：已完成的固定 smoke 合同与保留检查
+
+原版启动和3项固定精度已通过。以下保留原合同；仅在相关实现变更后补回归，
+不用重新做原版SDK恢复或重建已有启动器。原版与候选继续保持头文件和目标隔离。
 
 1. 保存当前成功构建命令、完整日志、SDK来源、源码/产物哈希和实际模板模式。
    检查真实3510 AIC、AIV两份设备代码及任务类型，不以host符号、空archive或CMake成功判定。
@@ -51,18 +59,26 @@
 
 ## 阶段 B：把现有融合源码接入同一启动框架
 
-1. 使用 `experimental/arch35/` 的实际cold-state epilogue，保留原生BF16热端QK/PV流水。
-   新建standalone融合wrapper，复用已成功的device-only头隔离、AIC/AIV模板服务、
-   GM到本地POD加载与直接启动框架。原 `experimental/sparse_flash_attention_cold_merge.cpp`
-   仍使用TBE的GET_TILING宏/类型宏，不能原样改名就当作新ASC入口。
+当前先实现可供旧harness直接调用的桥，随后用真实冷态验证；已通过的独立smoke用来定位
+新增接入回归，不代替下面的真实流水线验收。
+
+1. 沿用已通过smoke的 `standalone/sfa_fusion_entry.asc` 和 `experimental/arch35/`
+   cold-state epilogue，保留原生BF16热端QK/PV流水、device-only头隔离、AIC/AIV模板服务、
+   GM到本地POD加载及raw-user-scratch协议。不从TBE入口重新拼装，也不改动已验证原版。
 2. 14输入的顺序与 `experimental/op_api/include/`、proto及原候选合同一致；新增五个冷态
    指针在AIC/AIV贯通。保留cold/hot presence逻辑、热输出BF16舍入及最终FP32写回。
    合并仅在完整热归约完成后一次执行；检查DMA/event、UB资源、head/token偏移和空分片。
 3. 现有 `experimental/torch/sfa_cold_merge_bridge.cpp` 依赖尚未实现的新ACLNN符号，
    头文件只有声明，不能直接调用此次静态库。优先为测试实现真实direct bridge；
    如果选择生成新ACLNN，则必须完成真实host/API注册，禁止回退到旧两遍实现冒充融合。
+   direct bridge 必须使用调用方当前NPU device/stream，保持输入、输出、固定tiling和scratch
+   在异步执行及graph replay期间有效；不要在热路径做D2H、同步、设备初始化或新建stream。
+   接入前校验固定shape/dtype/stride、compact128索引与FP32冷态合同；不支持的形状直接拒绝。
 4. 检验融合输出 vs 现有BF16两遍输出及各自匹配存储精度的独立参考；冷热分区、cache写入
    逐字节一致；prepared、dynamic-read和write+dynamic输出一致。
+   冷 output/max/sum 必须由本轮同输入的真实原生C4 reader产生，不再用smoke的合成冷态。
+   用同输入的原生BF16热输出及两段真实stats组成 `NativeReference`，并保留原生两遍实际输出
+   作为另一控制；融合/两遍沿用整体和逐行L2≤0.001严格门槛，不能拿数学smoke的0.01替代。
    zero-query热质量128、冷质量1920；检查presence单侧、双空、非法非空统计及极端有限值。
    helper支持空侧不等于完整原生调度支持hot=0；首版不支持的输入必须在launch前明确拒绝，
    不能运行未初始化输出。需要扩大支持时实现相应责任核/调度并单独验证。
@@ -99,7 +115,7 @@ payload `4a5fd67b9a78766bebfa564782ea2193bc22af1a` 的 `kv-native-twopass/hotkv/
 保存实际命令、退出码、日志与状态。设备故障后停止设备链并保留DEVICE_FAULT标记；
 可继续只读分析/构建，不自行重置设备。普通precision FAIL保存详细错误后修复，不计为通过。
 
-维护 `STATUS.md` 和机器可读结果，区分BUILD_PASS、DEVICE_VALIDATED、MEASURED、
+维护 `STATUS.md` 和机器可读结果，区分BUILD_PASS、DEVICE_SMOKE_VALIDATED、DEVICE_VALIDATED、MEASURED、
 ERROR、CONTROL_FAILED；包含完整输入合同、源码/二进制来源及哈希、复现命令和结果位置。
 代码、构建日志、精度数据、配对原始样本、profiler摘要推送 `sfa-cold-merge`；
 大二进制留内网，提交哈希/大小/符号与保存路径，不上传凭据或无关模型数据。

@@ -1,5 +1,7 @@
 # 通用 GitHub push → Codex 聊天接收器
 
+DSH 0.2.2-rc.1 使用独立的 [DSH 接收器与配置说明](GITHUB_PUSH_NOTIFY_DSH.md)。
+
 只复制 `github_push_notify.py` 即可跨项目使用：Python 3.10+ 标准库，无 pip/NPU 依赖。
 一份配置绑定一个仓库、分支和既有聊天；多个项目运行多个实例，各用自己的端口和配置目录。
 工作流是 GitHub push → HTTPS `/github` → 验签/过滤/去重 → 官方 `codex queue` → 既有聊天。
