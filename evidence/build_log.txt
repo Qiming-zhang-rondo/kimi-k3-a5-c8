@@ -1,0 +1,8 @@
+Build: cmake /tmp/sfa_merge_src_upload/standalone -B /tmp/sfa_m0f -DSFA_PROBE_TEMPLATE_MODE=0 -DCMAKE_BUILD_TYPE=Release
+Date: 2026-11-24 16:41
+Result: BUILD_OK
+Product: libsfa_standalone.a (111444 bytes)
+Compiler: bisheng (ccec ASC mode, --npu-arch=dav-3510)
+Context: __NPU_ARCH__=3510, __CCE_AICORE__=310, CUBE+VEC dual pass
+Warnings: 3 (SFA_BUILD_CONTEXT pragmas, informational only)
+MicroAPI: resolved by 1a34a76 host/device header isolation
