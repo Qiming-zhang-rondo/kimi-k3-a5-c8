@@ -233,3 +233,13 @@ L2 ~0.0018 = pure BF16 precision baseline (matches full_bf16 reference 0.00188).
 4. Run command: `./build_smoke/sfa_launch --run --device 0`
 
 ### Next: Phase B (fusion candidate) → Phase C (three-arm paired performance)
+
+
+## 通用事件接收器：本地聊天入口已实际验证
+
+已通过官方本地codex queue向本聊天入队，测试消息实际到达。此前“默认daemon socket不存在，
+所以本地聊天不能通知”的推断已纠正；不强制remote，不启动新daemon，不建立定时器。
+工具已通用化为init/serve/check/test/status及仓外项目配置，使用说明见tools/GITHUB_PUSH_NOTIFY.md。
+14项测试通过；独立真实CLI组合冒烟(init/check/serve/签名ping/status)也通过，ping没有新增模型消息。
+项目接入仍需一次性HTTPS回调与GitHub仓库Webhook配置，公网GitHub投递尚未在此部署验证。
+原版SFA的3项DEVICE_VALIDATED结果沿用2ddc663；后续继续融合与性能任务。

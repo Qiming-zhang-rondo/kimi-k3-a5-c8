@@ -1,0 +1,27 @@
+{
+  "validation_date": "2026-11-24",
+  "timezone": "Asia/Shanghai",
+  "unit_tests": {
+    "command": "python3 -m unittest discover -s tests -p test_github_push_notify.py",
+    "passed": 14,
+    "uses_real_loopback_http": true,
+    "push_adapter_process": "temporary executable test double, no inference"
+  },
+  "manual_cli_smoke": {
+    "init": "PASS",
+    "real_codex_queue_help": "PASS",
+    "receiver_process": "PASS",
+    "signed_http_ping": "PASS",
+    "status": "PASS",
+    "model_messages_generated_by_ping": 0
+  },
+  "actual_local_chat_receipt": {
+    "official_codex_queue_without_remote": "PASS",
+    "message_received_in_existing_chat": true,
+    "test_was_authorized": true,
+    "additional_real_test_messages_sent": 0
+  },
+  "public_github_webhook_delivery": "NOT_CONFIGURED_OR_TESTED",
+  "github_polling": false,
+  "scheduled_automation": false
+}

@@ -1,10 +1,11 @@
 # 单次完整执行入口
 
 **当前优先任务：[POST_COMPILE_EXECUTION_TASK.md](POST_COMPILE_EXECUTION_TASK.md)。**
-已发生507015后的具体代码修复和构建/验证命令见 [REPAIR_507015.md](REPAIR_507015.md)，
-当前先执行该固定原版smoke修复，再回到下述融合/性能流程；设备故障门禁继续有效。
-用户反馈host/device隔离后已编译通过：保留当前成功环境，直接完成原版设备运行、
-standalone融合入口接入及同轮三臂性能。先补真实构建证据，随后连续执行，无需阶段间向用户确认。
+`2ddc663`已提交3组原版A5结果，状态DEVICE_VALIDATED，L2约0.00175–0.00191；
+当前继续阶段B融合接入和阶段C配对性能，不重复从头修原版启动。
+此前507015的修复记录及复现入口保留在 [REPAIR_507015.md](REPAIR_507015.md)；设备故障门禁继续有效。
+保留当前成功构建与原版设备精度结果，继续standalone融合入口接入及同轮三臂性能，
+随后连续执行，无需阶段间向用户确认。
 SDK恢复工具仅在实际再次出现构建故障时使用，不把已通过的编译从头重做。
 
 内网执行代理请阅读 [AUTONOMOUS_EXECUTION_TASK.md](AUTONOMOUS_EXECUTION_TASK.md)，
@@ -24,7 +25,7 @@ SDK恢复工具仅在实际再次出现构建故障时使用，不把已通过�
 - `tools/probe_original_sfa.py`：隔离原版源码并调用实际上传的编译 adapter；记录选中源码、生成头与新内核产物。
 
 已经有可继续构建的[原生源码候选](experimental/README.md)，包含实际内核接线和设备向量合并代码。
-先验证隔离原版，再在这些源码上完成真实host/API构建、A5正确性和性能，不需要重新从零写算法。
+沿用已验证原版的scratch/启动协议，在这些源码上完成融合构建、A5正确性和性能，不需要重新从零写算法。
 
 这些工具只是执行辅助，不能代替 A5 验证或尚未实现的host/API生成注册。
 SDK adapter 平台层不通时，可先按 [standalone/README.md](standalone/README.md) 继续隔离的
