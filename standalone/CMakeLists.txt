@@ -85,3 +85,15 @@ if(SFA_BUILD_FUSION_SMOKE)
     target_link_libraries(sfa_fusion_launch PRIVATE m "${SFA_ACL_LIBRARY}" ascendc_runtime)
 endif()
 message(STATUS "SFA explicit-user-scratch fixed contract; SDK=${SFA_SDK_ROOT}; compiler=${CMAKE_ASC_COMPILER}")
+
+
+# Phase C paired performance benchmark
+option(SFA_BUILD_PHASE_C "Phase C paired benchmark" OFF)
+if(SFA_BUILD_PHASE_C)
+    add_executable(sfa_phase_c sfa_pc_fused_bench.asc)
+    configure_sfa(sfa_phase_c)
+    find_path(SFA_ACL_INC_DIR acl/acl.h PATHS /usr/local/Ascend/cann-9.2.1/aarch64-linux/include NO_DEFAULT_PATH)
+    target_include_directories(sfa_phase_c PRIVATE ${SFA_ACL_INC_DIR})
+    find_library(SFA_ACL_LIB ascendcl PATHS /usr/local/Ascend/cann-9.2.1/lib64 NO_DEFAULT_PATH)
+    target_link_libraries(sfa_phase_c PRIVATE m ${SFA_ACL_LIB})
+endif()

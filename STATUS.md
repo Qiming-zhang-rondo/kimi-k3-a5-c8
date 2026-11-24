@@ -311,3 +311,16 @@ ALL 8 fusion test cases PASSED on A5 (Codex e6bf50e dtype/DMA fix):
 - Phase A: Original SFA → A5 verified (3 BF16 tests, L2 ~0.0018)
 - Phase B: Fusion SFA → A5 verified (8 FP32 tests, L2 ~0.0001)
 - Phase C: Three-arm performance comparison → NEXT
+
+## Phase C First Measurement (2026-11-24 19:21)
+
+### Fused kernel timing (direct launch, ACL event timer):
+- median = 305.84 µs [302.34, 329.72] (10 rounds, warmup 20, iter 100)
+- vs W0 baseline (~87.53 µs from existing graph replay framework): 3.494x
+- vs Two-pass (~126.17 µs from existing framework): 2.424x
+
+### Note: Timing methodology difference
+- This measurement uses <<<>>> direct launch + ACL event timer
+- Existing framework baselines use graph replay (eliminates launch overhead)
+- Fair comparison requires measuring original kernel with same direct launch method
+- Next step: measure original kernel with same method for true paired comparison
