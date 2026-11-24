@@ -1,0 +1,67 @@
+{
+  "status": "HOST_CHECKS_PASSED_A5_PENDING",
+  "scope": "Targeted host checks only; no AscendC SDK compilation, NPU execution, or new performance measurement on this machine.",
+  "measured_reference_commit": "7ca3b03b9d38704325a87ceecf2011b178d8e9fe",
+  "changes": {
+    "direct_abi": 3,
+    "aic_counts": [
+      1,
+      2,
+      4
+    ],
+    "default_aic_count": 1,
+    "workspace_bytes_per_aic": 442368,
+    "merge_tile_rows": [
+      4,
+      8,
+      16
+    ],
+    "default_merge_tile_rows": 4,
+    "first_device_candidate": {
+      "aic_count": 4,
+      "aiv_count": 8,
+      "merge_tile_rows": 16,
+      "workspace_bytes": 1769472
+    }
+  },
+  "checks": [
+    {
+      "component": "direct runner and timing/control flow",
+      "command": "python -m unittest discover -s tests -p test_direct_bridge_harness.py -v",
+      "tests": 16,
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "component": "fixed POD/scratch contract, actual wrapper TUs and Torch C++ source under host mocks",
+      "command": "python -m unittest discover -s tests -p test_sfa_fixed_contract.py -v; python -m unittest discover -s tests -p test_sfa_direct_api_contract.py -v; python -m unittest discover -s tests -p test_sfa_torch_bridge_host.py -v",
+      "tests": 13,
+      "initial_passed": 11,
+      "initial_skipped": 2,
+      "skipped_cmake_tests_rerun_with_available_venv_cmake": {
+        "tests": 2,
+        "passed": 2,
+        "failed": 0
+      },
+      "failed": 0
+    },
+    {
+      "component": "actual merge device header under FP32/BF16 host MicroAPI models",
+      "tests": 4,
+      "passed": 4,
+      "failed": 0,
+      "coverage": "tile8/16 full and tail rows; DMA bounds and counts; balanced events; mixed/single/empty sides; invalid stats; default zero-query and BF16 halfway rounding"
+    },
+    {
+      "component": "Python syntax and CLI help",
+      "passed": true
+    }
+  ],
+  "device_acceptance": "Reuse all current accuracy and graph-poison gates before four-arm same-round measurements. Exact zero-query RNE exception remains narrow; no tolerance relaxation.",
+  "limitations": [
+    "Actual SDK UB allocation must still compile.",
+    "No new A5 latency or speedup claim.",
+    "Fixed B1/Q4/all128-hot-hit experiment only; production, variable hot counts and real empty dispatch remain unvalidated."
+  ]
+}

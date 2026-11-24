@@ -38,10 +38,19 @@ uint8_t *Address(const at::Tensor &tensor)
     return reinterpret_cast<uint8_t *>(tensor.data_ptr());
 }
 
+pybind11::dict LibraryConfiguration()
+{
+    pybind11::dict result;
+    result["abi_version"] = SfaDirectAbiVersion();
+    result["merge_tile_rows"] = SfaDirectMergeTileRows();
+    return result;
+}
+
 class Prepared {
 public:
-    Prepared(const at::Tensor &query, double scale, bool fused, bool returnStats, bool bf16Io = false)
-        : device_(query.device()), fused_(fused), returnStats_(returnStats), bf16Io_(bf16Io)
+    Prepared(const at::Tensor &query, double scale, bool fused, bool returnStats, bool bf16Io = false,
+             int64_t aicCount = 1)
+        : device_(query.device()), fused_(fused), returnStats_(returnStats), bf16Io_(bf16Io), aicCount_(aicCount)
     {
         TORCH_CHECK(device_.type() == c10::DeviceType::PrivateUse1,
                     "An Ascend NPU query tensor is required");
@@ -53,7 +62,9 @@ public:
                     "The fused direct entry returns final output only; no combined stats ABI");
         TORCH_CHECK(!bf16Io || fused,
                     "bf16_io selects fused BF16 cold/output; native_hot already has its original BF16 contract");
-        TORCH_CHECK(SfaDirectAbiVersion() == 2 && SfaDirectBuffersBytes() == sizeof(SfaDirectBuffers),
+        TORCH_CHECK(aicCount == 1 || aicCount == 2 || aicCount == 4,
+                    "Fixed Q4 supports aic_count=1, 2 or 4 only");
+        TORCH_CHECK(SfaDirectAbiVersion() == 3 && SfaDirectBuffersBytes() == sizeof(SfaDirectBuffers),
                     "Compiled direct-library ABI does not match this bridge; rebuild the exact sources");
         c10_npu::NPUGuard guard(device_);
         output_ = at::empty({4,64,512}, query.options().dtype(fused && !bf16Io ? at::kFloat : at::kBFloat16));
@@ -61,10 +72,10 @@ public:
         maximum_ = at::empty({4,64,1}, query.options().dtype(at::kFloat));
         sum_ = at::empty_like(maximum_);
         empty_ = at::empty({0}, query.options().dtype(at::kFloat));
-        scratch_ = at::empty({static_cast<int64_t>(sfa_fixed::userWorkspaceBytes)},
+        scratch_ = at::empty({static_cast<int64_t>(sfa_fixed::WorkspaceBytesForAic(aicCount_))},
                               query.options().dtype(at::kByte));
-        auto tiling = sfa_fixed::MakeTiling(static_cast<float>(scale));
-        TORCH_CHECK(sfa_fixed::ValidateTiling(tiling), "Fixed original POD validation failed");
+        auto tiling = sfa_fixed::MakeTiling(static_cast<float>(scale), aicCount_);
+        TORCH_CHECK(sfa_fixed::ValidateTiling(tiling, aicCount_), "Fixed original POD validation failed");
         tiling.baseParams.returnSoftmaxLse = returnStats ? 1 : 0;
         auto host = at::empty({static_cast<int64_t>(sizeof(tiling))},
                                at::TensorOptions().device(at::kCPU).dtype(at::kByte));
@@ -89,7 +100,7 @@ public:
         // This is not a device synchronization. Do not replace with stream(false).
         void *raw = stream.stream();
         Record(stream,{query,key,value,indices,table,queryLengths,kvLengths,queryRope,keyRope});
-        SfaLaunchOriginal(raw, &arguments);
+        TORCH_CHECK(SfaLaunchOriginal(raw, &arguments, aicCount_) == 0, "Original direct launch rejected its count/descriptor");
         return Outputs();
     }
 
@@ -123,9 +134,9 @@ public:
         Record(stream,{query,key,value,indices,table,queryLengths,kvLengths,queryRope,keyRope,
                        coldOutput,coldMax,coldSum,coldPresent,hotPresent});
         if (bf16Io_) {
-            SfaLaunchFusedBf16(raw, &arguments);
+            TORCH_CHECK(SfaLaunchFusedBf16(raw, &arguments, aicCount_) == 0, "BF16 direct launch rejected its count/descriptor");
         } else {
-            SfaLaunchFused(raw, &arguments);
+            TORCH_CHECK(SfaLaunchFused(raw, &arguments, aicCount_) == 0, "FP32 direct launch rejected its count/descriptor");
         }
         return Outputs();
     }
@@ -133,6 +144,15 @@ public:
     State Outputs() const
     {
         return {output_, returnStats_ ? maximum_ : empty_, returnStats_ ? sum_ : empty_};
+    }
+
+    pybind11::dict Configuration() const
+    {
+        auto result = LibraryConfiguration();
+        result["aic_count"] = aicCount_;
+        result["aiv_count"] = 2 * aicCount_;
+        result["workspace_bytes"] = scratch_.numel();
+        return result;
     }
 
 private:
@@ -193,6 +213,7 @@ private:
 
     c10::Device device_;
     bool fused_, returnStats_, bf16Io_;
+    uint32_t aicCount_;
     at::Tensor output_, maximum_, sum_, empty_, scratch_, tiling_;
 };
 } // namespace
@@ -202,10 +223,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module)
     pybind11::class_<Prepared,std::shared_ptr<Prepared>>(module,"Prepared")
         .def("native_hot",&Prepared::NativeHot)
         .def("fused_hot",&Prepared::FusedHot)
-        .def("outputs",&Prepared::Outputs);
-    module.def("prepare",[](const at::Tensor &query,double scale,bool fused,bool returnStats,bool bf16Io) {
+        .def("outputs",&Prepared::Outputs)
+        .def("configuration",&Prepared::Configuration);
+    module.def("configuration",&LibraryConfiguration);
+    module.def("prepare",[](const at::Tensor &query,double scale,bool fused,bool returnStats,bool bf16Io,int64_t aicCount) {
         TORCH_CHECK(query.defined(), "Query must be defined");
-        return std::make_shared<Prepared>(query,scale,fused,returnStats,bf16Io);
+        return std::make_shared<Prepared>(query,scale,fused,returnStats,bf16Io,aicCount);
     },pybind11::arg("query"),pybind11::arg("scale"),pybind11::arg("fused"),
-      pybind11::arg("return_stats")=false,pybind11::arg("bf16_io")=false);
+      pybind11::arg("return_stats")=false,pybind11::arg("bf16_io")=false,pybind11::arg("aic_count")=1);
 }

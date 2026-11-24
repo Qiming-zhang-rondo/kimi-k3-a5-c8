@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 set(CMAKE_ASC_ARCHITECTURES "dav-3510" CACHE STRING "A5 compile target")
+set(SFA_MERGE_TILE_ROWS "4" CACHE STRING "Cold-state merge DMA/VF batch: 4, 8 or 16 rows")
+set_property(CACHE SFA_MERGE_TILE_ROWS PROPERTY STRINGS 4 8 16)
+if(NOT SFA_MERGE_TILE_ROWS MATCHES "^(4|8|16)$")
+    message(FATAL_ERROR "SFA_MERGE_TILE_ROWS must be 4, 8 or 16")
+endif()
 # Reject the invalid legacy benchmark before even searching for a toolkit.
 option(SFA_BUILD_PHASE_C "Deprecated unsafe 5407a8e benchmark; never build" OFF)
 if(SFA_BUILD_PHASE_C)
@@ -123,9 +128,10 @@ if(SFA_BUILD_TORCH_DIRECT)
         sfa_direct_fused_wrapper.asc
         sfa_direct_fused_bf16_wrapper.asc)
     configure_sfa(sfa_torch_direct)
+    target_compile_definitions(sfa_torch_direct PRIVATE SFA_MERGE_TILE_ROWS=${SFA_MERGE_TILE_ROWS})
     set_target_properties(sfa_torch_direct PROPERTIES POSITION_INDEPENDENT_CODE ON
         UNITY_BUILD OFF)
     target_include_directories(sfa_torch_direct PRIVATE "${SFA_ACL_INCLUDE_DIR}")
     target_link_libraries(sfa_torch_direct PRIVATE m "${SFA_ACL_LIBRARY}" ascendc_runtime)
 endif()
-message(STATUS "SFA explicit-user-scratch fixed contract; SDK=${SFA_SDK_ROOT}; compiler=${CMAKE_ASC_COMPILER}")
+message(STATUS "SFA explicit-user-scratch fixed contract; SDK=${SFA_SDK_ROOT}; compiler=${CMAKE_ASC_COMPILER}; merge_tile_rows=${SFA_MERGE_TILE_ROWS}")

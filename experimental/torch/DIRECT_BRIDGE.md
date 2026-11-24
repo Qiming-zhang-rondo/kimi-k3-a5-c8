@@ -6,10 +6,14 @@
 实际使用 `load_sfa_direct.py` 和 `sfa_direct_bridge.cpp`，链接现场构建的
 `libsfa_torch_direct.so`。
 
+最新优化入口见 [OPTIMIZE_NEXT.md](../../OPTIMIZE_NEXT.md)。ABI3增加显式
+`aic_count=1/2/4`（默认1）及实际库配置查询；`SFA_MERGE_TILE_ROWS=4/8/16`
+为编译选项，默认4。新候选必须隔离重编，不能复用已测的ABI2设备库。
+
 ## 构建边界
 
 `SFA_BUILD_TORCH_DIRECT=ON` 生成 shared library，原版与融合版各有一个独立 ASC
-translation unit。C++ bridge 只调用这两个 host launch wrapper；不能在同一个编译
+translation unit，BF16融合IO另占第三个单元。C++ bridge 只调用对应 host launch wrapper；不能在同一个编译
 单元同时包含两套同名 `BaseApi::SFAVectorService` 头，也不能复用旧两遍路径冒充融合。
 
 在原版和融合 smoke 已成功的同一 SDK 环境、仓库根目录构建，保留现场已验证的
@@ -39,13 +43,15 @@ bridge = load_sfa_direct(
     # 可选：build_directory="/tmp/isolated-torch-jit-build",
     verbose=True,
 )
-original = bridge.prepare(base.q_nope, base.scale, False, True)
+original = bridge.prepare(base.q_nope, base.scale, False, True, aic_count=4)
 # 只在 setup 探测真实 dtype，不把这个冷态结果复用于 timed pipeline。
 cold_template = runner._cold_read(runner.prepared)[0]
 if cold_template.dtype not in (base.torch.bfloat16, base.torch.float32):
     raise ValueError("Unsupported actual native C4 output dtype")
 fused = bridge.prepare(base.q_nope, base.scale, True, False,
-                       bf16_io=cold_template.dtype == base.torch.bfloat16)
+                       bf16_io=cold_template.dtype == base.torch.bfloat16, aic_count=4)
+print(bridge.configuration())  # 实际.so的ABI和merge_tile_rows
+print(fused.configuration())   # 另含实际aic_count/aiv_count/workspace_bytes
 ```
 
 加载只让 `torch.utils.cpp_extension.load` 编译 `sfa_direct_bridge.cpp`；不会重新编译 ASC、
@@ -55,12 +61,13 @@ fused = bridge.prepare(base.q_nope, base.scale, True, False,
 JIT 目录内的 `sfa_direct_bridge_build.json` 保存库、bridge 源码哈希、SDK 及版本信息。
 
 `Prepared` 必须活到 eager 操作和 graph replay 全部结束。它持有预分配的输出、tiling、
-442368 字节 raw user scratch 和内部统计 buffer；prepare 完成后才能捕图/计时。
+每AIC 442368 字节独立 raw user scratch 和内部统计 buffer；4核共1769472字节。
+prepare 完成后才能捕图/计时。
 原版输出 BF16；融合按真实冷态选择 BF16输入/输出或 FP32输入/输出，stats始终FP32。
 `bf16_io=True` 仅用于融合，直接从 BF16 cold buffer 搬入，不增加 Python `.float()`/`.to()`
 或独立转换 kernel；最终 BF16 输出为262144字节。默认 `bf16_io=False` 保留原有FP32
-输入/输出实验合同，output为524288字节。融合不返回 combined stats。桥要求设备库ABI2，
-旧ABI1库即使尺寸仍为19指针也会拒绝；修改后须重建设备库并启动新的Python进程。
+输入/输出实验合同，output为524288字节。融合不返回 combined stats。桥要求设备库ABI3，
+旧ABI1/2库即使尺寸仍为19指针也会拒绝；修改后须重建设备库并启动新的Python进程。
 
 运行方法接收本次 Tensor 对象，读取本次 `data_ptr()`。冷算子每次新分配输出时，不能
 把首次冷态指针固定在 prepare 中。桥使用 query 设备的 `NPUGuard` 和
@@ -98,7 +105,8 @@ JIT 目录内的 `sfa_direct_bridge_build.json` 保存库、bridge 源码哈希�
 | scale | `base.scale`，prepare 时传入 | 使用真实值，不改为其他默认值 |
 
 冷端完整 KV 仍为 K8192，由原生 C4 reader 访问。桥内部的256是热环物理槽数，不能把
-冷端 K8192 写进固定热环 tiling。POD 为选定源码的144字节布局，launch为1 AIC/2 AIV，
+冷端 K8192 写进固定热环 tiling。POD 为选定源码的144字节布局，launch与usedCoreNum
+同步采用1/2/4 AIC（每AIC两AIV），
 不复用已安装 ACLNN executor 的 opaque tiling 或系统 workspace 前缀。
 
 仅替换 `Bf16HotRunner._read(parts)` 中的“热读＋合并”，保留其余流程：

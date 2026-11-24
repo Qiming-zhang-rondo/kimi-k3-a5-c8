@@ -14,8 +14,12 @@ import run_direct_ab as harness
 
 
 class Plan:
-    def __init__(self, owner, fused):
+    def __init__(self, owner, fused, aic_count):
         self.owner, self.fused = owner, fused
+        self.aic_count = aic_count
+
+    def configuration(self):
+        return dict(abi_version=3, merge_tile_rows=16, aic_count=self.aic_count)
 
     def native_hot(self, *args):
         self.owner.calls.append(("hot", args))
@@ -32,7 +36,7 @@ class Bridge:
 
     def prepare(self, *args):
         self.calls.append(("prepare", args))
-        return Plan(self, args[2])
+        return Plan(self, args[2], args[5])
 
 
 class ParentRunner:
@@ -139,7 +143,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_fused_uses_every_new_cold_state_and_runtime_partition(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)(None, bridge, fused=True)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, False)))
+        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, False, 1)))
         self.assertEqual(runner.run(write=True), "fused_fp32")
         self.assertEqual(runner.run(write=True), "fused_fp32")
         calls = [args for kind,args in bridge.calls if kind == "fused"]
@@ -152,7 +156,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_twopass_keeps_original_merge_and_requests_native_statistics(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)(None, bridge, fused=False)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, False, True, False)))
+        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, False, True, False, 1)))
         self.assertEqual(runner.run(write=True), "triton_merged")
         self.assertEqual(runner.events[-1], ("merge", ("cold_out_1", "cold_max_1", "cold_sum_1"),
                                             ("direct_bf16", "hot_max", "hot_sum")))
@@ -160,14 +164,54 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_native_bf16_cold_selects_bf16_io_without_python_conversion(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)("torch.bfloat16", bridge, fused=True)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, True)))
+        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, True, 1)))
         self.assertEqual(runner.metadata["expected_pipeline_output_dtype"], "torch.bfloat16")
         self.assertEqual(runner.metadata["cold_state_cast_kernel_calls"], 0)
         runner.run(write=True)
         self.assertEqual(bridge.calls[-1][1][9], "cold_out_1")
         native_bridge = Bridge()
         harness.make_direct_runner_class(ParentRunner)("torch.bfloat16", native_bridge, fused=False)
-        self.assertFalse(native_bridge.calls[0][1][-1], "Native BF16 hot reader uses its original specialization")
+        self.assertFalse(native_bridge.calls[0][1][-2], "Native BF16 hot reader uses its original specialization")
+
+    def test_task_count_is_explicit_for_both_direct_arms_and_invalid_count_never_prepares(self):
+        cls = harness.make_direct_runner_class(ParentRunner)
+        for fused in (False, True):
+            for count in (1, 2, 4):
+                bridge = Bridge()
+                runner = cls("torch.bfloat16", bridge, fused=fused, aic_count=count)
+                self.assertEqual(bridge.calls[0][1][-1], count)
+                self.assertEqual(runner.metadata["direct_configuration"]["aic_count"], count)
+                self.assertEqual(runner.metadata["direct_aiv_count"], 2*count)
+                self.assertEqual(runner.metadata["direct_configuration"]["merge_tile_rows"], 16)
+        bridge = Bridge()
+        with self.assertRaisesRegex(ValueError, "1, 2 or 4"):
+            cls(None, bridge, fused=True, aic_count=3)
+        self.assertEqual(bridge.calls, [])
+
+    def test_prepared_reader_stages_do_not_hide_cold_read_inside_hot_only_timer(self):
+        class StageParent(ParentRunner):
+            def partition(self):
+                return dict(recent_ring="prepared_indices", old_present="cp", recent_present="hp")
+
+            def _hot_read(self, parts):
+                return ("installed_hot", "max", "sum")
+
+        cls = harness.make_direct_runner_class(StageParent)
+        installed = StageParent(None, "baseline", 128, "hot_store_partition")
+        native_bridge, fused_bridge = Bridge(), Bridge()
+        native = cls(None, native_bridge, fused=False, aic_count=4)
+        fused = cls(None, fused_bridge, fused=True, aic_count=4)
+        stages = harness.prepared_reader_stages(dict(installed_native_twopass=installed,
+            direct_native_twopass=native, direct_fused=fused))
+        self.assertEqual(fused.n, 1, "real cold state is prepared once outside stage timing")
+        self.assertEqual(stages["direct_fused_hot_read_merge"](), "fused_fp32")
+        self.assertEqual(stages["direct_fused_hot_read_merge"](), "fused_fp32")
+        self.assertEqual(fused.n, 1, "hot-only stage must not time or rerun the cold reader")
+        self.assertEqual(fused_bridge.calls[-1][1][9], "cold_out_1")
+        self.assertEqual(stages["direct_bf16_hot_read"](), "direct_bf16")
+        self.assertEqual(stages["installed_bf16_hot_read"](), "installed_hot")
+        self.assertEqual(stages["installed_external_merge"](), "triton_merged")
+        self.assertEqual(stages["native_c4_cold_read"](), "cold_out_2")
 
     def test_dtype_validation_preserves_cold_but_never_narrows_stats(self):
         for dtype in ("torch.bfloat16", "torch.float32"):
@@ -277,6 +321,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
         self.assertEqual(args.repeats, 10)
         self.assertEqual(args.timing, "graph")
         self.assertEqual(args.writer, "hot_store_partition")
+        self.assertEqual(args.direct_aic_count, 1)
         self.assertNotIn("control_l2", vars(args))
 
 

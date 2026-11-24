@@ -34,6 +34,24 @@ int main() {
  CHECK(b.softmaxMax==1024 && b.softmaxSum==1024 && b.indices==2048);
  CHECK(b.blockTable==8 && b.actualQuery==4 && b.actualKv==4 && b.tiling==144);
  CHECK(b.userWorkspace==442368);
+ // Every opt-in launch count has matching actual POD and independent scratch.
+ for(uint32_t n:{1u,2u,4u}) {
+  auto parallel=MakeTiling(softmaxScale,n);auto bytes=GetBufferBytes(n);
+  CHECK(IsSupportedAicCount(n)&&ValidateTiling(parallel,n)&&ValidateBufferBytes(bytes,n));
+  CHECK(parallel.singleCoreParams.usedCoreNum==n&&bytes.userWorkspace==442368*n);
+  if(n!=1) CHECK(!ValidateTiling(parallel)); // Default remains the verified single-AIC contract.
+  for(size_t core=0;core<n;++core) {
+   const size_t begin=core*442368,end=begin+442368;
+   CHECK(end<=bytes.userWorkspace);
+   for(size_t slot=0;slot<3;++slot) CHECK(begin+(slot+1)*128*576*2<=end);
+  }
+  auto shortParallel=bytes;--shortParallel.userWorkspace;CHECK(!ValidateBufferBytes(shortParallel,n));
+ }
+ for(uint32_t n:{0u,3u,5u,8u}) {
+  CHECK(!IsSupportedAicCount(n)&&WorkspaceBytesForAic(n)==0&&!ValidateBufferBytes(b,n));
+  bool rejected=false;try{MakeTiling(softmaxScale,n);}catch(const std::invalid_argument&){rejected=true;}
+  CHECK(rejected);
+ }
  // Bound every consumed query/head row, sparse-index row and physical paged KV row.
  for(size_t q=0;q<queries;++q) for(size_t h=0;h<heads;++h) {
   size_t row=q*heads+h;

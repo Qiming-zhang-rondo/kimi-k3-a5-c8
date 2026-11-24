@@ -180,6 +180,19 @@ def bf16(x):
 
 class DeviceMergeReferenceTest(unittest.TestCase):
     bf16_io = False
+    tile_rows = 4
+
+    @staticmethod
+    def compile_driver(compiler, root, bf16_io, tile_rows):
+        (root / "kernel_operator.h").write_text(STUB)
+        (root / "driver.cpp").write_text(DRIVER)
+        exe = root / "driver"
+        subprocess.run([compiler, "-std=c++17", "-O0", "-ffp-contract=off",
+                        "-DSFA_MERGE_BF16_IO=" + str(int(bf16_io)),
+                        "-DSFA_MERGE_TILE_ROWS=" + str(tile_rows), "-I", str(root),
+                        "-I", str(HEADER.parent), str(root / "driver.cpp"), "-o", str(exe)],
+                       check=True, capture_output=True, text=True)
+        return exe
 
     @classmethod
     def setUpClass(cls):
@@ -189,13 +202,7 @@ class DeviceMergeReferenceTest(unittest.TestCase):
         cls.compiler = compiler
         cls.tmp = tempfile.TemporaryDirectory(prefix="sfa-device-header-")
         root = Path(cls.tmp.name)
-        (root / "kernel_operator.h").write_text(STUB)
-        (root / "driver.cpp").write_text(DRIVER)
-        cls.exe = root / "driver"
-        subprocess.run([compiler, "-std=c++17", "-O0", "-ffp-contract=off",
-                        "-DSFA_MERGE_BF16_IO=" + str(int(cls.bf16_io)), "-I", str(root),
-                        "-I", str(HEADER.parent), str(root / "driver.cpp"), "-o", str(cls.exe)],
-                       check=True, capture_output=True, text=True)
+        cls.exe = cls.compile_driver(compiler, root, cls.bf16_io, cls.tile_rows)
 
     @classmethod
     def tearDownClass(cls):
@@ -218,9 +225,10 @@ class DeviceMergeReferenceTest(unittest.TestCase):
                               input=struct.pack(f"{len(values)}f", *values), capture_output=True, check=True)
         output = list(struct.unpack(f"{c['rows']*c['stride']}f", proc.stdout[:-12]))
         dma, reads, allocated = struct.unpack("3i", proc.stdout[-12:])
-        self.assertEqual(dma, 3*((c["rows"]+3)//4) if c["cp"] else 0)
+        self.assertEqual(dma, 3*((c["rows"]+self.tile_rows-1)//self.tile_rows) if c["cp"] else 0)
         self.assertEqual(reads, 2)
-        self.assertEqual(allocated, 4*512*(2 if self.bf16_io else 4)+64)
+        stats_stride = (self.tile_rows+7)//8*8
+        self.assertEqual(allocated, self.tile_rows*512*(2 if self.bf16_io else 4)+2*stats_stride*4)
         return output
 
     def reference(self, c, row, col):
@@ -265,6 +273,26 @@ class DeviceMergeReferenceTest(unittest.TestCase):
 
     def test_mixed_head_offset_tail_chunk_and_padding(self):
         self.assert_matches(self.case())
+
+    def test_batched_transfers_keep_tail_bounds_presence_and_math(self):
+        # Compile and execute the actual same header, including its 3 DMA
+        # descriptors and event ordering. Host emulation is not an SDK UB proof.
+        old_exe, old_rows = self.exe, self.tile_rows
+        try:
+            for tile_rows in (8, 16):
+                with tempfile.TemporaryDirectory(prefix="sfa-merge-batch-") as tmp:
+                    self.exe = self.compile_driver(self.compiler, Path(tmp), self.bf16_io, tile_rows)
+                    self.tile_rows = tile_rows
+                    for rows in (1, 7, 8, 9, 15, 16, 17, 31, 32):
+                        with self.subTest(tile_rows=tile_rows, rows=rows):
+                            self.assert_matches(self.case(rows=rows, offset=64, stride=544))
+                    for cp,hp in ((0,0),(0,1),(1,0)):
+                        self.assert_matches(self.case(rows=17, offset=64, cp=cp, hp=hp))
+                    c = self.case(rows=17, offset=64)
+                    c["cs"][16] = math.nan
+                    self.assert_matches(c)
+        finally:
+            self.exe, self.tile_rows = old_exe, old_rows
 
     def test_presence_bytes_and_absent_nan_states(self):
         for cp,hp in ((0,0),(0,255),(128,0),(2,254)):

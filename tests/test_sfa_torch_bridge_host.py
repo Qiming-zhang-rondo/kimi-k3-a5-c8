@@ -21,6 +21,7 @@ TORCH = r'''
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -31,6 +32,7 @@ inline bool flushed=false;
 inline void* rawStream=reinterpret_cast<void*>(uintptr_t{123});
 inline std::vector<void*> records;
 inline std::vector<std::string> order;
+inline std::map<void*,size_t> allocations;
 }
 namespace c10 {
 enum class DeviceType {CPU,PrivateUse1};
@@ -75,7 +77,7 @@ struct Tensor {
 inline Tensor empty(std::initializer_list<int64_t> shape,TensorOptions options){
  ++Probe::emptyCalls;Tensor t;t.shape=shape;t.dev=options.dev;t.type=options.type;
  size_t count=1;for(auto n:shape)count*=static_cast<size_t>(n);
- t.bytes=std::make_shared<std::vector<uint8_t>>(count*Width(t.type));return t;
+ t.bytes=std::make_shared<std::vector<uint8_t>>(count*Width(t.type));Probe::allocations[t.data_ptr()]=t.bytes->size();return t;
 }
 inline Tensor empty_like(const Tensor& input){
  ++Probe::emptyCalls;Tensor t=input;t.bytes=std::make_shared<std::vector<uint8_t>>(input.bytes->size());return t;
@@ -86,6 +88,7 @@ inline Tensor Tensor::to(c10::Device device,ScalarType dtype,bool,bool)const{
 }
 }
 namespace pybind11 {
+struct dict {std::map<std::string,int64_t> values;int64_t& operator[](const char* name){return values[name];}};
 struct arg {explicit arg(const char*){}template<class T>arg operator=(T)const{return *this;}};
 struct module_ {template<class...Args>void def(const char*,Args...) {}};
 template<class T,class Holder>struct class_ {
@@ -126,7 +129,7 @@ DRIVER = r'''
 #include <array>
 #include <set>
 namespace Probe {
-inline uint32_t abi=2,descriptorBytes=sizeof(SfaDirectBuffers);
+inline uint32_t abi=3,descriptorBytes=sizeof(SfaDirectBuffers),lastCount=1;
 inline SfaDirectBuffers last{};inline bool lastFused=false,lastBf16=false;
 void Require(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
 void Begin(){flushed=false;records.clear();order.clear();}
@@ -146,9 +149,10 @@ void Launched(void* stream,const SfaDirectBuffers* buffers,bool fused,bool bf16=
 }
 extern "C" uint32_t SfaDirectAbiVersion(void){return Probe::abi;}
 extern "C" uint32_t SfaDirectBuffersBytes(void){return Probe::descriptorBytes;}
-extern "C" void SfaLaunchOriginal(void* stream,const SfaDirectBuffers* buffers){Probe::Launched(stream,buffers,false);}
-extern "C" void SfaLaunchFused(void* stream,const SfaDirectBuffers* buffers){Probe::Launched(stream,buffers,true);}
-extern "C" void SfaLaunchFusedBf16(void* stream,const SfaDirectBuffers* buffers){Probe::Launched(stream,buffers,true,true);}
+extern "C" uint32_t SfaDirectMergeTileRows(void){return 8;}
+extern "C" int32_t SfaLaunchOriginal(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastCount=n;Probe::Launched(stream,buffers,false);return 0;}
+extern "C" int32_t SfaLaunchFused(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastCount=n;Probe::Launched(stream,buffers,true);return 0;}
+extern "C" int32_t SfaLaunchFusedBf16(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastCount=n;Probe::Launched(stream,buffers,true,true);return 0;}
 at::Tensor Make(std::initializer_list<int64_t> shape,at::ScalarType dtype){
  return at::empty(shape,at::TensorOptions().device(c10::Device(c10::DeviceType::PrivateUse1,3)).dtype(dtype));
 }
@@ -175,7 +179,8 @@ void CheckTiling(bool stats){
  Probe::Require(t.baseParams.nNumOfQInOneGroup==64&&t.baseParams.seqSize==256&&
   t.baseParams.sparseBlockCount==128&&t.baseParams.returnSoftmaxLse==stats,"wrong actual tiling values");
  auto original=t;original.baseParams.returnSoftmaxLse=1;
- Probe::Require(sfa_fixed::ValidateTiling(original),"actual prepared POD fails real fixed validator");
+ Probe::Require(sfa_fixed::ValidateTiling(original,Probe::lastCount),"actual prepared POD fails real fixed validator");
+ Probe::Require(Probe::allocations[Probe::last.workspace]==442368*Probe::lastCount,"scratch allocation differs from actual launch count");
 }
 void Layout(){
  Inputs x;Prepared native(x.q,1./24.,false,true),fused(x.q,1./24.,true,false);
@@ -229,7 +234,8 @@ void Invalid(){
  for(double scale:{0.,-1.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN(),
                     std::numeric_limits<double>::max(),std::numeric_limits<double>::denorm_min()})
   Reject([&]{Prepared bad(good.q,scale,false,true);});
- Probe::abi=1;Reject([&]{Prepared bad(good.q,1./24.,false,true);});Probe::abi=2;
+ for(uint32_t old:{1u,2u}) {Probe::abi=old;Reject([&]{Prepared bad(good.q,1./24.,false,true);});}Probe::abi=3;
+ for(int n:{-1,0,3,5,8}) Reject([&]{Prepared bad(good.q,1./24.,true,false,false,n);});
  Probe::descriptorBytes=1;Reject([&]{Prepared bad(good.q,1./24.,false,true);});Probe::descriptorBytes=sizeof(SfaDirectBuffers);
  for(int kind=0;kind<12;++kind){Inputs x;switch(kind){
   case 0:x.q.type=at::kFloat;break;case 1:x.idx.shape={4,1,2048};break;
@@ -251,10 +257,24 @@ void Invalid(){
  Reject([&]{Fused(bf16,xb);}); // Statistics remain FP32 in both modes.
  Probe::Require(Probe::launches==0,"rejected matrix must never launch");
 }
+void Parallel(){
+ Inputs x,xb;xb.co=Make({4,64,512},at::kBFloat16);
+ auto library=LibraryConfiguration();Probe::Require(library["abi_version"]==3&&library["merge_tile_rows"]==8,"library configuration was guessed");
+ for(uint32_t n:{1u,2u,4u}) {
+  Prepared native(x.q,1./24.,false,true,false,n),fused(x.q,1./24.,true,false,false,n),bf16(x.q,1./24.,true,false,true,n);
+  for(auto* plan:{&native,&fused,&bf16}) {
+   auto config=plan->Configuration();
+   Probe::Require(config["aic_count"]==n&&config["aiv_count"]==2*n&&config["workspace_bytes"]==442368*n,"prepared parallel configuration mismatch");
+  }
+  Probe::Begin();Native(native,x);CheckTiling(true);Probe::Require(Probe::lastCount==n,"native count not forwarded");
+  Probe::Begin();Fused(fused,x);CheckTiling(false);Probe::Require(Probe::lastCount==n,"FP32 count not forwarded");
+  Probe::Begin();Fused(bf16,xb);CheckTiling(false);Probe::Require(Probe::lastCount==n,"BF16 count not forwarded");
+ }
+}
 int main(int argc,char** argv){try{
  Probe::Require(argc==2,"choose host test case");const std::string mode=argv[1];
  if(mode=="layout")Layout();else if(mode=="dynamic")Dynamic();else if(mode=="dynamic_bf16")Dynamic(true);
- else if(mode=="reject")Invalid();else return 2;
+ else if(mode=="reject")Invalid();else if(mode=="parallel")Parallel();else return 2;
  std::cout<<"HOST_REAL_BRIDGE_"<<mode<<"_PASS\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what();return 1;}}
 '''
@@ -302,6 +322,9 @@ class RealTorchBridgeHostTests(unittest.TestCase):
 
     def test_metadata_tensor_alias_and_abi_errors_reject_before_launch(self):
         self.run_case("reject")
+
+    def test_parallel_count_matches_tiling_allocation_launch_and_real_configuration(self):
+        self.run_case("parallel")
 
 
 if __name__ == "__main__":

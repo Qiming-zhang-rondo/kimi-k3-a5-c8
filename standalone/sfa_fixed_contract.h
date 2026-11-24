@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
+#include <stdexcept>
 #include <type_traits>
 
 #include "sparse_flash_attention_tiling_data.h"
@@ -38,8 +39,17 @@ inline constexpr std::size_t indexElements = batch * queries * kvHeads * sparseC
 // indexed by aicIdx (IS_SPLIT_G=0). Both AIVs share their AIC's reservation.
 // This is USER scratch only. The fixed direct wrapper forwards it unchanged;
 // it must not pass through GetUserWorkspace or include a runtime system prefix.
-inline constexpr std::size_t userWorkspaceBytes =
-    std::size_t{128} * (latentDim + ropeDim) * bf16Bytes * 3 * launchAic;
+inline constexpr std::size_t userWorkspaceBytesPerAic =
+    std::size_t{128} * (latentDim + ropeDim) * bf16Bytes * 3;
+inline constexpr std::size_t userWorkspaceBytes = userWorkspaceBytesPerAic * launchAic;
+inline constexpr bool IsSupportedAicCount(std::uint32_t count)
+{
+    return count == 1 || count == 2 || count == 4;
+}
+inline constexpr std::size_t WorkspaceBytesForAic(std::uint32_t count)
+{
+    return IsSupportedAicCount(count) ? userWorkspaceBytesPerAic * count : 0;
+}
 static_assert(userWorkspaceBytes == 442368);
 static_assert(physicalBlocks * pageSize == physicalKv);
 static_assert(heads / kvHeads == 64 && heads % kvHeads == 0);
@@ -88,8 +98,9 @@ SFA_FIXED_OFFSET(SparseFlashAttentionInnerSplitParams, mBaseSize, 0);
 SFA_FIXED_OFFSET(SparseFlashAttentionInnerSplitParams, s2BaseSize, 4);
 #undef SFA_FIXED_OFFSET
 
-inline Tiling MakeTiling(float scale = softmaxScale)
+inline Tiling MakeTiling(float scale = softmaxScale, std::uint32_t aicCount = launchAic)
 {
+    if (!IsSupportedAicCount(aicCount)) throw std::invalid_argument("Fixed Q4 supports AIC count 1, 2 or 4 only");
     Tiling t{};
     auto& b = t.baseParams;
     // Actual consumers: original arch35 vector::InitCubeVecSharedParams,
@@ -112,7 +123,9 @@ inline Tiling MakeTiling(float scale = softmaxScale)
     b.sparseBlockCount = sparseCompact;
     b.isActualLenDimsNull = 0;
     b.isActualLenDimsKVNull = 0;
-    t.singleCoreParams.usedCoreNum = launchAic;
+    // InitCalcParamsEach partitions the four query tiles using GetBlockNum().
+    // Each AIC has two AIVs and a disjoint InitMMResBuf scratch reservation.
+    t.singleCoreParams.usedCoreNum = aicCount;
     // preTokens/nextTokens are not read from tiling on this sparseMode=0 path.
     // dispatchKey is not read by the fixed non-template entry. splitKVParams,
     // singleCoreTensorSize and innerSplitParams have no consumer in this
@@ -121,10 +134,10 @@ inline Tiling MakeTiling(float scale = softmaxScale)
     return t;
 }
 
-inline bool ValidateTiling(const Tiling& t)
+inline bool ValidateTiling(const Tiling& t, std::uint32_t aicCount = launchAic)
 {
     const auto& b = t.baseParams;
-    return std::isfinite(b.scaleValue) && b.scaleValue > 0.0F &&
+    return IsSupportedAicCount(aicCount) && std::isfinite(b.scaleValue) && b.scaleValue > 0.0F &&
         b.batchSize == batch && b.seqSize == physicalKv && b.qSeqSize == queries &&
         b.blockSize == pageSize && b.maxBlockNumPerBatch == physicalBlocks &&
         b.nNumOfQInOneGroup == heads / kvHeads && b.actualLenDimsQ == 1 &&
@@ -133,7 +146,7 @@ inline bool ValidateTiling(const Tiling& t)
         b.returnSoftmaxLse == 1 && b.sparseBlockSize == 1 &&
         b.sparseBlockCount == sparseCompact && b.isActualLenDimsNull == 0 &&
         b.isActualLenDimsKVNull == 0 && b.dispatchKey == 0 &&
-        t.singleCoreParams.usedCoreNum == launchAic &&
+        t.singleCoreParams.usedCoreNum == aicCount &&
         t.splitKVParams.s2 == 0 && t.splitKVParams.accumOutSize == 0 &&
         t.splitKVParams.logSumExpSize == 0 &&
         t.singleCoreTensorSize.mmResUbSize == 0 &&
@@ -146,7 +159,7 @@ struct BufferBytes {
     std::size_t indices, blockTable, actualQuery, actualKv, tiling, userWorkspace;
 };
 
-inline constexpr BufferBytes GetBufferBytes()
+inline constexpr BufferBytes GetBufferBytes(std::uint32_t aicCount = launchAic)
 {
     // Original BF16 output only; an FP32 fused candidate requires a distinct
     // output allocation. Key is the MLA latent V too: pass key as value alias.
@@ -157,13 +170,13 @@ inline constexpr BufferBytes GetBufferBytes()
         queryRows * latentDim * bf16Bytes, queryRows * fp32Bytes,
         queryRows * fp32Bytes, indexElements * int32Bytes,
         std::size_t{batch} * physicalBlocks * int32Bytes,
-        batch * int32Bytes, batch * int32Bytes, sizeof(Tiling), userWorkspaceBytes};
+        batch * int32Bytes, batch * int32Bytes, sizeof(Tiling), WorkspaceBytesForAic(aicCount)};
 }
 
-inline bool ValidateBufferBytes(const BufferBytes& allocated)
+inline bool ValidateBufferBytes(const BufferBytes& allocated, std::uint32_t aicCount = launchAic)
 {
-    const auto need = GetBufferBytes();
-    return allocated.query >= need.query && allocated.key >= need.key &&
+    const auto need = GetBufferBytes(aicCount);
+    return IsSupportedAicCount(aicCount) && allocated.query >= need.query && allocated.key >= need.key &&
         allocated.queryRope >= need.queryRope && allocated.keyRope >= need.keyRope &&
         allocated.output >= need.output && allocated.softmaxMax >= need.softmaxMax &&
         allocated.softmaxSum >= need.softmaxSum && allocated.indices >= need.indices &&

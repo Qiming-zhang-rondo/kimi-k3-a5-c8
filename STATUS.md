@@ -442,3 +442,17 @@ Fused vs installed: 7% slower due to bridge overhead, not kernel difference.
 Estimated fused without bridge overhead: ~123 µs (≈ installed two-pass).
 
 ### Phase A+B+C COMPLETE.
+
+
+## 继续优化：ABI3多AIC与批量合并候选（待A5）
+
+7ca3b03完成的是固定单层四臂计时，尚未优化达标或完成服务集成。
+融合/installed配对1.0714 [1.0695,1.0728]；融合/direct配对0.98175。
+graph replay不会每次重新执行Python/C++输入检查，不能把direct与installed的11µs
+差额全称为Python桥开销，也不能先减去它推算融合速度；设备任务/内核差异仍在其中。
+
+新候选同步更改launch/tiling/独占scratch以支持1/2/4 AIC，并将冷态DMA/VF批量由4
+可选增至8/16行。数学、舍入及门禁保持，默认1AIC/4行仍保留。新ABI3须隔离重编。
+首测4AIC+16行，按OPTIMIZE_NEXT.md一次完成四臂配对及独立hot/merge阶段计时。
+本地检查只覆盖host合同/CPP mock/设备头CPU模型，范围见
+`direct_bridge/optimization_v4_host_validation.json`；新候选SDK编译/A5正确性/性能均待验证。

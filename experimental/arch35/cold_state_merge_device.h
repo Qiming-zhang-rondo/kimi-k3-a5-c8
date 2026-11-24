@@ -18,6 +18,12 @@
 #if SFA_MERGE_BF16_IO != 0 && SFA_MERGE_BF16_IO != 1
 #error "SFA_MERGE_BF16_IO must be 0 or 1"
 #endif
+#ifndef SFA_MERGE_TILE_ROWS
+#define SFA_MERGE_TILE_ROWS 4
+#endif
+#if SFA_MERGE_TILE_ROWS != 4 && SFA_MERGE_TILE_ROWS != 8 && SFA_MERGE_TILE_ROWS != 16
+#error "SFA_MERGE_TILE_ROWS must be 4, 8 or 16"
+#endif
 namespace AscendC {
 #if SFA_MERGE_BF16_IO
 // The two IO variants coexist in one shared library. Give every differing
@@ -48,8 +54,11 @@ using ColdOutputType = float;
 #endif
 
 struct ColdMergeDeviceScratch {
-    static constexpr uint32_t ROWS = 4;
+    // Default 4 retains the validated path. Larger tiles amortize GM transfers
+    // and MTE2/V handshakes without changing any row's arithmetic or rounding.
+    static constexpr uint32_t ROWS = SFA_MERGE_TILE_ROWS;
     static constexpr uint32_t DIM = 512;
+    static constexpr uint32_t STATS_STRIDE = (ROWS + 7U) / 8U * 8U;
     TBuf<> coldBuffer;
     TBuf<> statsBuffer;
     TEventID mte2ToVector;
@@ -58,7 +67,7 @@ struct ColdMergeDeviceScratch {
     __aicore__ inline void Init(TPipe *pipe)
     {
         pipe->InitBuffer(coldBuffer, ROWS * DIM * sizeof(ColdOutputType));
-        pipe->InitBuffer(statsBuffer, 64); // Two separately padded 32-byte rows.
+        pipe->InitBuffer(statsBuffer, 2 * STATS_STRIDE * sizeof(float));
         mte2ToVector = pipe->AllocEventID<HardEvent::MTE2_V>();
         vectorToMte2 = pipe->AllocEventID<HardEvent::V_MTE2>();
     }
@@ -208,14 +217,14 @@ __aicore__ inline void MergeMode(
             DataCopyPad(cold, coldOutputGm[(flatOffset + start) * 512], copy, coldPad);
             copy.blockLen = count * sizeof(float);
             DataCopyPadExtParams<float> pad = {};
-            // count is only 1..4 (4..16 bytes). Plain DataCopy rounds down to
-            // a 32-byte transfer, so it would silently copy no max/sum data.
-            // Keep byte-length DataCopyPad for these bounded GM->UB tails.
+            // Stats have distinct aligned regions, even for a 16-head tile.
+            // Copy the exact source tail; pad only to the next 32-byte boundary.
+            // Plain DataCopy would lose short 1..7-float tails entirely.
             pad.isPad = true;
-            pad.rightPadding = 8 - count;
+            pad.rightPadding = (8U - count % 8U) % 8U;
             pad.paddingValue = 0.0F;
             DataCopyPad(stats, coldMaxGm[flatOffset + start], copy, pad);
-            DataCopyPad(stats[8], coldSumGm[flatOffset + start], copy, pad);
+            DataCopyPad(stats[ColdMergeDeviceScratch::STATS_STRIDE], coldSumGm[flatOffset + start], copy, pad);
             SetFlag<HardEvent::MTE2_V>(scratch.mte2ToVector);
             WaitFlag<HardEvent::MTE2_V>(scratch.mte2ToVector);
         }
@@ -231,7 +240,7 @@ __aicore__ inline void MergeMode(
             (__ubuf__ float *)hotOutput.GetPhyAddr() + start * ubStride,
             hotSumAddress, hotMaxAddress,
             (__ubuf__ ColdOutputType *)cold.GetPhyAddr(),
-            (__ubuf__ float *)stats.GetPhyAddr() + 8,
+            (__ubuf__ float *)stats.GetPhyAddr() + ColdMergeDeviceScratch::STATS_STRIDE,
             (__ubuf__ float *)stats.GetPhyAddr(), count, static_cast<uint16_t>(ubStride), nanBits.value);
     }
     // Caller must retain the existing V->MTE3 dependency before the FP32 store.

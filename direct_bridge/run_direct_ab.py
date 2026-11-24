@@ -15,7 +15,7 @@ import traceback
 
 from pinned_payload import activate_payload
 
-VERSION = "sfa-direct-c4-bf16-ab-v3"
+VERSION = "sfa-direct-c4-bf16-ab-v4"
 ACCEPTANCE_POLICY = ("Native equivalence remains global/worst-row relative L2 <=0.001. "
     "Only fused BF16 zero-query cold1920/hot128 may instead pass a current-run bit-exact "
     "FP64-to-BF16 RNE proof; every difference from native must be an exact midpoint and one BF16 ULP. "
@@ -42,7 +42,9 @@ def hot_inputs(runner, parts, base=None):
 
 def make_direct_runner_class(bf16_runner_class):
     class DirectRunner(bf16_runner_class):
-        def __init__(self, backend, bridge, *, fused, writer="hot_store_partition"):
+        def __init__(self, backend, bridge, *, fused, writer="hot_store_partition", aic_count=1):
+            if aic_count not in (1, 2, 4):
+                raise ValueError("Direct fixed Q4 work requires 1, 2 or 4 AICs")
             super().__init__(backend, recipe="baseline", window=128, writer=writer)
             self.direct_fused = fused
             # The pinned parent allocated this from an actual native cold read.
@@ -52,7 +54,7 @@ def make_direct_runner_class(bf16_runner_class):
                 raise ValueError("Native cold/final output must be BF16 or FP32")
             bf16_io = fused and self.expected_output_dtype == "torch.bfloat16"
             self.direct_plan = bridge.prepare(self.base.q_nope, float(self.base.scale),
-                                              fused, not fused, bf16_io)
+                                              fused, not fused, bf16_io, aic_count)
             self.direct_last_state = None
             self.metadata.update(
                 direct_bridge=True, direct_fused=fused,
@@ -63,6 +65,8 @@ def make_direct_runner_class(bf16_runner_class):
                 expected_cold_output_dtype=self.expected_output_dtype,
                 expected_pipeline_output_dtype=self.expected_output_dtype,
                 compiled_fused_bf16_io=bf16_io, cold_state_cast_kernel_calls=0,
+                direct_configuration=dict(self.direct_plan.configuration()),
+                direct_aic_count=aic_count, direct_aiv_count=2*aic_count,
                 acceptance_policy=ACCEPTANCE_POLICY,
                 merge="native_hot_epilogue" if fused else "unchanged payload Triton",
                 production_validation="NOT_VALIDATED")
@@ -330,6 +334,24 @@ def timed_pairs(controls, calls, args, benchmark, pair_benchmark):
     return result
 
 
+def prepared_reader_stages(runners):
+    """Independent stages only: fixed real partitions/states, never full-pipeline timing."""
+    installed, native, fused = (runners[name] for name in
+        ("installed_native_twopass", "direct_native_twopass", "direct_fused"))
+    iparts, nparts, fparts = (runner.partition() for runner in (installed, native, fused))
+    left, right = installed._cold_read(iparts), installed._hot_read(iparts)
+    fused_left = fused._cold_read(fparts)
+    native_args, fused_args = hot_inputs(native, nparts), hot_inputs(fused, fparts)
+    return {
+        "native_c4_cold_read": lambda: installed._cold_read(iparts)[0],
+        "installed_bf16_hot_read": lambda: installed._hot_read(iparts)[0],
+        "direct_bf16_hot_read": lambda: native.direct_plan.native_hot(*native_args)[0],
+        "installed_external_merge": lambda: installed._merge(left, right, iparts),
+        "direct_fused_hot_read_merge": lambda: fused.direct_plan.fused_hot(
+            *fused_args, *fused_left, fparts["old_present"], fparts["recent_present"])[0],
+    }
+
+
 def load_bridge(library, sdk_root=None, build_directory=None):
     library = Path(library).resolve()
     if library.name != "libsfa_torch_direct.so" or not library.is_file():
@@ -360,11 +382,14 @@ def execute(args, report, persist):
     report["environment"] = backend.environment
     bridge = load_bridge(args.bridge_library, args.sdk_root, args.build_directory)
     report["bridge_build"] = getattr(bridge, "_sfa_build_identity", {})
+    report["bridge_configuration"] = dict(bridge.configuration())
     runner_class = make_direct_runner_class(Bf16HotRunner)
     installed = Bf16HotRunner(backend, writer=args.writer)
     runners = dict(c4_w0=backend.prepare("baseline", 0), installed_native_twopass=installed,
-        direct_native_twopass=runner_class(backend, bridge, fused=False, writer=args.writer),
-        direct_fused=runner_class(backend, bridge, fused=True, writer=args.writer))
+        direct_native_twopass=runner_class(backend, bridge, fused=False, writer=args.writer,
+                                         aic_count=args.direct_aic_count),
+        direct_fused=runner_class(backend, bridge, fused=True, writer=args.writer,
+                                 aic_count=args.direct_aic_count))
     report["implementations"] = {name: runner.metadata for name, runner in runners.items()}
     arrays, outputs, passed = {}, {}, {}
     report["controls"] = {}
@@ -433,6 +458,16 @@ def execute(args, report, persist):
     np.savez_compressed(args.output/"outputs.npz", **arrays)
     report["timings"] = ({} if args.timing == "none" else
                          timed_pairs(passed, calls, args, benchmark, paired_benchmark))
+    persist()
+    if args.stages and args.timing != "none":
+        report["stage_scope"] = ("Independent prepared reader stages after full-pipeline pairs; "
+            "real C4 cold states and fixed partitions prepared outside these stage timers; "
+            "not full pipeline latency and not additive")
+        report["stage_timings"] = {}
+        for stage, call in prepared_reader_stages(runners).items():
+            report["stage_timings"][stage] = benchmark(call, warmup=args.warmup,
+                iterations=args.iterations, repeats=min(args.repeats, 3), graph=args.timing == "graph")
+            persist()
     require(identity(data) == report["input_sha256"], "Input data mutated")
     report.update(status="VALIDATED_ONLY" if args.timing == "none" else "MEASURED",
                   c4_pipeline_validated=True, native_twopass_compared=True)
@@ -449,6 +484,9 @@ def parser():
     p.add_argument("--input", type=Path)
     p.add_argument("--device", required=True, help="Explicit NPU device already checked idle; no implicit device 0")
     p.add_argument("--writer", choices=("native", "hot_store_partition"), default="hot_store_partition")
+    p.add_argument("--direct-aic-count", type=int, choices=(1, 2, 4), default=1,
+                   help="Direct hot task count; changes native and fused arms together, never installed baseline")
+    p.add_argument("--stages", action="store_true", help="Add independent prepared reader-stage diagnostics after complete pipeline timing")
     p.add_argument("--timing", choices=("none", "eager", "graph"), default="graph")
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--iterations", type=int, default=100)
@@ -476,7 +514,7 @@ def main(argv=None):
                   production_validation="NOT_VALIDATED",
                   acceptance_policy=ACCEPTANCE_POLICY,
                   scope="fixed all128-hot-hit C4 cold + BF16 hot full write/partition/read/merge pipeline",
-                  performance_baseline="installed_native_twopass is mandatory; direct_native_twopass is bridge-overhead diagnostic only",
+                  performance_baseline="installed_native_twopass is mandatory; direct_native_twopass isolates the direct launch/kernel path, not pure host overhead",
                   timing_scope="one pipeline per graph; repeated replays outside capture; no historical latency constants",
                   args={k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()})
     def persist():

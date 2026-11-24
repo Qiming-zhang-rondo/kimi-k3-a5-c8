@@ -28,10 +28,12 @@ PROBE = r'''
 namespace Probe {
 extern std::array<uint8_t*,19> expected;
 extern int originalCalls, fusedCalls;
+extern uint32_t expectedCount;
 extern void* expectedStream;
 template<class Function,class... Args>
-void Launch(Function function,void* stream,Args... args) {
+void Launch(Function function,uint32_t count,void* stream,Args... args) {
  if(stream!=expectedStream) throw std::runtime_error("caller stream was not forwarded");
+ if(count!=expectedCount) throw std::runtime_error("runtime launch count was not forwarded");
  function(args...);
 }
 template<class... Args> void Record(bool fused,Args... args) {
@@ -59,7 +61,7 @@ class DirectApiContractTests(unittest.TestCase):
             (directory / "sfa_direct_api.h").write_bytes((STANDALONE / "sfa_direct_api.h").read_bytes())
             (directory / "probe.h").write_text(PROBE)
             (directory / "sfa_fixed_contract.h").write_text(
-                "#pragma once\nnamespace sfa_fixed {inline constexpr unsigned launchAic=1;}\n")
+                "#pragma once\nnamespace sfa_fixed {inline constexpr bool IsSupportedAicCount(unsigned n){return n==1||n==2||n==4;}}\n")
             definitions = []
             for wrapper, entry, count, fused in (
                 ("sfa_direct_original_wrapper.asc", "sfa_standalone_entry.asc", 14, False),
@@ -68,8 +70,8 @@ class DirectApiContractTests(unittest.TestCase):
             ):
                 source = (STANDALONE / wrapper).read_text()
                 transformed, replacements = re.subn(
-                    r"(\w+)<<<\s*sfa_fixed::launchAic\s*,\s*nullptr\s*,\s*stream\s*>>>\s*\(",
-                    r"Probe::Launch(\1, stream, ", source)
+                    r"(\w+)<<<\s*aicCount\s*,\s*nullptr\s*,\s*stream\s*>>>\s*\(",
+                    r"Probe::Launch(\1, aicCount, stream, ", source)
                 self.assertEqual(replacements, 1, "must replace exactly the known ASC launch")
                 self.assertNotIn("<<<", transformed)
                 (directory / (wrapper + ".cpp")).write_text(transformed)
@@ -95,6 +97,7 @@ class DirectApiContractTests(unittest.TestCase):
 namespace Probe {
 std::array<uint8_t*,19> expected{};
 int originalCalls=0,fusedCalls=0;
+uint32_t expectedCount=1;
 void* expectedStream=reinterpret_cast<void*>(uintptr_t{42});
 }
 static_assert(std::is_standard_layout<SfaDirectBuffers>::value,"plain C layout");
@@ -107,18 +110,29 @@ int main() {
   SfaDirectBuffers buffers{};
   for(unsigned i=0;i<19;++i) Probe::expected[i]=sentinel.data()+i;
   SETTERS
-  if(SfaDirectAbiVersion()!=2 || SfaDirectBuffersBytes()!=sizeof(buffers)) return 2;
-  SfaLaunchOriginal(Probe::expectedStream,&buffers);
-  SfaLaunchFused(Probe::expectedStream,&buffers);
-  SfaLaunchFusedBf16(Probe::expectedStream,&buffers);
-  if(Probe::originalCalls!=1 || Probe::fusedCalls!=2) return 3;
+  if(SfaDirectAbiVersion()!=3 || SfaDirectBuffersBytes()!=sizeof(buffers)||SfaDirectMergeTileRows()!=8) return 2;
+  for(uint32_t n:{1u,2u,4u}) {
+   Probe::expectedCount=n;
+   if(SfaLaunchOriginal(Probe::expectedStream,&buffers,n)!=0) return 3;
+   if(SfaLaunchFused(Probe::expectedStream,&buffers,n)!=0) return 3;
+   if(SfaLaunchFusedBf16(Probe::expectedStream,&buffers,n)!=0) return 3;
+  }
+  for(uint32_t n:{0u,3u,5u,8u,UINT32_MAX}) {
+   if(SfaLaunchOriginal(Probe::expectedStream,&buffers,n)!=-1) return 4;
+   if(SfaLaunchFused(Probe::expectedStream,&buffers,n)!=-1) return 4;
+   if(SfaLaunchFusedBf16(Probe::expectedStream,&buffers,n)!=-1) return 4;
+  }
+  if(SfaLaunchOriginal(Probe::expectedStream,nullptr,1)!=-1) return 4;
+  if(SfaLaunchFused(Probe::expectedStream,nullptr,2)!=-1) return 4;
+  if(SfaLaunchFusedBf16(Probe::expectedStream,nullptr,4)!=-1) return 4;
+  if(Probe::originalCalls!=3 || Probe::fusedCalls!=6) return 3;
   std::cout<<"HOST_DIRECT_API_ROUTING_PASS\n";
  } catch(const std::exception& e) {std::cerr<<e.what();return 1;}
 }
 '''.replace("OFFSETS", offsets).replace("SETTERS", setters)
             (directory / "driver.cpp").write_text(driver)
             binary = directory / "api_host"
-            compiled = subprocess.run([self.compiler, "-std=c++17", "-O0", "-I", str(directory),
+            compiled = subprocess.run([self.compiler, "-std=c++17", "-O0", "-DSFA_MERGE_TILE_ROWS=8", "-I", str(directory),
                                        *map(str, definitions), str(directory / "driver.cpp"), "-o", str(binary)],
                                       capture_output=True, text=True, timeout=30)
             self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
