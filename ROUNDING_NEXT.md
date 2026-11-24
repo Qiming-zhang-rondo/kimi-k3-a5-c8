@@ -1,17 +1,9 @@
-# 当前动作：仅用已有NPZ做CPU定位
+# 舍入诊断已完成，继续性能
 
-3d2011e6：direct两遍与已安装两遍完全一致，融合非零query通过；唯一失败是zero-query
-最差行0.001010071，门槛0.001。先确认是否为BF16 halfway舍入差异，不能直接放宽阈值。
+83a4001已提交 `evidence/merge_rounding_diagnosis_3d2011e6.json`。
+本轮零query融合结果131072个值与独立FP64→BF16 RNE参考逐值完全一致；
+旧两遍4096个不同值均为精确半值处的相邻1 ULP差异。非零query原0.001门禁通过。
 
-在已有结果的机器上从仓库根目录执行，不重编、不重跑NPU、不重新测速：
-
-```bash
-python3 direct_bridge/diagnose_merge_rounding.py \
-  --npz /tmp/sfa-direct-c4-ab-v2/results/outputs.npz \
-  --results /tmp/sfa-direct-c4-ab-v2/results/results.json \
-  --output evidence/merge_rounding_diagnosis_3d2011e6.json
-```
-
-直接提交并推送这份小JSON到sfa-cold-merge，继续任务，不要求用户转贴。
-只读取已有数值，不加载Torch/CANN；原CONTROL_FAILED、0.001门禁和原NPZ保留。
-无需追加多轮验证或修改内核。后续依据oracle/tie结果只改必要一处。
+不要重跑CPU诊断或重编设备库。下一步执行 [PERFORMANCE_NOW.md](PERFORMANCE_NOW.md)。
+原始3d2011e6的CONTROL_FAILED、NPZ及严格比较数值保持原样；新运行会从当次实际冷/热状态
+重新验证严格的零query RNE条件，不以旧JSON代替验收，也不全局放宽0.001门槛。

@@ -15,7 +15,11 @@ import traceback
 
 from pinned_payload import activate_payload
 
-VERSION = "sfa-direct-c4-bf16-ab-v2"
+VERSION = "sfa-direct-c4-bf16-ab-v3"
+ACCEPTANCE_POLICY = ("Native equivalence remains global/worst-row relative L2 <=0.001. "
+    "Only fused BF16 zero-query cold1920/hot128 may instead pass a current-run bit-exact "
+    "FP64-to-BF16 RNE proof; every difference from native must be an exact midpoint and one BF16 ULP. "
+    "The original failed strict comparison is retained. No nonzero-query or FP32 exception.")
 ARMS = ("c4_w0", "installed_native_twopass", "direct_native_twopass", "direct_fused")
 DIRECT_ARMS = ("direct_native_twopass", "direct_fused")
 PAIRS = (("c4_w0", "installed_native_twopass"),
@@ -59,6 +63,7 @@ def make_direct_runner_class(bf16_runner_class):
                 expected_cold_output_dtype=self.expected_output_dtype,
                 expected_pipeline_output_dtype=self.expected_output_dtype,
                 compiled_fused_bf16_io=bf16_io, cold_state_cast_kernel_calls=0,
+                acceptance_policy=ACCEPTANCE_POLICY,
                 merge="native_hot_epilogue" if fused else "unchanged payload Triton",
                 production_validation="NOT_VALIDATED")
 
@@ -144,6 +149,47 @@ def evaluate_output_contract(prepared_tensor, pipeline, matching, bf16_math,
         destination_rounding_vs_unrounded_matching_reference=compare(rounded, matching))
     arrays[name+"_unrounded_matching_reference"] = matching
     return metrics, output
+
+
+def zero_query_exact_rne_gate(cold, hot, actual, native, *, cold_dtype, hot_dtype, output_dtype):
+    """Narrow proof using this invocation's states; never read an earlier report."""
+    import numpy as np
+    from diagnose_merge_rounding import bf16_neighbors, bits, ordered_codes
+    co, cm, cs = (np.asarray(value) for value in cold)
+    ho, hm, hs = (np.asarray(value) for value in hot)
+    actual, native = np.asarray(actual), np.asarray(native)
+    out_shape, stat_shape = (4, 64, 512), (4, 64, 1)
+    result = dict(passed=False, basis="exact_zero_query_BF16_RNE",
+        strict_relative_l2_limit_unchanged=.001, states_source="current invocation; no saved-result trust",
+        dtype_contract=all(str(dtype) == "torch.bfloat16" for dtype in (cold_dtype,hot_dtype,output_dtype)),
+        shape_contract=all(v.shape == out_shape for v in (co,ho,actual,native)) and
+                       all(v.shape == stat_shape for v in (cm,cs,hm,hs)))
+    if not result["dtype_contract"] or not result["shape_contract"]:
+        return result
+    result["all_finite"] = all(bool(np.isfinite(value).all()) for value in (co,cm,cs,ho,hm,hs,actual,native))
+    result["exact_zero_query_statistics"] = bool((cm == 0).all() and (hm == 0).all() and
+                                                  (cs == 1920).all() and (hs == 128).all())
+    result["all_outputs_on_bf16_grid"] = all(bool(
+        np.array_equal(value, value.astype(np.float32)) and
+        ((value.astype(np.float32).view(np.uint32) & 0xffff) == 0).all()) for value in (co,ho,actual,native))
+    if not all(result[key] for key in ("all_finite", "exact_zero_query_statistics", "all_outputs_on_bf16_grid")):
+        return result
+    precise = (15.0*co.astype(np.float64)+ho.astype(np.float64))/16.0
+    oracle, _, tie, _ = bf16_neighbors(precise)
+    # Preserve signed zero in the destination's bit-exact output contract.
+    oracle = np.where(precise == 0, np.copysign(np.float32(0), precise), oracle).astype(np.float32)
+    actual_codes, native_codes, oracle_codes = bits(actual), bits(native), bits(oracle)
+    mismatch = actual_codes != native_codes
+    ulp = np.abs(ordered_codes(actual)-ordered_codes(native))
+    invalid_mismatch = mismatch & (~tie | (ulp != 1))
+    oracle_mismatch = actual_codes != oracle_codes
+    result.update(actual_oracle_bit_mismatch_count=int(oracle_mismatch.sum()),
+        actual_native_bit_mismatch_count=int(mismatch.sum()),
+        native_mismatches_at_exact_midpoint=int((mismatch & tie).sum()),
+        native_mismatches_not_at_exact_midpoint=int((mismatch & ~tie).sum()),
+        native_mismatches_not_one_ulp=int((mismatch & (ulp != 1)).sum()),
+        passed=bool(not oracle_mismatch.any() and not invalid_mismatch.any()))
+    return result
 
 
 def graph_replay_control(call, buffers, torch, host, services):
@@ -242,7 +288,17 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct", 
         else:
             actual = runner._merge(left, direct, parts)
         require_same_dtype(actual, reference_tensor, "Fused or direct two-pass / installed merge")
-        checks[prefix+"_same_native_states_merge"] = strict_compare(host(actual), reference, services, .001)
+        strict_merge = strict_compare(host(actual), reference, services, .001)
+        checks[prefix+"_same_native_states_merge"] = strict_merge
+        merge_acceptance = dict(passed=strict_merge["passed"], basis="strict_native_relative_l2")
+        if zero and runner.direct_fused and not strict_merge["passed"]:
+            proof = zero_query_exact_rne_gate(tuple(host(t) for t in left), tuple(host(t) for t in direct),
+                host(actual), reference, cold_dtype=left[0].dtype, hot_dtype=direct[0].dtype, output_dtype=actual.dtype)
+            checks["zero_query_exact_rne_gate"] = proof
+            if proof["passed"]:
+                merge_acceptance = dict(passed=True, basis="exact_zero_query_BF16_RNE",
+                                        original_strict_comparison_passed=False)
+        checks[prefix+"_merge_acceptance"] = merge_acceptance
         if arrays is not None:
             arrays[f"{label}_{prefix}_actual"] = host(actual)
             arrays[f"{label}_{prefix}_native_reference"] = reference
@@ -256,7 +312,11 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct", 
                 error = float(np.max(np.abs(actual_count-count))) if finite else None
                 checks["zero_query_"+label+"_counts"] = dict(passed=finite and error <= max(.02, count*1e-4),
                     expected_count=count, max_abs_count_error=error, finite=finite)
-    checks["passed"] = all(item["passed"] for item in checks.values() if "passed" in item)
+    # Each merge's explicit acceptance verdict is authoritative; its original
+    # strict result remains untouched for review, including a failed zeroQ row.
+    checks["passed"] = all(item["passed"] for key,item in checks.items()
+        if isinstance(item, dict) and "passed" in item and not key.endswith("_same_native_states_merge"))
+    checks["acceptance_policy"] = ACCEPTANCE_POLICY
     return checks
 
 
@@ -414,6 +474,7 @@ def main(argv=None):
     report = dict(version=VERSION, status="RUNNING", c4_pipeline_validated=False,
                   native_twopass_compared=False, real_hot_empty_dispatch_validated=False,
                   production_validation="NOT_VALIDATED",
+                  acceptance_policy=ACCEPTANCE_POLICY,
                   scope="fixed all128-hot-hit C4 cold + BF16 hot full write/partition/read/merge pipeline",
                   performance_baseline="installed_native_twopass is mandatory; direct_native_twopass is bridge-overhead diagnostic only",
                   timing_scope="one pipeline per graph; repeated replays outside capture; no historical latency constants",

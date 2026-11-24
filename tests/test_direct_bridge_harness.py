@@ -87,6 +87,43 @@ class CopyScalar(float):
 
 
 class DirectBridgeHarnessTests(unittest.TestCase):
+    @staticmethod
+    def rounding_fixture():
+        import numpy as np
+        shape, stats = (4,64,512), (4,64,1)
+        cold = (np.ones(shape,np.float32), np.zeros(stats,np.float32), np.full(stats,1920,np.float32))
+        hot = (np.full(shape,1.0625,np.float32), np.zeros(stats,np.float32), np.full(stats,128,np.float32))
+        actual, native = np.ones(shape,np.float32), np.ones(shape,np.float32)
+        native.reshape(-1)[:4096] = 1+1/128
+        kwargs = dict(cold_dtype="torch.bfloat16",hot_dtype="torch.bfloat16",output_dtype="torch.bfloat16")
+        return cold,hot,actual,native,kwargs
+
+    def test_zero_query_exact_rne_accepts_exact_oracle_and_only_adjacent_ties(self):
+        cold,hot,actual,native,kwargs = self.rounding_fixture()
+        result = harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["actual_oracle_bit_mismatch_count"],0)
+        self.assertEqual(result["native_mismatches_at_exact_midpoint"],4096)
+        self.assertEqual(result["strict_relative_l2_limit_unchanged"],.001)
+
+    def test_zero_query_exact_rne_rejects_nontie_even_when_only_one_ulp(self):
+        cold,hot,actual,native,kwargs = self.rounding_fixture()
+        hot[0].fill(1.)  # Exact merge is 1, not a midpoint.
+        result = harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["native_mismatches_not_at_exact_midpoint"],4096)
+
+    def test_zero_query_exact_rne_rejects_wrong_tie_result_stats_and_dtype(self):
+        cold,hot,actual,native,kwargs = self.rounding_fixture()
+        actual.reshape(-1)[0] = 1+1/128
+        self.assertFalse(harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)["passed"])
+        actual.fill(1.)
+        cold[2].reshape(-1)[0] = 1919
+        self.assertFalse(harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)["passed"])
+        cold[2].fill(1920)
+        kwargs["output_dtype"] = "torch.float32"
+        self.assertFalse(harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)["passed"])
+
     def test_manifest_checks_actual_bytes_and_rejects_missing_or_modified(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/"module.py"
