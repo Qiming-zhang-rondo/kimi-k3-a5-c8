@@ -20,6 +20,7 @@ function(configure_sfa target)
         $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>)
     target_compile_definitions(${target} PRIVATE SFA_PROBE_TEMPLATE_MODE=${SFA_PROBE_TEMPLATE_MODE})
     target_include_directories(${target} PRIVATE
+        "${SFA_BUNDLE_ROOT}/experimental/arch35"
         "${CMAKE_CURRENT_SOURCE_DIR}" "${SFA_BUNDLE_ROOT}/original"
         "${SFA_BUNDLE_ROOT}/original/arch35"
         "${SFA_BUNDLE_ROOT}/deps/sparse_flash_attention/arch35"
@@ -29,7 +30,8 @@ function(configure_sfa target)
                 "/include/interface" "/include/tiling" "/include/utils" "/include/comm_api"
                 "/impl" "/impl/basic_api")
             if(EXISTS "${SFA_ASC_ROOT}${suffix}")
-                target_include_directories(${target} PRIVATE "${SFA_ASC_ROOT}${suffix}")
+                target_include_directories(${target} PRIVATE
+        "${SFA_BUNDLE_ROOT}/experimental/arch35" "${SFA_ASC_ROOT}${suffix}")
             endif()
         endforeach()
     endif()

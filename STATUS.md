@@ -243,3 +243,29 @@ L2 ~0.0018 = pure BF16 precision baseline (matches full_bf16 reference 0.00188).
 14项测试通过；独立真实CLI组合冒烟(init/check/serve/签名ping/status)也通过，ping没有新增模型消息。
 项目接入仍需一次性HTTPS回调与GitHub仓库Webhook配置，公网GitHub投递尚未在此部署验证。
 原版SFA的3项DEVICE_VALIDATED结果沿用2ddc663；后续继续融合与性能任务。
+
+## Phase B Blocker: experimental vector service has CANN 9.2.1 API incompatibilities (2026-11-24 18:45)
+
+### Issues found:
+1. DataCopyPad MTE3 (UB→GM output) at line 799: TYPE CONFLICT
+   - attentionOutGm is OUTPUT_T (bfloat16_t) but vec2ResUb is float
+   - experimental code writes FP32 fusion output but output tensor is BF16
+   - Need: either cast output to OUTPUT_T or declare separate FP32 output tensor
+
+2. DataCopyPad MTE2 (GM→UB input) at lines 324/328/364/370: multi-line calls
+   - These use DataCopyExtParams + DataCopyPadExtParams (4-arg pattern)
+   - May have their own type/signature issues with CANN 9.2.1
+
+3. cold_state_merge_device.h DataCopyPad: fixed by replacing with DataCopy
+   (contiguous data, no padding needed)
+
+### What's needed:
+The experimental/arch35/sparse_flash_attention_service_vector_mla.h needs to be
+updated for CANN 9.2.1 DataCopyPad API compatibility. Key changes:
+- Fix output type mismatch (FP32 fusion output vs BF16 output tensor)
+- Ensure all DataCopyPad calls match CANN 9.2.1 signatures
+- The cold_state_merge_device.h DataCopy fix is already done (DataCopy for contiguous)
+
+### Fusion entry (sfa_fusion_entry.asc): compiles correctly through template
+instantiation (SFA_PROBE_TYPES macro pattern matches verified original).
+The blocker is ONLY in the experimental vector service's API compatibility.
