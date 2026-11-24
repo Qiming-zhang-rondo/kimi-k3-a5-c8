@@ -128,3 +128,35 @@ kernel 确实进图并重新写出结果。真正 hot=0 调度尚不在固定 co
 实际四臂包括C4 W0、已安装两遍、direct两遍诊断与direct融合；必须比较融合/已安装两遍，
 不能用一个可能变慢的direct两遍代替当前基线。分别保存 event、wall、每轮比值及 profiler kernel 信息；
 不能把宿主提交时间当设备延迟，也不能用更换输入或计时范围制造提升。
+
+## 从现有 NPZ 做纯 CPU 舍入定位
+
+提交 `3d2011e6` 的 reader 检查只在 zero-query 的融合/两遍比较失败：整体 relative L2
+为0.0007679979，最差行0.0010100710，严格0.001门槛仍判失败；nonzero-query为2.3511e-5并通过。
+direct/installed hot输出一致，零查询冷热计数1920/128通过。这个现象尚不足以断言kernel错误
+或参考错误，也不能因接近阈值就放宽门槛。
+
+本轮 `outputs.npz` 已在失败退出前保存完整数值：
+
+- `direct_fused_{zero_query,nonzero_query}_{cold,installed_hot,direct_hot}_{out,max,sum}`。
+- `direct_fused_{zero_query,nonzero_query}_actual` 和 `_native_reference`。
+- cold另有原始字节。BF16 hot/最终输出以FP32 NumPy数值保存仍可无损恢复BF16值。
+
+不用重新启动 A5、重新量化或重跑计时。在现有结果所在机器、仓库根目录执行：
+
+```bash
+python direct_bridge/diagnose_merge_rounding.py \
+  --npz /tmp/sfa-direct-c4-ab-v2/results/outputs.npz \
+  --results /tmp/sfa-direct-c4-ab-v2/results/results.json \
+  --output /tmp/sfa-direct-c4-ab-v2/results/merge_rounding_diagnosis.json
+```
+
+脚本只使用 NumPy/标准库读取旧文件；不加载 Torch、CANN或NPU。若需核对实际key，先加
+`--list-keys`。它以相同原生输入构造独立FP64参考，按最终BF16 RNE合同舍入，并将实际值与
+Triton参考分别对比。零查询先确认max=0、sum=1920/128，再检查精确权重15/16与1/16；
+定位差异是否落在相邻BF16值的正中间、是否只有halfway tie、哪边符合独立RNE oracle。
+非零查询使用稳定FP64 max/sum合并作为另一个检查，不能把未舍入FP32值当BF16参考。
+
+诊断输出保留原严格0.001验收状态，仅增加舍入证据和少量代表位置。将这份小JSON直接推送
+同一分支供审查，不让用户再次转贴大JSON，也不覆盖原results/NPZ。诊断完成前保留原
+CONTROL_FAILED，停止性能验收；不能先改kernel或阈值把现象掩盖。

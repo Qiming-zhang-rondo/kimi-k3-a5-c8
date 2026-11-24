@@ -1,5 +1,8 @@
 # 单次完整执行入口
 
+**当前先执行 [ROUNDING_NEXT.md](ROUNDING_NEXT.md)：直接用3d2011e6现有NPZ运行一次CPU舍入诊断，
+提交小JSON。按用户最新要求不重编、不重跑NPU、不追加多轮验证；原精度门禁保留。**
+
 **当前优先任务：[POST_COMPILE_EXECUTION_TASK.md](POST_COMPILE_EXECUTION_TASK.md)。**
 最新d92f2f59已通过原C4与已安装两遍控制，卡点为FP32-only冷态假设。
 本轮已补BF16冷入/最终BF16的原生融合变体与ABI2，按PERF_REPAIR_5407.md重编设备库，
