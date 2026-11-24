@@ -140,3 +140,45 @@ SHA和宏上下文，不执行编译器/NPU、不修改源码/SDK。下一轮直
 默认执行任务已切至POST_COMPILE_EXECUTION_TASK.md：最小direct launcher/匹配tiling，
 原版compact128精度，现有epilogue的standalone融合接入，以及10轮三臂AB/BA全流程性能。
 
+
+## Phase A Execution Status (2026-11-24 17:15)
+
+### BUILD_PASS → LAUNCH_PASS → EXECUTION_ERROR(507015)
+
+1. ✅ Direct launch executable built (sfa_launch, 480KB, ASC + C++ single unit)
+2. ✅ Kernel launched on A5: aclrtSetDevice OK, buffers allocated, <<<1, nullptr, stream>>> dispatched
+3. ❌ Execution error 507015 (aicore exception during kernel process)
+   - softmaxMax=0, softmaxSum=0 (kernel crashed before writing output)
+   - Output has no NaN (buffers were zeroed, kernel didn't touch them)
+
+### Tiling data (attempted correction):
+- Used upstream formulas: mmResUbSize = s2Aligned(128) * Align(mBase(64),16) = 8192
+- bmm2ResUbSize = dAligned(576) * Align(mBase(64),16) = 36864
+- usedCoreNum = 1 AIC, blockNum=1 in <<<>>> launch
+- accumOutSize = 1*2*1*64*576 = 73728, logSumExpSize = 2*1*2*1*64 = 256
+- Still 507015 after correction
+
+### Root cause hypothesis:
+SFA is a MIX kernel (KERNEL_TYPE_MIX_AIC_1_2 = 1 AIC + 2 AIV per block).
+Direct <<<>>> launch of MIX kernels may need runtime configuration beyond
+what the add_custom (pure vector) template demonstrates. The ASC compiler
+handles the kernel binary generation, but the direct launch runtime may not
+properly schedule AIC+AIV pairs without additional setup (intercoreSync,
+task ration, or explicit kernel task metadata).
+
+### What Codex should check:
+1. Whether <<<>>> direct launch supports KERNEL_TYPE_MIX_AIC_1_2 on dav-3510
+2. Whether the tiling data matches the kernel's actual ConstInfo expectations
+   (compare with dynamic/sparse_flash_attention.py TBE tiling generation)
+3. Whether the workspace needs specific initialization (GetUserWorkspace offset)
+4. Whether PA_BSND block table format is correct for zero-Q test
+5. The upstream tiling.cpp's full computation for our fixed shape B1/Q4/K8192/H64/D512
+
+### Reproduction:
+```bash
+cd /tmp/sfa_merge_src_upload/standalone
+cmake . -B build_launch -DCMAKE_BUILD_TYPE=Release
+cmake --build build_launch -j8
+./build_launch/sfa_launch
+# → ERROR: aclrtSynchronizeStream failed, ret=507015
+```
