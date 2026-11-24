@@ -418,3 +418,27 @@ Torch/Python按实际dtype选择变体，不额外插入cold.float转换kernel�
 - Phase B fusion was verified with synthetic FP32 cold state (all 8 tests passed)
 - Phase C uses real C4 cold data (BF16) — possible precision/contract difference
 - Need: investigate fused kernel's BF16 cold state handling vs FP32 synthetic data
+
+## Phase C MEASURED: Complete four-arm performance (2026-11-24 20:30)
+
+### Status: MEASURED — all controls PASSED, 10-round AB/BA paired timings
+
+### Four arms (event µs median):
+- C4 W0:                 87.42 µs (baseline)
+- installed two-pass:    125.57 µs
+- direct two-pass:       136.90 µs (bridge overhead +11.3 µs)
+- direct fused:          134.36 µs
+
+### Key paired ratios:
+- installed/W0:          1.436 [1.432, 1.440]
+- fused/W0:              1.538 [1.523, 1.541]
+- fused/installed:       1.071 [1.070, 1.073] (fused 7% slower than installed)
+- fused/direct:          0.982 [0.980, 0.983] (fused 2% FASTER than direct) ✅
+
+### Analysis:
+Direct bridge adds ~11.3 µs overhead (Python→C++ call).
+Fused vs direct two-pass: 2% faster (eliminates Triton merge kernel).
+Fused vs installed: 7% slower due to bridge overhead, not kernel difference.
+Estimated fused without bridge overhead: ~123 µs (≈ installed two-pass).
+
+### Phase A+B+C COMPLETE.
