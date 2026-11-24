@@ -18,10 +18,15 @@
 python3 tools/collect_source_closure.py --source-root /actual/package/root --source-root /actual/source/project --output /fresh/isolated/closure
 python3 tools/run_logged_stage.py --stage baseline_build --work-dir /tmp/sfa-evidence --cwd /actual/source/project -- COMMAND ARG...
 python3 tools/run_logged_stage.py --stage baseline_build --work-dir /tmp/sfa-evidence -- python3 tools/probe_original_sfa.py --work-dir /tmp/sfa-original-probe --compile
+python3 tools/diagnose_sfa_platform.py --work-dir /tmp/sfa-platform-recovery --compile
 ```
 
 收集器只读源目录，输出来源/哈希和隔离副本；缺依赖时保留 partial 结果并返回非零，继续查找真实来源，不能把它当成编译成功。尽量给精确源码根目录，不扫描整盘或提交无关源码。
 日志工具阶段名为 `baseline_build`、`candidate_build`、`accuracy`、`performance`，每次生成独立 `stage.log/status.json`。出现设备故障标记 `DEVICE_FAULT.json` 后停止设备测试链；继续只读分析/构建，不删标记强行重试或自行复位设备。
+
+当前平台初始化失败按PLATFORM_RECOVERY.md处理：使用当前SDK真实配置的完整目标逐候选隔离尝试，保存原始日志及最后SDK阶段。
+不要从一次set_soc的get_platform_info崩溃就认定硬件无权限。公开匹配源定义/host实现已在upstream；
+若需要独立源码重构，使用同项目同commit的host/kernel配套，不能把公开头直接塞入私有tiling字节。
 
 ## 已有基线与明确目标
 

@@ -1,0 +1,105 @@
+{
+  "scope": "pinned primary-source extracts; not injected into installed/private operator ABI",
+  "files": [
+    {
+      "local_path": "vllm-ascend-f4778729/csrc/attention/sparse_flash_attention/op_host/sparse_flash_attention_tiling.h",
+      "url": "https://github.com/vllm-project/vllm-ascend/blob/f47787297410372e8898cb268fcfb9e80681ff4e/csrc/attention/sparse_flash_attention/op_host/sparse_flash_attention_tiling.h",
+      "github_blob_sha": "81cda6b5edd7255ee82e242c55247e00bcd92af8",
+      "commit": "f47787297410372e8898cb268fcfb9e80681ff4e",
+      "bytes": 23697,
+      "sha256": "09cbcebfd87f27dc019a24349f5af787174d5b9353a08bf634242cc798dc2df1",
+      "local_git_blob_sha": "81cda6b5edd7255ee82e242c55247e00bcd92af8",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "sgl-kernel-npu-597250fc/csrc/sparse_flash_attention/op_kernel/sparse_flash_attention_tiling_data.h",
+      "url": "https://github.com/sgl-project/sgl-kernel-npu/blob/597250fcc1b31f2607bf817d42bd0699ea60b8eb/csrc/sparse_flash_attention/op_kernel/sparse_flash_attention_tiling_data.h",
+      "github_blob_sha": "ba69feb81efd1b843f1ab91021a6b2f633273e1f",
+      "commit": "597250fcc1b31f2607bf817d42bd0699ea60b8eb",
+      "bytes": 2178,
+      "sha256": "ea2339293446556563ddd7cf73f42e663ac3fbaea8e418e4f413e6f604057b53",
+      "local_git_blob_sha": "ba69feb81efd1b843f1ab91021a6b2f633273e1f",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "vllm-ascend-f4778729/csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kernel_mla.h",
+      "url": "https://github.com/vllm-project/vllm-ascend/blob/f47787297410372e8898cb268fcfb9e80681ff4e/csrc/attention/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kernel_mla.h",
+      "github_blob_sha": "78a87f66ccfbea9bb2f8b9155eaf8a2144628b49",
+      "commit": "f47787297410372e8898cb268fcfb9e80681ff4e",
+      "bytes": 31999,
+      "sha256": "384c53d562840c2f1ecd3bfe2673426e5167b2c51c9e27e90cd732bb133a9d56",
+      "local_git_blob_sha": "78a87f66ccfbea9bb2f8b9155eaf8a2144628b49",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "vllm-ascend-f4778729/csrc/attention/sparse_flash_attention/op_host/CMakeLists.txt",
+      "url": "https://github.com/vllm-project/vllm-ascend/blob/f47787297410372e8898cb268fcfb9e80681ff4e/csrc/attention/sparse_flash_attention/op_host/CMakeLists.txt",
+      "github_blob_sha": "68688fbf8d1c6d0821e30f1e2c38ae421f94c402",
+      "commit": "f47787297410372e8898cb268fcfb9e80681ff4e",
+      "bytes": 1466,
+      "sha256": "684445946f39d46be044624d6eb2b9f4259ec6d273a7ac39fffe2ecfd72d079c",
+      "local_git_blob_sha": "68688fbf8d1c6d0821e30f1e2c38ae421f94c402",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "sgl-kernel-npu-597250fc/csrc/sparse_flash_attention/op_host/tiling/sparse_flash_attention_tiling.h",
+      "url": "https://github.com/sgl-project/sgl-kernel-npu/blob/597250fcc1b31f2607bf817d42bd0699ea60b8eb/csrc/sparse_flash_attention/op_host/tiling/sparse_flash_attention_tiling.h",
+      "github_blob_sha": "3fd559f83b0007cbfeddde75426201931accb9b5",
+      "commit": "597250fcc1b31f2607bf817d42bd0699ea60b8eb",
+      "bytes": 24076,
+      "sha256": "5f057a5db880671e97489f5f99e0e160d65b975c4717676d38c199b6e495a2f4",
+      "local_git_blob_sha": "3fd559f83b0007cbfeddde75426201931accb9b5",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "sgl-kernel-npu-597250fc/csrc/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kernel_mla.h",
+      "url": "https://github.com/sgl-project/sgl-kernel-npu/blob/597250fcc1b31f2607bf817d42bd0699ea60b8eb/csrc/sparse_flash_attention/op_kernel/arch35/sparse_flash_attention_kernel_mla.h",
+      "github_blob_sha": "48b91dcbb2b9c176dba028eaf7f17c44e663b21d",
+      "commit": "597250fcc1b31f2607bf817d42bd0699ea60b8eb",
+      "bytes": 32120,
+      "sha256": "3dc1a9ef095984a05b7ee5903483da54fe889da8120ee61f9d6bbf179c3cd80a",
+      "local_git_blob_sha": "48b91dcbb2b9c176dba028eaf7f17c44e663b21d",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "sgl-kernel-npu-597250fc/LICENSE",
+      "url": "https://github.com/sgl-project/sgl-kernel-npu/blob/597250fcc1b31f2607bf817d42bd0699ea60b8eb/LICENSE",
+      "github_blob_sha": "909b8ff34ce3ff391ec5ecd1d2388d0c5b1cd4b3",
+      "commit": "597250fcc1b31f2607bf817d42bd0699ea60b8eb",
+      "bytes": 1068,
+      "sha256": "da25818d68a3da676fed16a019beadd6b12f5e4d59ade85840c23a6070240323",
+      "local_git_blob_sha": "909b8ff34ce3ff391ec5ecd1d2388d0c5b1cd4b3",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "vllm-ascend-f4778729/LICENSE",
+      "url": "https://github.com/vllm-project/vllm-ascend/blob/f47787297410372e8898cb268fcfb9e80681ff4e/LICENSE",
+      "github_blob_sha": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "commit": "f47787297410372e8898cb268fcfb9e80681ff4e",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "local_git_blob_sha": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "vllm-ascend-f4778729/csrc/attention/sparse_flash_attention/op_host/sparse_flash_attention_tiling.cpp",
+      "url": "https://github.com/vllm-project/vllm-ascend/blob/f47787297410372e8898cb268fcfb9e80681ff4e/csrc/attention/sparse_flash_attention/op_host/sparse_flash_attention_tiling.cpp",
+      "github_blob_sha": "a35cba54e2796c22991275ad1eb1c442dc82389f",
+      "commit": "f47787297410372e8898cb268fcfb9e80681ff4e",
+      "bytes": 81594,
+      "sha256": "2007140f568b2b7bc4f3a90f3d06f092913f2439bcc00c1fea4a26801f46ad78",
+      "local_git_blob_sha": "a35cba54e2796c22991275ad1eb1c442dc82389f",
+      "matches_github_blob": true
+    },
+    {
+      "local_path": "sgl-kernel-npu-597250fc/python/sgl_kernel_npu/sgl_kernel_npu/implementation/cannbot-dsl/LICENSE.cannbot-dsl",
+      "url": "https://github.com/sgl-project/sgl-kernel-npu/blob/597250fcc1b31f2607bf817d42bd0699ea60b8eb/python/sgl_kernel_npu/sgl_kernel_npu/implementation/cannbot-dsl/LICENSE.cannbot-dsl",
+      "github_blob_sha": "5bbae49cfef290779b5b5b3f253c20958f3e2bd1",
+      "commit": "597250fcc1b31f2607bf817d42bd0699ea60b8eb",
+      "bytes": 5260,
+      "sha256": "b19e8ceb864d5bb64955fdeee608854718a47803b5609ee9d959c4347266d5bb",
+      "local_git_blob_sha": "5bbae49cfef290779b5b5b3f253c20958f3e2bd1",
+      "matches_github_blob": true
+    }
+  ]
+}

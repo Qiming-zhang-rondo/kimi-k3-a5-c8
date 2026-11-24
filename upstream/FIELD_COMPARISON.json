@@ -1,0 +1,225 @@
+{
+  "scope": "source field equality and host C++ layout only; not installed binary ABI or NPU validation",
+  "sgl_fields": {
+    "SparseFlashAttentionBaseParamsMla": {
+      "fields": [
+        [
+          "uint32_t",
+          "batchSize"
+        ],
+        [
+          "uint32_t",
+          "seqSize"
+        ],
+        [
+          "uint32_t",
+          "qSeqSize"
+        ],
+        [
+          "int64_t",
+          "blockSize"
+        ],
+        [
+          "uint32_t",
+          "maxBlockNumPerBatch"
+        ],
+        [
+          "float",
+          "scaleValue"
+        ],
+        [
+          "uint32_t",
+          "nNumOfQInOneGroup"
+        ],
+        [
+          "uint32_t",
+          "actualLenDimsQ"
+        ],
+        [
+          "uint32_t",
+          "actualLenDimsKV"
+        ],
+        [
+          "uint32_t",
+          "outputLayout"
+        ],
+        [
+          "uint32_t",
+          "sparseMode"
+        ],
+        [
+          "int64_t",
+          "preTokens"
+        ],
+        [
+          "int64_t",
+          "nextTokens"
+        ],
+        [
+          "uint32_t",
+          "attentionMode"
+        ],
+        [
+          "uint32_t",
+          "returnSoftmaxLse"
+        ],
+        [
+          "int64_t",
+          "sparseBlockSize"
+        ],
+        [
+          "uint32_t",
+          "sparseBlockCount"
+        ],
+        [
+          "uint32_t",
+          "isActualLenDimsNull"
+        ],
+        [
+          "uint32_t",
+          "isActualLenDimsKVNull"
+        ],
+        [
+          "uint32_t",
+          "dispatchKey"
+        ]
+      ],
+      "host_raw_equal": true,
+      "ordered_fields_sha256": "f50b5c9b183fdb8f582ff1eb6bd9f2c28867c585e164564942f1d6e051df3211"
+    },
+    "SparseFlashAttentionSingleCoreParamsMla": {
+      "fields": [
+        [
+          "uint32_t",
+          "usedCoreNum"
+        ]
+      ],
+      "host_raw_equal": true,
+      "ordered_fields_sha256": "19bf926d7f61b1af070a61c16c0b9ac78a7650cc4acd803d970a7f9f976a57f5"
+    },
+    "SparseFlashAttentionSingleCoreTensorSizeMla": {
+      "fields": [
+        [
+          "uint32_t",
+          "mmResUbSize"
+        ],
+        [
+          "uint32_t",
+          "bmm2ResUbSize"
+        ]
+      ],
+      "host_raw_equal": true,
+      "ordered_fields_sha256": "eb7029a1fb340e7c4511b29e5e5dd97c933e39f403fb0796e94a626aa0d289e3"
+    },
+    "SparseFlashAttentionSplitKVParamsMla": {
+      "fields": [
+        [
+          "uint32_t",
+          "s2"
+        ],
+        [
+          "uint32_t",
+          "accumOutSize"
+        ],
+        [
+          "uint32_t",
+          "logSumExpSize"
+        ]
+      ],
+      "host_raw_equal": true,
+      "ordered_fields_sha256": "751b95a52d0b48de81309c040f222f52c71056b7083b07aeba4d98033c77be57"
+    },
+    "SparseFlashAttentionInnerSplitParams": {
+      "fields": [
+        [
+          "uint32_t",
+          "mBaseSize"
+        ],
+        [
+          "uint32_t",
+          "s2BaseSize"
+        ]
+      ],
+      "host_raw_equal": true,
+      "ordered_fields_sha256": "41d7383450e167e1d9e4ae3aef5a45bfc676fddb516a34793db20a2157180cd6"
+    },
+    "SparseFlashAttentionTilingDataMla": {
+      "fields": [
+        [
+          "SparseFlashAttentionBaseParamsMla",
+          "baseParams"
+        ],
+        [
+          "SparseFlashAttentionSplitKVParamsMla",
+          "splitKVParams"
+        ],
+        [
+          "SparseFlashAttentionSingleCoreParamsMla",
+          "singleCoreParams"
+        ],
+        [
+          "SparseFlashAttentionSingleCoreTensorSizeMla",
+          "singleCoreTensorSize"
+        ],
+        [
+          "SparseFlashAttentionInnerSplitParams",
+          "innerSplitParams"
+        ]
+      ],
+      "host_raw_equal": true,
+      "ordered_fields_sha256": "17e83b531c4f3cf3354148788b4e9d1f7aa094184039d414af3dd1652d1efe9f"
+    }
+  },
+  "original_kernel_accesses": {
+    "baseParams": [
+      "batchSize",
+      "blockSize",
+      "isActualLenDimsKVNull",
+      "isActualLenDimsNull",
+      "maxBlockNumPerBatch",
+      "nNumOfQInOneGroup",
+      "outputLayout",
+      "qSeqSize",
+      "returnSoftmaxLse",
+      "scaleValue",
+      "seqSize",
+      "sparseBlockCount",
+      "sparseMode"
+    ],
+    "singleCoreParams": [
+      "usedCoreNum"
+    ]
+  },
+  "kernel_comparison": {
+    "vllm-ascend-f4778729": {
+      "same_after_whitespace_normalization": false,
+      "whitespace_normalized_sequence_ratio": 0.9678235331947094,
+      "source_sha256": "384c53d562840c2f1ecd3bfe2673426e5167b2c51c9e27e90cd732bb133a9d56",
+      "important_differences": [
+        "private include search paths differ",
+        "upstream sparseIndicesGm member + valid-prefix binary search before native scheduling",
+        "upstream initializes constInfo.n2Size for AIV"
+      ]
+    },
+    "sgl-kernel-npu-597250fc": {
+      "same_after_whitespace_normalization": false,
+      "whitespace_normalized_sequence_ratio": 0.9666184752821354,
+      "source_sha256": "3dc1a9ef095984a05b7ee5903483da54fe889da8120ee61f9d6bbf179c3cd80a",
+      "important_differences": [
+        "private include search paths differ",
+        "upstream sparseIndicesGm member + valid-prefix binary search before native scheduling",
+        "upstream initializes constInfo.n2Size for AIV"
+      ]
+    }
+  },
+  "host_compile": {
+    "compiler": "/usr/bin/c++",
+    "result": "144 120 100",
+    "columns": [
+      "sizeof_main",
+      "offsetof_singleCoreParams",
+      "offsetof_dispatchKey"
+    ],
+    "not_device_compile": true
+  }
+}

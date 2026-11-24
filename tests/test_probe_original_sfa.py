@@ -2,7 +2,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import types
@@ -176,6 +179,59 @@ class OriginalSfaProbeTests(unittest.TestCase):
         second = probe.probe(self.root, BUNDLE)
         self.assertNotEqual(first["stage_dir"], second["stage_dir"])
         self.assertEqual(Path(first["report"]).read_bytes(), original)
+
+    def test_setter_rejection_and_exact_soc_mismatch_fail_before_compilation(self):
+        for returned in (False, "error"):
+            modules, platform = fake_sdk(self.compile_ok)
+            platform.set_current_compile_soc_info = lambda soc, value=returned: value
+            with patch.dict(sys.modules, modules):
+                report = probe.probe(self.root, BUNDLE, True, "Ascend950")
+            self.assertEqual(report["status"], "ERROR")
+            self.assertIn("SDK rejected compile target", report["error"])
+            self.assertEqual(self.calls, [])
+        modules, platform = fake_sdk(self.compile_ok, target="Ascend950Other")
+        platform.set_current_compile_soc_info = lambda soc: None
+        with patch.dict(sys.modules, modules):
+            report = probe.probe(self.root, BUNDLE, True, "Ascend950")
+        self.assertEqual(report["status"], "ERROR")
+        self.assertIn("differs from the requested exact SoC", report["error"])
+        self.assertEqual(self.calls, [])
+
+    def test_sdk_checkpoints_include_module_signature_return_and_queries(self):
+        modules, platform = fake_sdk(self.compile_ok)
+        platform.__file__ = "/example/sdk/platform.py"
+        platform.set_current_compile_soc_info = lambda soc: "success"
+        with patch.dict(sys.modules, modules):
+            report = probe.probe(self.root, BUNDLE, True, "Ascend950")
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["soc"]["setter"]["return_value"], "success")
+        phases = [entry["phase"] for entry in report["sdk_progress"]]
+        self.assertIn("soc.before_setter", phases)
+        self.assertIn("soc.before_get_soc_version", phases)
+        self.assertEqual(report["last_phase"], "after_adapter_compile")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.environ.get("SFA_RUN_FATAL_TESTS") == "1",
+                         "Real fatal signals require explicit Linux opt-in; disabled on user desktops")
+    def test_abrupt_sdk_segfault_keeps_last_phase_without_claiming_hardware_fault(self):
+        command = f'''
+import importlib.util, os, resource, signal, types
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+spec=importlib.util.spec_from_file_location("probe", {str(BUNDLE / "tools/probe_original_sfa.py")!r})
+p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+def crash(soc): os.kill(os.getpid(), signal.SIGSEGV)
+platform=types.SimpleNamespace(set_current_compile_soc_info=crash, __file__="/fake/sdk/platform.py")
+adapter=types.SimpleNamespace(get_soc_spec=lambda key: "Ascend950")
+p.probe({str(self.root)!r}, {str(BUNDLE)!r}, True, "Ascend950", adapter_loader=lambda path: adapter, importer=lambda name: platform)
+'''
+        result = subprocess.run([sys.executable, "-X", "faulthandler", "-c", command], capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, -signal.SIGSEGV)
+        reports = list(self.root.glob("original_sfa_*/probe_report.json"))
+        self.assertEqual(len(reports), 1)
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(report["last_phase"], "soc.before_setter")
+        self.assertNotEqual(report["status"], "PASS")
+        self.assertIn(b"crash", result.stderr)
+        self.assertFalse((self.root / "DEVICE_FAULT.json").exists())
 
 
 if __name__ == "__main__":

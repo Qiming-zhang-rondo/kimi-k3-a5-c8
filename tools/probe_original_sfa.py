@@ -107,11 +107,16 @@ def load_adapter(path):
     return module
 
 
-def select_soc(adapter, requested, importer=importlib.import_module):
+def select_soc(adapter, requested, importer=importlib.import_module, observer=None):
     evidence = {"requested": requested}
+    def observe(phase):
+        if observer is not None:
+            observer(phase, json_value(evidence))
     if requested:
         checked = []
         for name in ("asc_op_compile_base.common.platform", "tbe.common.platform"):
+            evidence["module_being_imported"] = name
+            observe("before_setter_module_import")
             try:
                 module = importer(name)
             except ImportError as error:
@@ -124,16 +129,26 @@ def select_soc(adapter, requested, importer=importlib.import_module):
             # Call only an actually present API with a signature accepting this argument.
             signature = inspect.signature(setter)
             signature.bind(requested)
-            setter(requested)
             evidence["setter"] = {"module": name, "file": getattr(module, "__file__", None),
                                   "signature": str(signature)}
+            observe("before_setter")
+            result = setter(requested)
+            evidence["setter"]["return_value"] = json_value(result)
+            observe("after_setter")
+            if result is False or (isinstance(result, str) and result.lower() in ("error", "failed", "failure")):
+                raise RuntimeError("SDK rejected compile target: " + repr(evidence))
             break
         else:
             raise RuntimeError("No verified SDK set_current_compile_soc_info API: " + json.dumps(checked))
+    observe("before_get_soc_version")
     evidence["actual"] = adapter.get_soc_spec("SOC_VERSION")
+    observe("before_get_short_soc_version")
     evidence["short"] = adapter.get_soc_spec("SHORT_SOC_VERSION")
+    observe("after_soc_queries")
     if "950" not in str(evidence["actual"]).lower():
         raise RuntimeError("Expected an Ascend950 target, got " + repr(evidence))
+    if requested and str(evidence["actual"]).lower() != str(requested).lower():
+        raise RuntimeError("SDK target differs from the requested exact SoC: " + repr(evidence))
     return evidence
 
 
@@ -167,6 +182,12 @@ def probe(work_dir, bundle_root=None, compile_requested=False, soc_version=None,
               "command": list(sys.argv), "inputs": fixed_arguments(), "compile_calls": []}
     prepared = set()
     previous_cwd = Path.cwd()
+    def checkpoint(phase, evidence=None):
+        report["last_phase"] = phase
+        if evidence is not None:
+            report.setdefault("sdk_progress", []).append({"phase": phase, "evidence": evidence})
+        write_json(report_path, report)
+    checkpoint("before_source_staging")
     try:
         report["sources"] = stage_sources(bundle, stage)
         prepared = {item["path"] for item in report["sources"]}
@@ -181,8 +202,11 @@ def probe(work_dir, bundle_root=None, compile_requested=False, soc_version=None,
             build.mkdir()
             os.chdir(build)
             report["compile_cwd"] = str(build)
+            checkpoint("before_sdk_adapter_import")
             adapter = adapter_loader(stage / "dynamic/sparse_flash_attention.py")
-            report["soc"] = select_soc(adapter, soc_version, importer)
+            checkpoint("after_sdk_adapter_import")
+            report["soc"] = select_soc(adapter, soc_version, importer,
+                                       observer=lambda phase, evidence: checkpoint("soc." + phase, evidence))
             original_compile = adapter.compile_op
             original_select = adapter.get_kernel_source
 
@@ -209,7 +233,9 @@ def probe(work_dir, bundle_root=None, compile_requested=False, soc_version=None,
             adapter.compile_op = recorded_compile
             require_source(adapter.get_kernel_source("sparse_flash_attention.cpp", "sparse_flash_attention", "sparse_flash_attention"))
             # The uploaded adapter chooses all compiler options; do not invent tiling or flags.
+            checkpoint("before_adapter_compile")
             adapter.sparse_flash_attention(**fixed_arguments())
+            checkpoint("after_adapter_compile")
             if not report["compile_calls"]:
                 raise RuntimeError("Adapter returned without invoking compile_op (prebuild is not compilation)")
             artifacts = [file_record(path) for path in sorted(stage.rglob("*"))
