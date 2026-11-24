@@ -59,3 +59,26 @@ required for that path.
 - 当前没有新增 A5 数值或性能结果；原有 BF16 热环126.17µs仍是用户回传的两遍实现成绩。
 - 本地66项宿主测试：65通过、1项Linux显式开启的致命信号测试跳过。新增4项用真实入口和pinned POD、mock服务验证AIC/AIV×mode0/1；不冒充AscendC编译或设备验证。
 
+
+## BLOCKED: AscendC::MicroAPI not available in CANN 9.2.1 (2026-11-24 15:15)
+
+### Evidence
+- vf_basic_block_utils.h:58 references `AscendC::MicroAPI::CastTrait`
+- Full SDK search: `namespace MicroAPI` NOT FOUND in CANN 9.2.1 (aarch64-linux/asc/include/)
+- Public SDK has `AscendC::CastTrait` at basic_api/reg_compute/kernel_reg_compute_utils.h:207
+  (same type, different namespace — MicroAPI is a private/extended API)
+- custom_cot 9.1.0 was compiled with a DIFFERENT SDK that provides MicroAPI
+
+### Implication
+The custom_cot arch35 kernel source cannot be compiled with CANN 9.2.1 toolkit.
+Need either:
+(a) The matching SDK version that provides AscendC::MicroAPI, or
+(b) A compatibility shim mapping MicroAPI to public AscendC reg_compute API, or
+(c) Rewrite vf_basic_block_utils.h to use public AscendC API only.
+
+### What compiled successfully before this point
+- ASC language mode (CMake find_package(ASC) + ccec --npu-arch=dav-3510)
+- Tiling struct from sgl-kernel-npu (public POD)
+- All include paths resolved
+- ConstInfo issue fixed by Codex (ae36ad6)
+- Error occurs in vf_basic_block_utils.h (MicroAPI dependency)
