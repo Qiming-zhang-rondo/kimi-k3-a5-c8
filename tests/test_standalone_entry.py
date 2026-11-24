@@ -111,7 +111,7 @@ public:
         const std::array<unsigned, 12> order{{0,1,2,3,5,6,4,7,8,9,10,11}};
         for (unsigned i = 0; i < actual.size(); ++i)
             Probe::Require(actual[i] == Probe::expected[order[i]], "Init tensor argument order mismatch");
-        Probe::Require(userWorkspace == Probe::expected[12]+32, "GetUserWorkspace result was not forwarded");
+        Probe::Require(userWorkspace == Probe::expected[12], "direct user scratch was not forwarded unchanged");
         Probe::Require(gmTiling == Probe::expected[13], "original GM tiling pointer was not preserved");
         Probe::Require(pipe != nullptr && Probe::pipeAlive, "TPipe is missing/not live in Init");
         if constexpr (isAic) {
@@ -158,11 +158,11 @@ int main() {
         // Calling the actual exported non-template entry forces its template body
         // and both mock service Init/Process methods to be compiled and exercised.
         auto &e = Probe::expected;
-        sfa_arch35_bf16_compile_probe(e[0],e[1],e[2],e[3],e[4],e[5],e[6],
+        sfa_arch35_bf16_user_scratch_probe(e[0],e[1],e[2],e[3],e[4],e[5],e[6],
                                      e[7],e[8],e[9],e[10],e[11],e[12],e[13]);
         Probe::Require(Probe::initCalls == 1 && Probe::processCalls == 1,
                        "entry did not execute Init and Process exactly once");
-        Probe::Require(Probe::workspaceCalls == 1 && Probe::taskCalls == 1,
+        Probe::Require(Probe::workspaceCalls == 0 && Probe::taskCalls == 1,
                        "entry skipped workspace/task setup");
         Probe::Require(!Probe::pipeAlive, "TPipe survived the completed entry scope");
         std::cout << "HOST_ENTRY_PASS core=" << AscendC::g_coreType
@@ -234,7 +234,7 @@ int main() {
         std::array<uint8_t, 64> sentinel{};
         sentinel.fill(0x5a);
         uint8_t *p = sentinel.data();
-        sfa_arch35_bf16_compile_probe(p,p,p,p,p,p,p,p,p,p,p,p,p,p);
+        sfa_arch35_bf16_user_scratch_probe(p,p,p,p,p,p,p,p,p,p,p,p,p,p);
         Probe::Require(Probe::initCalls == 0 && Probe::processCalls == 0,
                        "host pass ran native services");
         Probe::Require(Probe::workspaceCalls == 0 && Probe::taskCalls == 1,

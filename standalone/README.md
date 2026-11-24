@@ -1,8 +1,10 @@
 # Isolated arch35 compile probe
 
-This is a **baseline source compilation probe**, not a working fused operator or
-a private-package launch ABI. It never installs or executes a kernel. Read
-`START_HERE.md` for the complete task; continue autonomously after this gate.
+The default library target is a **baseline source compilation probe**, not a
+working fused operator or private-package launch ABI. Optional `sfa_launch`
+performs fixed original-BF16 device checks only with `--run --device N`; its
+default is CPU preflight. After the reported 507015, follow
+[`REPAIR_507015.md`](../REPAIR_507015.md) before returning to the full task.
 
 The corrected entry uses the archived private arch35 `BaseApi` cube/vector
 services, BF16 inputs/output, FP32 accumulation and the original six template
@@ -17,11 +19,17 @@ The host scan still sees the exported signature and the mixed-task metadata.
 `SFA_BUILD_CONTEXT` messages record each pass's actual architecture/core macros;
 do not define those macros manually or infer API availability from package names.
 
-The non-template `sfa_arch35_bf16_compile_probe` symbol instantiates a fixed
+The non-template `sfa_arch35_bf16_user_scratch_probe` symbol instantiates a fixed
 TND/PA_BSND template. Mode 0 and mode 1 are compiled separately; neither is
 inferred from a private byte at SGL's `dispatchKey` offset. The target is a
 static library and needs no host `main`. Do not report an unused template or an
 empty archive as a compiled SFA kernel.
+
+Its workspace parameter is now **raw user scratch**, forwarded unchanged into
+the selected kernel. It does not call `GetUserWorkspace`, consume private runtime
+tiling bytes, or include a system-workspace prefix. This is restricted to the
+fixed host contract that keeps both `SyncAll` branches unreachable. See the
+repair document for the source audit, exact 442368-byte allocation and checks.
 
 ## Build on the internal matching SDK
 

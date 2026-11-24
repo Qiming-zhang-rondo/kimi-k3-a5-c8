@@ -203,4 +203,13 @@ tools/github_push_notify.py实现GitHub验签push事件到指定Codex聊天队�
 修正两个launcher的故障退出/marker并移除reset；其他数值/内存合同仍须完整修复后才能运行。
 具体静态审查见evidence/FIRST_LAUNCH_REVIEW.md。通知链仍未接通，本次是用户提醒后主动读取。
 
+## 本轮实际修复候选（设备结果仍待验证）
+
+独立入口改为显式raw-user-scratch ABI，消除未初始化系统workspace依赖；固定host合同
+为compact128、Q4/H64/Nkv1/KV256、一AIC两AIV，scratch442368B。修正tiling及buffer大小，
+stats打开，新增非零输入/NaN哨兵/CPU独立参考、三组复用buffer门禁；全部ACL调用检查失败。
+具体源码和重编/运行命令见REPAIR_507015.md。没有新增A5构建/运行证据，未标记507015已解决。
+本地85项测试：84通过、1项显式Linux致命信号测试跳过；新增真实host C++合同/CPU参考及
+launcher故障控制流检查。测试不包含ASC lowering或NPU执行，不作为设备验收。
+
 
