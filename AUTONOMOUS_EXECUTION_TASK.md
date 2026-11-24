@@ -17,6 +17,7 @@
 ```bash
 python3 tools/collect_source_closure.py --source-root /actual/package/root --source-root /actual/source/project --output /fresh/isolated/closure
 python3 tools/run_logged_stage.py --stage baseline_build --work-dir /tmp/sfa-evidence --cwd /actual/source/project -- COMMAND ARG...
+python3 tools/run_logged_stage.py --stage baseline_build --work-dir /tmp/sfa-evidence -- python3 tools/probe_original_sfa.py --work-dir /tmp/sfa-original-probe --compile
 ```
 
 收集器只读源目录，输出来源/哈希和隔离副本；缺依赖时保留 partial 结果并返回非零，继续查找真实来源，不能把它当成编译成功。尽量给精确源码根目录，不扫描整盘或提交无关源码。
@@ -44,7 +45,7 @@ python3 tools/run_logged_stage.py --stage baseline_build --work-dir /tmp/sfa-evi
 ## 阶段 2：自己补齐依赖，并先构建原版
 
 1. 从实际安装目录或匹配源码仓递归收集 include 闭包，保留目录结构、许可证、来源及哈希。普通缺头文件不是交回用户的理由。
-2. 目前明确缺少六个 `vf_basic_block_*_sfa.h`，以及 `memcopy/{gm_layout,parser,fa_gm_tensor,fa_l1_tensor,gm_coord}.h`；继续沿新文件递归检查，直到实际编译闭包完整，SDK 头使用匹配的已安装 SDK。
+2. `5c10d9629a5c41e6a9fae27a5cb8146a8c886d20` 已补齐六个 `vf_basic_block_*_sfa.h`、VF utils，以及此前五个 memcopy 头。不要再把这些文件作为向用户索取的事项。用 `tools/probe_original_sfa.py --compile` 在隔离副本实际尝试原版编译，继续自行处理递归依赖和真实 SDK 生成头；该探针不运行 NPU 或改安装包，只有实际调用编译且产生非空 `.o` 才算编译通过。
 3. 找到实际 host tiling 实现、生成 tiling data 的步骤、注册/schema、ACLNN 封装、构建和打包配置。动态 `sparse_flash_attention.py` 是编译入口，不等于 host tiling C++ 实现；不要臆造结构体或复制不匹配的 tiling 二进制。
 4. 先在隔离目录构建**未修改原版**，逐轮保留命令、首个错误、修复和退出码，直到原版可加载并通过同形状 A5 基线。不要把独立 merge 小程序编译成功当成 SFA 原版编译成功。
 5. 原版构建通过与候选构建通过是两个独立关卡。若只能获得直调 kernel 构建入口，可先完成隔离验证，但如实标为直调实验，继续完成正式测试适配，不冒充已打通现有 ACLNN。
@@ -52,6 +53,8 @@ python3 tools/run_logged_stage.py --stage baseline_build --work-dir /tmp/sfa-evi
 ## 阶段 3：实现原生融合和真正的新接口
 
 新增独立实验入口，保留原版；实现完整 schema/绑定/ACLNN 或已证明等价的直调入口、tiling、kernel、Python 适配。不得覆写已安装服务算子，也不得将另一个独立 merge kernel 包装成“融合”。
+
+已有 `experimental/` 原生源码候选：新 kernel 入口、五冷输入的 Init/Vec 接线、真正 MicroAPI/DMA epilogue、直接 FP32 store，以及独立 proto/API 声明和 Torch bridge。先审查并继续构建这些文件，不必从零重写。`experimental/README.md` 标明精确范围和未完成的 host/API 实现；API 头只是声明，不代表新符号已经存在。原始 `original/` 不要覆盖。
 
 额外输入为设备上的 `cold_output [T,H,512]`（保持原生冷读实际 dtype）、`cold_max/cold_sum [T,H,1]` FP32、`cold_present/hot_present [T]`。最终输出与当前两遍 merge 相同 dtype；本实验冷端为 FP32 时最终必须 FP32，不能沿用热端 BF16 store。
 所有 tensor 有明确 shape/dtype/stride/device/非重叠合同；presence 规范化为逻辑值后使用，禁止在原始 uint8 上用按位 `~` 冒充逻辑非。不得在计时路径 `.item/.cpu/.tolist/nonzero` 获取动态信息。

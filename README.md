@@ -7,6 +7,11 @@ This branch contains an original packaged kernel snapshot, a corrected scalar
 merge contract helper, and integration notes. It is **not yet a buildable or
 callable fused attention operator**.
 
+**Native source candidate is now implemented in [experimental/](experimental/README.md).**
+It includes the new entry, cold-state parameter wiring, real MicroAPI/DMA merge,
+FP32 final store, proto/API declarations and a separate Torch bridge. SDK build,
+host/API generation/registration and A5 execution remain unverified.
+
 ## Current status
 
 - Original `original/` snapshot preserved.
@@ -17,8 +22,9 @@ callable fused attention operator**.
 - Shifted log weights avoid overflow when two positive finite sums are large.
 - A local C++ compiler directly builds and executes the actual helper header
   with minimal host tensor stubs. This checks C++ scalar logic, not AscendC.
-- Native kernel call-site wiring, host schema/tiling, ACLNN/Torch binding,
-  device compilation and A5 performance are **not implemented or validated**.
+- Native source wiring and interface source are implemented in `experimental/`.
+  Host tiling/API generation, device compilation and A5 performance are still
+  **not validated**; the uploaded API declaration is not an exported symbol.
 
 The uploaded Python checks only run Torch formulas. They now fail with a
 nonzero exit code on an assertion failure and identify their scope explicitly.

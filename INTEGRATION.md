@@ -1,5 +1,10 @@
 # Verified integration contract and remaining blockers
 
+The source candidate applying native entry/Init/Vec wiring is now in
+`experimental/`; see `experimental/README.md` for exact implementation and status.
+This guide describes the contract and pending host/SDK work. `original/` remains
+the uploaded snapshot and is not replaced by the experimental candidate.
+
 This is an implementation guide, not an applied patch. No source file in
 `original/` currently includes or calls `MergeColdStateTile`.
 
