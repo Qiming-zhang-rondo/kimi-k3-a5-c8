@@ -405,3 +405,16 @@ Torch/Python按实际dtype选择变体，不额外插入cold.float转换kernel�
 重编设备库后使用新Python进程和新输出目录，按PERF_REPAIR_5407.md继续；不要改CANN或重做已通过的SDK排查。
 本轮本地169项：168通过、1项桌面致命信号测试跳过。新增BF16变体未在本机SDK/A5执行，
 没有新增性能结论；详细范围与原始日志见direct_bridge/bf16_io_validation.json。
+
+## Phase C dtype fixed, numerical control remaining (2026-11-24 20:15)
+
+### c11ece8 dtype fix: WORKING
+- reader_controls dtype check now passes (BF16 accepted from installed C4)
+- All partition/writer/zero-query checks PASS
+
+### Remaining: direct_fused reader numerical comparison FAIL
+- Sub-checks PASS: zero_query_cold_counts (1920 ✅), zero_query_direct_hot_counts (128 ✅)
+- Numerical comparison between direct fused and native two-pass reference FAILS
+- Phase B fusion was verified with synthetic FP32 cold state (all 8 tests passed)
+- Phase C uses real C4 cold data (BF16) — possible precision/contract difference
+- Need: investigate fused kernel's BF16 cold state handling vs FP32 synthetic data
