@@ -82,3 +82,32 @@ Need either:
 - All include paths resolved
 - ConstInfo issue fixed by Codex (ae36ad6)
 - Error occurs in vf_basic_block_utils.h (MicroAPI dependency)
+
+## MicroAPI Root Cause Analysis (2026-11-24 16:10)
+
+### Codex fix ae36ad6 result: PARTIALLY EFFECTIVE
+- ✅ Fixed ConstInfo field mismatch (n2Size/s1Size/dSize now resolve)
+- ✅ Fixed tiling data 144-byte GM→UB copy
+- ✅ Fixed template instantiation (TND/PA_BSND, mode 0/1)
+- ❌ Did NOT fix MicroAPI issue — same `no member named 'MicroAPI' in namespace 'AscendC'` error
+
+### MicroAPI Root Cause (refined)
+1. SDK kernel_macros.h:122 defines `namespace MicroAPI = Reg;` (alias to Reg namespace)
+2. This alias exists in the SDK but is NOT accessible as `AscendC::MicroAPI`
+3. The vf_basic_block_utils.h references `AscendC::MicroAPI::CastTrait` — fails because
+   `MicroAPI` is not a member of namespace `AscendC` (it likely exists at global scope
+   or inside a different namespace)
+4. Verified by attempting `namespace AscendC { namespace MicroAPI { using namespace ::AscendC; } }`
+   compat shim → redefinition error proves `MicroAPI` alias already exists elsewhere
+5. Attempted explicit `#include "impl/basic_api/kernel_macros.h"` → same error persists
+
+### Fix Needed
+Rewrite `AscendC::MicroAPI::CastTrait` etc. in vf_basic_block_utils.h to the correct
+namespace path for CANN 9.2.1, or provide the matching SDK version that defines
+MicroAPI inside namespace AscendC (as used by custom_cot 9.1.0 build).
+
+### Build evidence
+- Build command: cmake --build /tmp/sfa_m0e -j8 (mode 0, dav-3510)
+- Error file: deps/sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_utils.h:58
+- Same error in both Codex entry (ae36ad6) and manual compat shim attempts
+- Full compile_commands.json available at /tmp/sfa_m0e/
