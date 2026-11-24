@@ -1,0 +1,3 @@
+/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/sfa_launch.dir
+/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/edit_cache.dir
+/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/rebuild_cache.dir

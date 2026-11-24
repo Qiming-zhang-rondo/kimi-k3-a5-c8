@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/sfa_launch.dir/link.d CMakeFiles/sfa_launch.dir/sfa_direct_launch.cpp.o CMakeFiles/sfa_launch.dir/sfa_standalone_entry.asc.o -o sfa_launch  -Wl,-rpath,/usr/local/Ascend/cann-9.2.1/aarch64-linux/lib64 /usr/local/Ascend/cann-9.2.1/aarch64-linux/lib64/libascendcl.so -lascendc_runtime

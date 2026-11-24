@@ -1,0 +1,2022 @@
+
+---
+events:
+  -
+    kind: "find_package-v1"
+    backtrace:
+      - "CMakeLists.txt:2 (find_package)"
+    name: "ASC"
+    configs:
+      -
+        filename: "ASC.cps"
+        kind: "cps"
+      -
+        filename: "asc.cps"
+        kind: "cps"
+      -
+        filename: "ASCConfig.cmake"
+        kind: "cmake"
+      -
+        filename: "asc-config.cmake"
+        kind: "cmake"
+    version_request:
+      exact: false
+    settings:
+      required: "required_explicit"
+      quiet: false
+      global: false
+      policy_scope: true
+      bypass_provider: false
+      names:
+        - "ASC"
+      path_suffixes:
+        - ""
+      paths:
+        CMAKE_FIND_USE_CMAKE_PATH: true
+        CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+        CMAKE_FIND_USE_INSTALL_PREFIX: true
+        CMAKE_FIND_USE_PACKAGE_ROOT_PATH: true
+        CMAKE_FIND_USE_CMAKE_PACKAGE_REGISTRY: true
+        CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY: true
+        CMAKE_FIND_ROOT_PATH_MODE: "BOTH"
+    candidates:
+      -
+        path: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/pkgRedirects/ASCConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/pkgRedirects/asc-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/pkgRedirects/lib/cps/ASC.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/pkgRedirects/lib/cps/asc.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/pkgRedirects/share/cps/ASC.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/pkgRedirects/share/cps/asc.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/ASCConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/asc-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/lib/cps/ASC.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/lib/cps/asc.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/share/cps/ASC.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/share/cps/asc.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/Ascend/cann-9.2.1/lib64/cmake/ASCConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+    found:
+      path: "/usr/local/Ascend/cann-9.2.1/lib64/cmake/asc-config.cmake"
+      mode: "config"
+      version: ""
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+      CMAKE_MODULE_PATH:
+        - "/usr/local/Ascend/cann-9.2.1/compiler/tikcpp/ascendc_kernel_cmake/asc_modules"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake:12 (find_program)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_UNAME"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "uname"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/uname"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/uname"
+      - "/usr/local/Ascend/cann-9.2.1/bin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/uname"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/uname"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/uname"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/uname"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/uname"
+      - "/usr/local/Ascend/driver/tools/uname"
+      - "/usr/local/openmpi/bin/uname"
+      - "/usr/local/ffmpeg/bin/uname"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/uname"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/uname"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/uname"
+      - "/usr/local/sbin/uname"
+      - "/usr/local/bin/uname"
+      - "/usr/sbin/uname"
+    found: "/usr/bin/uname"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake:218 (message)"
+      - "CMakeLists.txt:4 (project)"
+    message: |
+      The system is: Linux - 6.6.0-72.0.0.76.r1893_126.hce3.aarch64 - aarch64
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeUnixFindMake.cmake:5 (find_program)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_MAKE_PROGRAM"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "gmake"
+      - "make"
+      - "smake"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gmake"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gmake"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gmake"
+      - "/usr/local/Ascend/driver/tools/gmake"
+      - "/usr/local/openmpi/bin/gmake"
+      - "/usr/local/ffmpeg/bin/gmake"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gmake"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gmake"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gmake"
+      - "/usr/local/sbin/gmake"
+      - "/usr/local/bin/gmake"
+      - "/usr/sbin/gmake"
+    found: "/usr/bin/gmake"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/Ascend/cann-9.2.1/compiler/tikcpp/ascendc_kernel_cmake/asc_modules/CMakeDetermineASCCompiler.cmake:25 (find_program)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_ASC_COMPILER"
+    description: "ASC Compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "bisheng"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/aarch64-linux/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin:/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin:/usr/local/Ascend/cann-9.2.1/tools/profiler/bin:/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys:/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data:/usr/local/Ascend/cann-9.2.1/tools/msobjdump:/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin:/usr/local/Ascend/driver/tools:/usr/local/openmpi/bin:/usr/local/ffmpeg/bin:/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin:/usr/local/Ascend/ascend-toolkit/latest/bin:/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/ma-user/.local/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/"
+    searched_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/bisheng"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/bisheng"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bisheng"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/bisheng"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/bisheng"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bisheng"
+    found: "/usr/local/Ascend/cann-9.2.1/bin/bisheng"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/Ascend/cann-9.2.1/compiler/tikcpp/ascendc_kernel_cmake/asc_modules/CMakeDetermineASCCompiler.cmake:47 (find_program)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_ASC_LLD_LINKER"
+    description: "ASC ld.lld Linker"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ld.lld"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/aarch64-linux/ccec_compiler/bin/"
+    found: "/usr/local/Ascend/cann-9.2.1/aarch64-linux/ccec_compiler/bin/ld.lld"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:54 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:69 (_cmake_find_compiler)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER"
+    description: "CXX compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "c++"
+      - "CC"
+      - "g++"
+      - "aCC"
+      - "cl"
+      - "bcc"
+      - "xlC"
+      - "icpx"
+      - "icx"
+      - "clang++"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+    searched_directories:
+      - "/usr/local/Ascend/cann-9.2.1/bin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/bin/CC"
+      - "/usr/local/Ascend/cann-9.2.1/bin/g++"
+      - "/usr/local/Ascend/cann-9.2.1/bin/aCC"
+      - "/usr/local/Ascend/cann-9.2.1/bin/cl"
+      - "/usr/local/Ascend/cann-9.2.1/bin/bcc"
+      - "/usr/local/Ascend/cann-9.2.1/bin/xlC"
+      - "/usr/local/Ascend/cann-9.2.1/bin/icpx"
+      - "/usr/local/Ascend/cann-9.2.1/bin/icx"
+      - "/usr/local/Ascend/cann-9.2.1/bin/clang++"
+    found: false
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:73 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:69 (_cmake_find_compiler)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER"
+    description: "CXX compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "c++"
+      - "CC"
+      - "g++"
+      - "aCC"
+      - "cl"
+      - "bcc"
+      - "xlC"
+      - "icpx"
+      - "icx"
+      - "clang++"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/bin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/sbin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake/c++"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/bin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/sbin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/lib64/cmake/c++"
+      - "/usr/local/Ascend/cann-9.2.1/bin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/c++"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/c++"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/c++"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/c++"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/c++"
+      - "/usr/local/Ascend/driver/tools/c++"
+      - "/usr/local/openmpi/bin/c++"
+      - "/usr/local/ffmpeg/bin/c++"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/c++"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/c++"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/c++"
+      - "/usr/local/sbin/c++"
+      - "/usr/local/bin/c++"
+      - "/usr/sbin/c++"
+    found: "/usr/bin/c++"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:501 (find_file)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:538 (CMAKE_DETERMINE_COMPILER_ID_WRITE)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:8 (CMAKE_DETERMINE_COMPILER_ID_BUILD)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:125 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "file"
+    variable: "src_in"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "CMakeCXXCompilerId.cpp.in"
+    candidate_directories:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/"
+      - "/usr/local/Ascend/cann-9.2.1/compiler/tikcpp/ascendc_kernel_cmake/asc_modules/"
+    found: "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerId.cpp.in"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:125 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:4 (project)"
+    message: |
+      Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+      Compiler: /usr/bin/c++ 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "a.out"
+      
+      The CXX compiler identification is GNU, found in:
+        /tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/4.4.4/CompilerIdCXX/a.out
+      
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_AR"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ar"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/ar"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_RANLIB"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ranlib"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/ranlib"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_STRIP"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "strip"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/strip"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_LINKER"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ld"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/ld"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_NM"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "nm"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/nm"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_OBJDUMP"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "objdump"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/objdump"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_OBJCOPY"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "objcopy"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/objcopy"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_READELF"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "readelf"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/readelf"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_DLLTOOL"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "dlltool"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/bin/dlltool"
+      - "/usr/local/Ascend/cann-9.2.1/bin/dlltool"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/dlltool"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/dlltool"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/dlltool"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/dlltool"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/dlltool"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/dlltool"
+      - "/usr/local/Ascend/driver/tools/dlltool"
+      - "/usr/local/openmpi/bin/dlltool"
+      - "/usr/local/ffmpeg/bin/dlltool"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/dlltool"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/dlltool"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/dlltool"
+      - "/usr/local/sbin/dlltool"
+      - "/usr/local/bin/dlltool"
+      - "/usr/sbin/dlltool"
+      - "/sbin/dlltool"
+      - "/bin/dlltool"
+      - "/home/ma-user/.local/bin/dlltool"
+    found: false
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_ADDR2LINE"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "addr2line"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    found: "/usr/bin/addr2line"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_TAPI"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "tapi"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/bin/tapi"
+      - "/usr/local/Ascend/cann-9.2.1/bin/tapi"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/tapi"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/tapi"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/tapi"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/tapi"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/tapi"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/tapi"
+      - "/usr/local/Ascend/driver/tools/tapi"
+      - "/usr/local/openmpi/bin/tapi"
+      - "/usr/local/ffmpeg/bin/tapi"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/tapi"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/tapi"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/tapi"
+      - "/usr/local/sbin/tapi"
+      - "/usr/local/bin/tapi"
+      - "/usr/sbin/tapi"
+      - "/sbin/tapi"
+      - "/bin/tapi"
+      - "/home/ma-user/.local/bin/tapi"
+    found: false
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake:18 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:207 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER_AR"
+    description: "A wrapper around 'ar' adding the appropriate '--plugin' option for the GCC compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "gcc-ar-12.3"
+      - "gcc-ar-12"
+      - "gcc-ar12"
+      - "gcc-ar"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gcc-ar-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gcc-ar-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gcc-ar-12.3"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/driver/tools/gcc-ar-12.3"
+      - "/usr/local/openmpi/bin/gcc-ar-12.3"
+      - "/usr/local/ffmpeg/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gcc-ar-12.3"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gcc-ar-12.3"
+      - "/usr/local/sbin/gcc-ar-12.3"
+      - "/usr/local/bin/gcc-ar-12.3"
+      - "/usr/sbin/gcc-ar-12.3"
+      - "/sbin/gcc-ar-12.3"
+      - "/bin/gcc-ar-12.3"
+      - "/home/ma-user/.local/bin/gcc-ar-12.3"
+      - "/usr/bin/gcc-ar-12"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gcc-ar-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gcc-ar-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gcc-ar-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gcc-ar-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gcc-ar-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gcc-ar-12"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gcc-ar-12"
+      - "/usr/local/Ascend/driver/tools/gcc-ar-12"
+      - "/usr/local/openmpi/bin/gcc-ar-12"
+      - "/usr/local/ffmpeg/bin/gcc-ar-12"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gcc-ar-12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gcc-ar-12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gcc-ar-12"
+      - "/usr/local/sbin/gcc-ar-12"
+      - "/usr/local/bin/gcc-ar-12"
+      - "/usr/sbin/gcc-ar-12"
+      - "/sbin/gcc-ar-12"
+      - "/bin/gcc-ar-12"
+      - "/home/ma-user/.local/bin/gcc-ar-12"
+      - "/usr/bin/gcc-ar12"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gcc-ar12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gcc-ar12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gcc-ar12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gcc-ar12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gcc-ar12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gcc-ar12"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gcc-ar12"
+      - "/usr/local/Ascend/driver/tools/gcc-ar12"
+      - "/usr/local/openmpi/bin/gcc-ar12"
+      - "/usr/local/ffmpeg/bin/gcc-ar12"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gcc-ar12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gcc-ar12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gcc-ar12"
+      - "/usr/local/sbin/gcc-ar12"
+      - "/usr/local/bin/gcc-ar12"
+      - "/usr/sbin/gcc-ar12"
+      - "/sbin/gcc-ar12"
+      - "/bin/gcc-ar12"
+      - "/home/ma-user/.local/bin/gcc-ar12"
+    found: "/usr/bin/gcc-ar"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake:30 (find_program)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:207 (include)"
+      - "CMakeLists.txt:4 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER_RANLIB"
+    description: "A wrapper around 'ranlib' adding the appropriate '--plugin' option for the GCC compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "gcc-ranlib-12.3"
+      - "gcc-ranlib-12"
+      - "gcc-ranlib12"
+      - "gcc-ranlib"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/"
+      - "/usr/local/Ascend/driver/tools/"
+      - "/usr/local/openmpi/bin/"
+      - "/usr/local/ffmpeg/bin/"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/home/ma-user/.local/bin/"
+    searched_directories:
+      - "/usr/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gcc-ranlib-12.3"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/driver/tools/gcc-ranlib-12.3"
+      - "/usr/local/openmpi/bin/gcc-ranlib-12.3"
+      - "/usr/local/ffmpeg/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gcc-ranlib-12.3"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gcc-ranlib-12.3"
+      - "/usr/local/sbin/gcc-ranlib-12.3"
+      - "/usr/local/bin/gcc-ranlib-12.3"
+      - "/usr/sbin/gcc-ranlib-12.3"
+      - "/sbin/gcc-ranlib-12.3"
+      - "/bin/gcc-ranlib-12.3"
+      - "/home/ma-user/.local/bin/gcc-ranlib-12.3"
+      - "/usr/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gcc-ranlib-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gcc-ranlib-12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gcc-ranlib-12"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/driver/tools/gcc-ranlib-12"
+      - "/usr/local/openmpi/bin/gcc-ranlib-12"
+      - "/usr/local/ffmpeg/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gcc-ranlib-12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gcc-ranlib-12"
+      - "/usr/local/sbin/gcc-ranlib-12"
+      - "/usr/local/bin/gcc-ranlib-12"
+      - "/usr/sbin/gcc-ranlib-12"
+      - "/sbin/gcc-ranlib-12"
+      - "/bin/gcc-ranlib-12"
+      - "/home/ma-user/.local/bin/gcc-ranlib-12"
+      - "/usr/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/cann-9.2.1/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys/gcc-ranlib12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data/gcc-ranlib12"
+      - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump/gcc-ranlib12"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/driver/tools/gcc-ranlib12"
+      - "/usr/local/openmpi/bin/gcc-ranlib12"
+      - "/usr/local/ffmpeg/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/bin/gcc-ranlib12"
+      - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin/gcc-ranlib12"
+      - "/usr/local/sbin/gcc-ranlib12"
+      - "/usr/local/bin/gcc-ranlib12"
+      - "/usr/sbin/gcc-ranlib12"
+      - "/sbin/gcc-ranlib12"
+      - "/bin/gcc-ranlib12"
+      - "/home/ma-user/.local/bin/gcc-ranlib12"
+    found: "/usr/bin/gcc-ranlib"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:123 (try_compile)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:4 (project)"
+    checks:
+      - "Detecting CXX compiler ABI info"
+    directories:
+      source: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O"
+      binary: "/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: ""
+      CMAKE_CXX_SCAN_FOR_MODULES: "OFF"
+      CMAKE_CXX_STDLIB_MODULES_JSON: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+      CMAKE_MODULE_PATH: "/usr/local/Ascend/cann-9.2.1/compiler/tikcpp/ascendc_kernel_cmake/asc_modules"
+    buildResult:
+      variable: "CMAKE_CXX_ABI_COMPILED"
+      cached: false
+      stdout: |
+        Change Dir: '/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O'
+        
+        Run Build Command(s): /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_a82a8/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_a82a8.dir/build.make CMakeFiles/cmTC_a82a8.dir/build
+        gmake[1]: Entering directory '/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O'
+        Building CXX object CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o
+        /usr/bin/c++   -v -o CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -c /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/c++
+        Target: aarch64-openEuler-linux
+        Configured with: ../configure --disable-bootstrap --disable-libgcj --without-cloog --enable-languages=c,c++,fortran,objc,obj-c++,lto --prefix=/usr --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitee.com/src-openeuler/gcc/issues --enable-shared --enable-threads=posix --enable-checking=release --enable-multilib --with-system-zlib --enable-__cxa_atexit --disable-libunwind-exceptions --enable-gnu-unique-object --enable-linker-build-id --with-gcc-major-version-only --enable-libstdcxx-backtrace --with-linker-hash-style=gnu --enable-plugin --enable-initfini-array --without-isl --enable-gnu-indirect-function --with-multilib-list=lp64 --enable-bolt --build=aarch64-openEuler-linux
+        Thread model: posix
+        Supported LTO compression algorithms: zlib
+        gcc version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (GCC) 
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'CMakeFiles/cmTC_a82a8.dir/'
+         /usr/libexec/gcc/aarch64-openEuler-linux/12/cc1plus -quiet -v -D_GNU_SOURCE /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_a82a8.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mlittle-endian -mabi=lp64 -version -o /tmp/ccHBmAmn.s
+        GNU C++17 (GCC) version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (aarch64-openEuler-linux)
+        	compiled by GNU C version 12.3.1 (openEuler 12.3.1-62.r4.hce3), GMP version 6.3.0, MPFR version 4.2.1, MPC version 1.3.1, isl version none
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        ignoring nonexistent directory "/usr/lib/gcc/aarch64-openEuler-linux/12/include-fixed"
+        ignoring nonexistent directory "/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../aarch64-openEuler-linux/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12
+         /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/aarch64-openEuler-linux
+         /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/backward
+         /usr/lib/gcc/aarch64-openEuler-linux/12/include
+         /usr/local/include
+         /usr/include
+        End of search list.
+        GNU C++17 (GCC) version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (aarch64-openEuler-linux)
+        	compiled by GNU C version 12.3.1 (openEuler 12.3.1-62.r4.hce3), GMP version 6.3.0, MPFR version 4.2.1, MPC version 1.3.1, isl version none
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        Compiler executable checksum: 3e0f64008b7134a0f00068bc35d647dd
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'CMakeFiles/cmTC_a82a8.dir/'
+         as -v -EL -mabi=lp64 -o CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o /tmp/ccHBmAmn.s
+        GNU assembler version 2.41 (aarch64-openEuler-linux) using BFD version (GNU Binutils) 2.41
+        COMPILER_PATH=/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/:/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/
+        LIBRARY_PATH=/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.'
+        Linking CXX executable cmTC_a82a8
+        /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/bin/cmake -E cmake_link_script CMakeFiles/cmTC_a82a8.dir/link.txt --verbose=1
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/c++
+        COLLECT_LTO_WRAPPER=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper
+        Target: aarch64-openEuler-linux
+        Configured with: ../configure --disable-bootstrap --disable-libgcj --without-cloog --enable-languages=c,c++,fortran,objc,obj-c++,lto --prefix=/usr --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitee.com/src-openeuler/gcc/issues --enable-shared --enable-threads=posix --enable-checking=release --enable-multilib --with-system-zlib --enable-__cxa_atexit --disable-libunwind-exceptions --enable-gnu-unique-object --enable-linker-build-id --with-gcc-major-version-only --enable-libstdcxx-backtrace --with-linker-hash-style=gnu --enable-plugin --enable-initfini-array --without-isl --enable-gnu-indirect-function --with-multilib-list=lp64 --enable-bolt --build=aarch64-openEuler-linux
+        Thread model: posix
+        Supported LTO compression algorithms: zlib
+        gcc version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (GCC) 
+        COMPILER_PATH=/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/:/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/
+        LIBRARY_PATH=/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_a82a8' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'cmTC_a82a8.'
+         /usr/libexec/gcc/aarch64-openEuler-linux/12/collect2 -plugin /usr/libexec/gcc/aarch64-openEuler-linux/12/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccxbRgqU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux -o cmTC_a82a8 /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o /usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o -L/usr/lib/gcc/aarch64-openEuler-linux/12 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../.. -v CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o
+        collect2 version 12.3.1 (openEuler 12.3.1-62.r4.hce3)
+        /usr/bin/ld -plugin /usr/libexec/gcc/aarch64-openEuler-linux/12/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccxbRgqU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux -o cmTC_a82a8 /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o /usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o -L/usr/lib/gcc/aarch64-openEuler-linux/12 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../.. -v CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o
+        GNU ld (GNU Binutils) 2.41
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_a82a8' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'cmTC_a82a8.'
+        /usr/bin/c++  -v -Wl,-v CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_a82a8
+        gmake[1]: Leaving directory '/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O'
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:255 (message)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:4 (project)"
+    message: |
+      Parsed CXX implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12]
+          add: [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/aarch64-openEuler-linux]
+          add: [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/backward]
+          add: [/usr/lib/gcc/aarch64-openEuler-linux/12/include]
+          add: [/usr/local/include]
+          add: [/usr/include]
+        end of search list found
+        collapse include dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12] ==> [/usr/include/c++/12]
+        collapse include dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/aarch64-openEuler-linux] ==> [/usr/include/c++/12/aarch64-openEuler-linux]
+        collapse include dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/backward] ==> [/usr/include/c++/12/backward]
+        collapse include dir [/usr/lib/gcc/aarch64-openEuler-linux/12/include] ==> [/usr/lib/gcc/aarch64-openEuler-linux/12/include]
+        collapse include dir [/usr/local/include] ==> [/usr/local/include]
+        collapse include dir [/usr/include] ==> [/usr/include]
+        implicit include dirs: [/usr/include/c++/12;/usr/include/c++/12/aarch64-openEuler-linux;/usr/include/c++/12/backward;/usr/lib/gcc/aarch64-openEuler-linux/12/include;/usr/local/include;/usr/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:291 (message)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:4 (project)"
+    message: |
+      Parsed CXX implicit link information:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild))("|,| |$)]
+        ignore line: [Change Dir: '/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O']
+        ignore line: []
+        ignore line: [Run Build Command(s): /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_a82a8/fast]
+        ignore line: [/usr/bin/gmake  -f CMakeFiles/cmTC_a82a8.dir/build.make CMakeFiles/cmTC_a82a8.dir/build]
+        ignore line: [gmake[1]: Entering directory '/tmp/sfa_merge_src_upload/standalone/$BUILD/CMakeFiles/CMakeScratch/TryCompile-CWuh6O']
+        ignore line: [Building CXX object CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o]
+        ignore line: [/usr/bin/c++   -v -o CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -c /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/c++]
+        ignore line: [Target: aarch64-openEuler-linux]
+        ignore line: [Configured with: ../configure --disable-bootstrap --disable-libgcj --without-cloog --enable-languages=c c++ fortran objc obj-c++ lto --prefix=/usr --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitee.com/src-openeuler/gcc/issues --enable-shared --enable-threads=posix --enable-checking=release --enable-multilib --with-system-zlib --enable-__cxa_atexit --disable-libunwind-exceptions --enable-gnu-unique-object --enable-linker-build-id --with-gcc-major-version-only --enable-libstdcxx-backtrace --with-linker-hash-style=gnu --enable-plugin --enable-initfini-array --without-isl --enable-gnu-indirect-function --with-multilib-list=lp64 --enable-bolt --build=aarch64-openEuler-linux]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib]
+        ignore line: [gcc version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'CMakeFiles/cmTC_a82a8.dir/']
+        ignore line: [ /usr/libexec/gcc/aarch64-openEuler-linux/12/cc1plus -quiet -v -D_GNU_SOURCE /home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpdir CMakeFiles/cmTC_a82a8.dir/ -dumpbase CMakeCXXCompilerABI.cpp.cpp -dumpbase-ext .cpp -mlittle-endian -mabi=lp64 -version -o /tmp/ccHBmAmn.s]
+        ignore line: [GNU C++17 (GCC) version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (aarch64-openEuler-linux)]
+        ignore line: [	compiled by GNU C version 12.3.1 (openEuler 12.3.1-62.r4.hce3)  GMP version 6.3.0  MPFR version 4.2.1  MPC version 1.3.1  isl version none]
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [ignoring nonexistent directory "/usr/lib/gcc/aarch64-openEuler-linux/12/include-fixed"]
+        ignore line: [ignoring nonexistent directory "/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../aarch64-openEuler-linux/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12]
+        ignore line: [ /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/aarch64-openEuler-linux]
+        ignore line: [ /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../include/c++/12/backward]
+        ignore line: [ /usr/lib/gcc/aarch64-openEuler-linux/12/include]
+        ignore line: [ /usr/local/include]
+        ignore line: [ /usr/include]
+        ignore line: [End of search list.]
+        ignore line: [GNU C++17 (GCC) version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (aarch64-openEuler-linux)]
+        ignore line: [	compiled by GNU C version 12.3.1 (openEuler 12.3.1-62.r4.hce3)  GMP version 6.3.0  MPFR version 4.2.1  MPC version 1.3.1  isl version none]
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [Compiler executable checksum: 3e0f64008b7134a0f00068bc35d647dd]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'CMakeFiles/cmTC_a82a8.dir/']
+        ignore line: [ as -v -EL -mabi=lp64 -o CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o /tmp/ccHBmAmn.s]
+        ignore line: [GNU assembler version 2.41 (aarch64-openEuler-linux) using BFD version (GNU Binutils) 2.41]
+        ignore line: [COMPILER_PATH=/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/:/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/]
+        ignore line: [LIBRARY_PATH=/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o' '-c' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.']
+        ignore line: [Linking CXX executable cmTC_a82a8]
+        ignore line: [/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/bin/cmake -E cmake_link_script CMakeFiles/cmTC_a82a8.dir/link.txt --verbose=1]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/c++]
+        ignore line: [COLLECT_LTO_WRAPPER=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper]
+        ignore line: [Target: aarch64-openEuler-linux]
+        ignore line: [Configured with: ../configure --disable-bootstrap --disable-libgcj --without-cloog --enable-languages=c c++ fortran objc obj-c++ lto --prefix=/usr --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://gitee.com/src-openeuler/gcc/issues --enable-shared --enable-threads=posix --enable-checking=release --enable-multilib --with-system-zlib --enable-__cxa_atexit --disable-libunwind-exceptions --enable-gnu-unique-object --enable-linker-build-id --with-gcc-major-version-only --enable-libstdcxx-backtrace --with-linker-hash-style=gnu --enable-plugin --enable-initfini-array --without-isl --enable-gnu-indirect-function --with-multilib-list=lp64 --enable-bolt --build=aarch64-openEuler-linux]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib]
+        ignore line: [gcc version 12.3.1 (openEuler 12.3.1-62.r4.hce3) (GCC) ]
+        ignore line: [COMPILER_PATH=/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/12/:/usr/libexec/gcc/aarch64-openEuler-linux/:/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/]
+        ignore line: [LIBRARY_PATH=/usr/lib/gcc/aarch64-openEuler-linux/12/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/aarch64-openEuler-linux/12/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_a82a8' '-shared-libgcc' '-mlittle-endian' '-mabi=lp64' '-dumpdir' 'cmTC_a82a8.']
+        link line: [ /usr/libexec/gcc/aarch64-openEuler-linux/12/collect2 -plugin /usr/libexec/gcc/aarch64-openEuler-linux/12/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccxbRgqU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux -o cmTC_a82a8 /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o /usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o -L/usr/lib/gcc/aarch64-openEuler-linux/12 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../.. -v CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o]
+          arg [/usr/libexec/gcc/aarch64-openEuler-linux/12/collect2] ==> ignore
+          arg [-plugin] ==> ignore
+          arg [/usr/libexec/gcc/aarch64-openEuler-linux/12/liblto_plugin.so] ==> ignore
+          arg [-plugin-opt=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/ccxbRgqU.res] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [--build-id] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [--hash-style=gnu] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/lib/ld-linux-aarch64.so.1] ==> ignore
+          arg [-X] ==> ignore
+          arg [-EL] ==> ignore
+          arg [-maarch64linux] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_a82a8] ==> ignore
+          arg [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o] ==> obj [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o]
+          arg [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o] ==> obj [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o]
+          arg [/usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o] ==> obj [/usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o]
+          arg [-L/usr/lib/gcc/aarch64-openEuler-linux/12] ==> dir [/usr/lib/gcc/aarch64-openEuler-linux/12]
+          arg [-L/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64] ==> dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64]
+          arg [-L/lib/../lib64] ==> dir [/lib/../lib64]
+          arg [-L/usr/lib/../lib64] ==> dir [/usr/lib/../lib64]
+          arg [-L/usr/lib/gcc/aarch64-openEuler-linux/12/../../..] ==> dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../..]
+          arg [-v] ==> ignore
+          arg [CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [-lstdc++] ==> lib [stdc++]
+          arg [-lm] ==> lib [m]
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lc] ==> lib [c]
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [-lgcc] ==> lib [gcc]
+          arg [/usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o] ==> obj [/usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o]
+          arg [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o] ==> obj [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o]
+        ignore line: [collect2 version 12.3.1 (openEuler 12.3.1-62.r4.hce3)]
+        link line: [/usr/bin/ld -plugin /usr/libexec/gcc/aarch64-openEuler-linux/12/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccxbRgqU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux -o cmTC_a82a8 /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o /usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o -L/usr/lib/gcc/aarch64-openEuler-linux/12 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../.. -v CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o] ==> linker [/usr/bin/ld]
+        ignore line: [/usr/bin/ld -plugin /usr/libexec/gcc/aarch64-openEuler-linux/12/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/aarch64-openEuler-linux/12/lto-wrapper -plugin-opt=-fresolution=/tmp/ccxbRgqU.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --eh-frame-hdr --hash-style=gnu -dynamic-linker /lib/ld-linux-aarch64.so.1 -X -EL -maarch64linux -o cmTC_a82a8 /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o /usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o -L/usr/lib/gcc/aarch64-openEuler-linux/12 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/aarch64-openEuler-linux/12/../../.. -v CMakeFiles/cmTC_a82a8.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -lc -lgcc_s -lgcc /usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o /usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o]
+        linker tool for 'CXX': /usr/bin/ld 
+        collapse obj [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crt1.o] ==> [/usr/lib64/crt1.o]
+        collapse obj [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crti.o] ==> [/usr/lib64/crti.o]
+        collapse obj [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64/crtn.o] ==> [/usr/lib64/crtn.o]
+        collapse library dir [/usr/lib/gcc/aarch64-openEuler-linux/12] ==> [/usr/lib/gcc/aarch64-openEuler-linux/12]
+        collapse library dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../../../lib64] ==> [/usr/lib64]
+        collapse library dir [/lib/../lib64] ==> [/lib64]
+        collapse library dir [/usr/lib/../lib64] ==> [/usr/lib64]
+        collapse library dir [/usr/lib/gcc/aarch64-openEuler-linux/12/../../..] ==> [/usr/lib]
+        implicit libs: [stdc++;m;gcc_s;gcc;c;gcc_s;gcc]
+        implicit objs: [/usr/lib64/crt1.o;/usr/lib64/crti.o;/usr/lib/gcc/aarch64-openEuler-linux/12/crtbegin.o;/usr/lib/gcc/aarch64-openEuler-linux/12/crtend.o;/usr/lib64/crtn.o]
+        implicit dirs: [/usr/lib/gcc/aarch64-openEuler-linux/12;/usr/lib64;/lib64;/usr/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeDetermineLinkerId.cmake:41 (message)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:337 (cmake_determine_linker_id)"
+      - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:4 (project)"
+    message: |
+      Running the CXX compiler's linker: "/usr/bin/ld" "-v"
+      GNU ld (GNU Binutils) 2.41
+  -
+    kind: "find-v1"
+    backtrace:
+      - "CMakeLists.txt:40 (find_library)"
+    mode: "library"
+    variable: "ACL_LIB"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ascendcl"
+    candidate_directories:
+      - "/usr/local/Ascend/cann-9.2.1/aarch64-linux/lib64/"
+    found: "/usr/local/Ascend/cann-9.2.1/aarch64-linux/lib64/libascendcl.so"
+    search_context:
+      ENV{CMAKE_PREFIX_PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/toolkit/tools/tikicpulib/lib/cmake"
+        - "/usr/local/Ascend/cann-9.2.1/lib64/cmake"
+      ENV{PATH}:
+        - "/usr/local/Ascend/cann-9.2.1/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ccec_compiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/profiler/bin"
+        - "/usr/local/Ascend/cann-9.2.1/tools/ascend_system_advisor/asys"
+        - "/usr/local/Ascend/cann-9.2.1/tools/show_kernel_debug_data"
+        - "/usr/local/Ascend/cann-9.2.1/tools/msobjdump"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/bin"
+        - "/usr/local/Ascend/driver/tools"
+        - "/usr/local/openmpi/bin"
+        - "/usr/local/ffmpeg/bin"
+        - "/usr/local/Ascend/toolbox/latest/Ascend-DMI/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/bin"
+        - "/usr/local/Ascend/ascend-toolkit/latest/compiler/ccec_compiler/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/home/ma-user/.local/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cmake/data"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+...

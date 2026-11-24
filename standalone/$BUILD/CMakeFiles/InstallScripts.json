@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/tmp/sfa_merge_src_upload/standalone/$BUILD/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
