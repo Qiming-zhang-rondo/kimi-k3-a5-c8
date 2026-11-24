@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "dsh_version": "0.2.2-rc.1",
+  "repo": "OWNER/REPO",
+  "branch": "main",
+  "session_id": "session-00000000-0000-4000-8000-000000000001",
+  "dsh_base_url": "http://127.0.0.1:8080/",
+  "connect_url_file": "config.connect-url",
+  "secret_file": "config.secret",
+  "state_dir": "config.state",
+  "port": 8766,
+  "message_template": "GitHub 项目 {repo} 的分支 {branch} 收到新推送：{sha}。请依据当前会话已有任务和权限，检查这次提交并继续工作。",
+  "ignore_commit_prefixes": ["[codex-review]"],
+  "queue_timeout": 5
+}

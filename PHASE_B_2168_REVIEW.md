@@ -1,8 +1,15 @@
 # Phase B：2168be3 集成问题与修复
 
 本次修复基于 `2168be3e421c8fb87775d1248fdb8747b1483334` 的文件审查。
-本地没有 CANN/A5 工具链；以下仅为源码修复与宿主回归，**不表示融合版已编译、运行或提速**。
-原版 3 个 DEVICE_VALIDATED 用例仍是 `2ddc663` 的证据。
+本地没有 CANN/A5 工具链；以下修复最初由宿主回归检查，设备结论来自内网提交。
+最新 `5a361849953a35b22695f98abcbe42e17623f777` 的
+[原始结果](https://github.com/Qiming-zhang-rondo/kimi-k3-a5-c8/blob/5a361849953a35b22695f98abcbe42e17623f777/standalone/sfa_fusion_device_results.json)
+已确认融合设备smoke **8/8 passed、nonfinite全为0**，状态 `DEVICE_SMOKE_VALIDATED`。
+scope 为 `given_fp32_cold_state_plus_native_bf16_hot`；`c4_pipeline_validated`、
+`native_twopass_compared`、`real_hot_empty_dispatch_validated` 全为 false。
+原版 3 个 DEVICE_VALIDATED 用例仍是 `2ddc663` 的证据；尚无融合性能结论。
+当前下一步是本文末尾的真实C4/direct bridge/原生两遍严格对照，随后三臂性能，
+不是再次停在已通过的8项隔离smoke。
 
 ## 已修正
 
@@ -59,7 +66,10 @@ python3 -m unittest discover -s tests -p test_sfa_fusion_launcher.py -v
 原始日志见 phase_b_host_validation.log，机器可读范围与哈希见 phase_b_host_validation.json。
 launcher另验证了507015后停止所有后续ACL调用，以及空kernel不写输出时正确报CONTROL_FAILED。
 
-## 内网下一步
+## 已完成 smoke 的构建与运行复现
+
+以下命令保留作复现背景；本轮已有通过结果，继续末尾的接入任务。
+仅在相关源码或接口变更后按需回归，不重复以smoke通过作为最终交付。
 
 在原版已通过的同一容器、同一匹配 SDK 环境，从仓库根目录执行。保留之前成功使用的
 ASC_DIR、编译器、SDK include 等实际参数；下例不安装或切换 SDK。若已有设备故障标记，
@@ -107,15 +117,18 @@ cold-only/hot-only/both-empty presence、极端有限 max 和同一调用内逐q
 因此空侧项目验证的是 epilogue 的 presence 逻辑，**不代表原生调度支持真正 hot=0**。
 独立数学参考沿用原 smoke 的整体/逐行 L2≤0.01，不是放宽原生两遍对照的0.001门槛。
 
-本程序接收的是合成、已知 FP32 冷态。通过只记录 DEVICE_SMOKE_VALIDATED，明确
-`c4_pipeline_validated=false`、`native_twopass_compared=false`。随后继续完成：
+本程序接收的是合成、已知 FP32 冷态。此次通过只记录 DEVICE_SMOKE_VALIDATED，明确
+`c4_pipeline_validated=false`、`native_twopass_compared=false`，并不覆盖真正hot=0调度。
 
-1. 将真实原生 C4 冷 output/max/sum 接入同一候选；使用 `NativeReference` 或旧两遍实际输出，
-   按原有严格门槛比较。不能以合成冷态的 smoke 代替真实 C4 精度验收。
+## 当前继续执行：真实冷态、直接桥与性能
+
+1. 将真实原生 C4 冷 output/max/sum 接入同一候选；由真实原生BF16热输出/stats构造
+   `NativeReference`，同时保留旧两遍实际输出作控制，按整体及逐行L2≤0.001比较。
+   不能以合成冷态的smoke或它的数学参考0.01门槛代替真实C4/原生两遍验收。
 2. 为旧 harness 实现真实 direct bridge（或完整新 ACLNN 注册），接入当前 NPU stream、
    异步 tiling/workspace 生命周期；不能调用只有声明的新符号或回退旧两遍冒充融合。
 3. 全部控制通过后按 POST_COMPILE_EXECUTION_TASK.md 做 W0 / 两遍 / 融合三臂同轮性能。
 
 遇普通编译/API问题在现场连续修复并推送源码及原始日志，无需让用户逐个中转。
 任一设备故障立即停止后续 ACL 调用，不 reset、不重试、不测速；保留 DEVICE_FAULT.json。
-尚无新融合设备或性能结论。
+当前已有给定冷态的融合设备smoke结论；真实C4融合精度、原生两遍严格对照和性能仍待完成。
