@@ -1,5 +1,9 @@
 # 当前 Phase B 入口
 
+当前性能执行入口为 [PERF_REPAIR_5407.md](../PERF_REPAIR_5407.md)。
+5407a8e 的旧计时脚本已原样归档并禁止构建；新 `SFA_BUILD_TORCH_DIRECT` shared library
+只提供真实原版/融合当前流调用，三臂完整流水线与门禁由上层固定harness执行。
+
 原版 `2ddc663` 的 3 项 A5 DEVICE_VALIDATED 已提交。当前使用
 [融合结果提交5a361849](https://github.com/Qiming-zhang-rondo/kimi-k3-a5-c8/blob/5a361849953a35b22695f98abcbe42e17623f777/standalone/sfa_fusion_device_results.json)
 已确认 `sfa_fusion_launch` 的 8 项全部通过、nonfinite全为0，状态 `DEVICE_SMOKE_VALIDATED`。

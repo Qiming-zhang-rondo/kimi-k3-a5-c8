@@ -1,12 +1,15 @@
 # 单次完整执行入口
 
 **当前优先任务：[POST_COMPILE_EXECUTION_TASK.md](POST_COMPILE_EXECUTION_TASK.md)。**
+**5407a8e 的305.84µs及历史比值已撤销性能验收资格。当前按
+[PERF_REPAIR_5407.md](PERF_REPAIR_5407.md) 构建真实current-stream桥，
+运行真实C4三臂的精度门禁，再做同轮完整流水线计时。旧PhaseC入口已封禁。**
 最新提交 `5a361849953a35b22695f98abcbe42e17623f777` 的
 [设备结果](https://github.com/Qiming-zhang-rondo/kimi-k3-a5-c8/blob/5a361849953a35b22695f98abcbe42e17623f777/standalone/sfa_fusion_device_results.json)
 已确认 `sfa_fusion_launch` 的 8 项全部通过、nonfinite 全为0，状态 `DEVICE_SMOKE_VALIDATED`。
 范围是 `given_fp32_cold_state_plus_native_bf16_hot`；真实 C4 流水线、原生两遍比较和真正
 hot=0 调度均尚未验证，不能标记阶段B整体完成。
-**现在直接接真实 C4 冷态和当前 NPU stream 的 direct bridge，完成原生两遍严格对照，
+**真实 C4 冷态与当前 NPU stream direct bridge 源码已提供，现场编译并完成原生两遍严格对照，
 通过后连续进行三臂配对性能。不要停在重跑已通过的8项。**
 [PHASE_B_2168_REVIEW.md](PHASE_B_2168_REVIEW.md) 保留已完成修复和smoke复现命令。
 `2ddc663`已提交3组原版A5结果，状态DEVICE_VALIDATED，L2约0.00175–0.00191；

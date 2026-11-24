@@ -1,0 +1,163 @@
+// Phase C: Three-arm paired performance — unified ASC benchmark
+// Times W0 (original) and Fused (fusion) alternately in same process
+// Uses <<<>>> direct launch + ACL event timing
+#include "kernel_operator.h"
+#include "sparse_flash_attention_tiling_data.h"
+#include "arch35/sparse_flash_attention_kernel_mla.h"
+
+#include "acl/acl.h"
+#include <cstdio>
+#include <cstring>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+
+using namespace AscendC;
+
+static constexpr uint32_t B = 1, Q = 4, H = 64, D = 512, R = 64;
+static constexpr uint32_t TOPK = 2048, KVT = 8192;
+static constexpr int WARMUP = 20, ITERS = 100, ROUNDS = 10;
+
+static constexpr size_t Q_B = B*Q*H*D*2, KV_B = KVT*H*D*2, QR_B = B*Q*H*R*2, KR_B = KVT*R*2;
+static constexpr size_t IDX_B = B*Q*TOPK*4, OUT_B = B*Q*H*D*2, OUT_F = B*Q*H*D*4;
+static constexpr size_t ST_B = B*Q*H*4, TIL_B = 144, WS_B = 442368;
+
+static void FillT(SparseFlashAttentionTilingDataMla &t)
+{
+    memset(&t, 0, sizeof(t));
+    t.baseParams.batchSize = B; t.baseParams.seqSize = KVT; t.baseParams.qSeqSize = Q;
+    t.baseParams.blockSize = 128; t.baseParams.maxBlockNumPerBatch = (KVT+127)/128;
+    t.baseParams.scaleValue = 1.0f/sqrtf((float)(D+R));
+    t.baseParams.nNumOfQInOneGroup = 1;
+    t.baseParams.actualLenDimsQ = Q; t.baseParams.actualLenDimsKV = KVT;
+    t.baseParams.outputLayout = 1; t.baseParams.attentionMode = 2;
+    t.baseParams.sparseBlockCount = TOPK;
+    t.splitKVParams.s2 = 128;
+    t.splitKVParams.accumOutSize = 1*2*1*64*576;
+    t.splitKVParams.logSumExpSize = 2*1*2*1*64;
+    t.singleCoreParams.usedCoreNum = 1;
+    t.singleCoreTensorSize.mmResUbSize = 128*64;
+    t.singleCoreTensorSize.bmm2ResUbSize = 576*64;
+    t.innerSplitParams.mBaseSize = 64;
+    t.innerSplitParams.s2BaseSize = 128;
+}
+
+struct Buf {
+    uint8_t *q,*k,*v,*qr,*kr,*idx,*bt,*sq,*sk,*ob,*of,*mx,*sm,*ws,*til;
+    uint8_t *co,*cm,*cs,*cp,*hp;
+};
+
+template<int FD, int PA, int LT, int KLT, int TM, int SG>
+__aicore__ inline void RunOrig(
+    __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
+    __gm__ uint8_t *si, __gm__ uint8_t *bt,
+    __gm__ uint8_t *sq, __gm__ uint8_t *sk,
+    __gm__ uint8_t *qr, __gm__ uint8_t *kr,
+    __gm__ uint8_t *out, __gm__ uint8_t *mx, __gm__ uint8_t *sm,
+    __gm__ uint8_t *ws, __gm__ uint8_t *til)
+{
+#define SPT bfloat16_t,bfloat16_t,float,bfloat16_t,FD,PA,(SFA_LAYOUT)LT,(SFA_LAYOUT)KLT,(SFATemplateMode)TM,SG
+    using CT = typename std::conditional<g_coreType==AIC, BaseApi::SFAMatmulService<SPT>, BaseApi::SFAMatmulServiceDummy<SPT>>::type;
+    using VT = typename std::conditional<g_coreType==AIC, BaseApi::SFAVectorServiceDummy<SPT>, BaseApi::SFAVectorService<SPT>>::type;
+#undef SPT
+    BaseApi::SparseFlashAttentionKernelMla<CT,VT> op;
+    TPipe pipe;
+    SparseFlashAttentionTilingDataMla td;
+    const __gm__ uint32_t *tw = (const __gm__ uint32_t*)til;
+    uint32_t *lw = (uint32_t*)&td;
+    for (uint32_t i = 0; i < sizeof(td)/4; ++i) lw[i] = tw[i];
+    op.Init(query,key,value,si,sq,sk,bt,qr,kr,out,mx,sm,nullptr,ws,&td,til,&pipe);
+    op.Process();
+}
+
+// W0 kernel entry (extern C for <<<>>> launch)
+extern "C" __global__ __aicore__ void pc_w0(
+    __gm__ uint8_t *q, __gm__ uint8_t *k, __gm__ uint8_t *v,
+    __gm__ uint8_t *si, __gm__ uint8_t *bt,
+    __gm__ uint8_t *sq, __gm__ uint8_t *sk,
+    __gm__ uint8_t *qr, __gm__ uint8_t *kr,
+    __gm__ uint8_t *out, __gm__ uint8_t *mx, __gm__ uint8_t *sm,
+    __gm__ uint8_t *ws, __gm__ uint8_t *til)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+    RunOrig<0,1,1,2,0,0>(q,k,v,si,bt,sq,sk,qr,kr,out,mx,sm,ws,til);
+#endif
+}
+
+int main()
+{
+    printf("=== Phase C: W0 vs Fused Paired Performance ===\n");
+    printf("B=%u Q=%u K=%u H=%u D=%u TopK=%u  warmup=%d iter=%d rounds=%d\n\n",
+           B,Q,KVT,H,D,TOPK,WARMUP,ITERS,ROUNDS);
+
+    aclInit(nullptr);
+    aclrtSetDevice(0);
+    aclrtStream st; aclrtCreateStream(&st);
+    aclrtEvent e0,e1; aclrtCreateEvent(&e0); aclrtCreateEvent(&e1);
+
+    Buf b={};
+    struct { const char*n; size_t z; uint8_t**p; } A[] = {
+        {"q",Q_B,&b.q},{"k",KV_B,&b.k},{"v",KV_B,&b.v},{"qr",QR_B,&b.qr},{"kr",KR_B,&b.kr},
+        {"idx",IDX_B,&b.idx},{"bt",256,&b.bt},{"sq",B*4,&b.sq},{"sk",B*4,&b.sk},
+        {"out",OUT_B,&b.ob},{"outF",OUT_F,&b.of},{"max",ST_B,&b.mx},{"sum",ST_B,&b.sm},
+        {"ws",WS_B,&b.ws},{"til",TIL_B,&b.til},
+        {"co",OUT_F,&b.co},{"cm",ST_B,&b.cm},{"cs",ST_B,&b.cs},{"cp",Q,&b.cp},{"hp",Q,&b.hp},
+    };
+    for (auto &a : A) { aclrtMalloc((void**)a.p, a.z, ACL_MEM_MALLOC_HUGE_FIRST); aclrtMemset(*a.p, a.z, 0, a.z); }
+
+    SparseFlashAttentionTilingDataMla t; FillT(t);
+    aclrtMemcpy(b.til, TIL_B, &t, TIL_B, ACL_MEMCPY_HOST_TO_DEVICE);
+    int32_t sq[B]={Q}, sk[B]={KVT};
+    aclrtMemcpy(b.sq,B*4,sq,B*4,ACL_MEMCPY_HOST_TO_DEVICE);
+    aclrtMemcpy(b.sk,B*4,sk,B*4,ACL_MEMCPY_HOST_TO_DEVICE);
+    int32_t bt[64]; for(int i=0;i<64;i++) bt[i]=i;
+    aclrtMemcpy(b.bt,256,bt,256,ACL_MEMCPY_HOST_TO_DEVICE);
+    std::vector<int32_t> idx(B*Q*TOPK); for(size_t i=0;i<idx.size();i++) idx[i]=i%KVT;
+    aclrtMemcpy(b.idx,IDX_B,idx.data(),IDX_B,ACL_MEMCPY_HOST_TO_DEVICE);
+    uint8_t pres[Q]; memset(pres,1,Q);
+    aclrtMemcpy(b.cp,Q,pres,Q,ACL_MEMCPY_HOST_TO_DEVICE);
+    aclrtMemcpy(b.hp,Q,pres,Q,ACL_MEMCPY_HOST_TO_DEVICE);
+
+    // Timed rounds
+    std::vector<double> w0t, fut;
+    for (int r = 0; r < ROUNDS; r++) {
+        double w,f;
+        auto timeIt = [&](bool isW0) -> double {
+            for (int i = 0; i < WARMUP; i++) {
+                if (isW0) pc_w0<<<1,nullptr,st>>>(b.q,b.k,b.v,b.idx,b.bt,b.sq,b.sk,b.qr,b.kr,b.ob,b.mx,b.sm,b.ws,b.til);
+                else sfa_cold_merge_probe<<<1,nullptr,st>>>(b.q,b.k,b.v,b.idx,b.bt,b.sq,b.sk,b.qr,b.kr,b.of,b.mx,b.sm,b.ws,b.til,b.co,b.cm,b.cs,b.cp,b.hp);
+            }
+            aclrtSynchronizeStream(st);
+            double total = 0;
+            for (int i = 0; i < ITERS; i++) {
+                aclrtRecordEvent(e0, st);
+                if (isW0) pc_w0<<<1,nullptr,st>>>(b.q,b.k,b.v,b.idx,b.bt,b.sq,b.sk,b.qr,b.kr,b.ob,b.mx,b.sm,b.ws,b.til);
+                else sfa_cold_merge_probe<<<1,nullptr,st>>>(b.q,b.k,b.v,b.idx,b.bt,b.sq,b.sk,b.qr,b.kr,b.of,b.mx,b.sm,b.ws,b.til,b.co,b.cm,b.cs,b.cp,b.hp);
+                aclrtRecordEvent(e1, st);
+                aclrtSynchronizeEvent(e1);
+                float ms; aclrtElapsedTime(&ms, e0, e1);
+                total += ms;
+            }
+            return total / ITERS * 1000.0;
+        };
+        if (r % 2 == 0) { w = timeIt(true); f = timeIt(false); }
+        else { f = timeIt(false); w = timeIt(true); }
+        w0t.push_back(w); fut.push_back(f);
+        printf("Round %2d: W0=%.2f µs  Fused=%.2f µs  ratio=%.3f\n", r, w, f, f/w);
+    }
+
+    std::vector<double> rat; for(int i=0;i<ROUNDS;i++) rat.push_back(fut[i]/w0t[i]);
+    std::sort(w0t.begin(),w0t.end()); std::sort(fut.begin(),fut.end()); std::sort(rat.begin(),rat.end());
+
+    printf("\n=== RESULTS ===\n");
+    printf("W0:       median=%.2f µs [%.2f, %.2f]\n", w0t[ROUNDS/2], w0t[0], w0t[ROUNDS-1]);
+    printf("Fused:    median=%.2f µs [%.2f, %.2f]\n", fut[ROUNDS/2], fut[0], fut[ROUNDS-1]);
+    printf("Ratio:    median=%.3f [%.3f, %.3f]\n", rat[ROUNDS/2], rat[0], rat[ROUNDS-1]);
+    printf("Two-pass reference: 126.17 µs (existing framework)\n");
+
+    for (auto &a : A) aclrtFree(*a.p);
+    aclrtDestroyEvent(e0); aclrtDestroyEvent(e1); aclrtDestroyStream(st);
+    aclrtResetDevice(0); aclFinalize();
+    return 0;
+}

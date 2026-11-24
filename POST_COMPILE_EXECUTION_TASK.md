@@ -2,6 +2,10 @@
 
 ## 接手后直接继续
 
+最新修复见 [PERF_REPAIR_5407.md](PERF_REPAIR_5407.md)：5407a8e的新bench绕过了输入与精度合同，
+305.84µs与历史基线比值不能使用，旧入口已封禁。当前构建SFA_BUILD_TORCH_DIRECT设备库，
+通过direct_bridge/run_direct_ab.py接回原SHA固定harness的真实C4流水线；精度门禁全过再测。
+
 仓库 `Qiming-zhang-rondo/kimi-k3-a5-c8`，分支 `sfa-cold-merge`。
 `2ddc663` 已提交原版 A5 实测：3 项 DEVICE_VALIDATED，L2 0.00175–0.00191。
 提交 `5a361849953a35b22695f98abcbe42e17623f777` 的

@@ -1,0 +1,31 @@
+{
+  "reviewed_commit": "5407a8e8175f750f859e061a5b993815a8756477",
+  "status": "HOST_CHECKS_PASS",
+  "validated_at_utc": "2026-11-24T11:47:59.728342+00:00",
+  "tests_run": 150,
+  "passed": 149,
+  "skipped": 1,
+  "failures": 0,
+  "errors": 0,
+  "scope": "actual_cpp_bridge_and_asc_hostwrappers_with_mock_device_boundaries; real CMake rejection; pinned payload integrity; harness CPU controls",
+  "cann_compiled_here": false,
+  "torch_npu_cpp_compiled_here": false,
+  "npu_executed_here": false,
+  "new_performance_measured": false,
+  "withdrawn_performance": {
+    "reported_fused_us": 305.84,
+    "reported_ratios": [
+      3.494,
+      2.424
+    ],
+    "accepted_as_performance_evidence": false
+  },
+  "old_payload_download": {
+    "commit": "4a5fd67b9a78766bebfa564782ea2193bc22af1a",
+    "files_verified": 18,
+    "tls_verified": true,
+    "unmodified": true
+  },
+  "log": "host_validation.log",
+  "log_sha256": "e9573955fd02fa8479c9a6bf7c8dff705bcf7425f43fb2ea7cc96f2076ad79ea"
+}
