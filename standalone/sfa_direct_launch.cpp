@@ -91,6 +91,11 @@ static void FillTiling(SparseFlashAttentionTilingDataMla &t)
 // ============================================================================
 int main(int argc, char *argv[])
 {
+    if (FILE *existingFault = fopen("DEVICE_FAULT.json", "r")) {
+        fclose(existingFault);
+        fprintf(stderr, "DEVICE_FAULT marker exists; refusing device work. Preserve the evidence and resolve the fault externally.\n");
+        return 2;
+    }
     printf("=== SFA Direct Launch Test (Phase A) ===\n");
     printf("Shape: B=%u Q=%u K=%u H=%u D=%u R=%u TopK=%u W=%u\n",
            BATCH, NUM_QUERIES, NUM_KEYS, NUM_HEADS, LATENT_DIM, ROPE_DIM, TOPK, WINDOW);
@@ -204,7 +209,12 @@ int main(int argc, char *argv[])
     printf("Kernel launched, syncing...\n");
     ret = aclrtSynchronizeStream(stream);
     if (ret != ACL_SUCCESS) {
-        printf("ERROR: aclrtSynchronizeStream failed, ret=%d\n", ret);
+        fprintf(stderr, "DEVICE_FAULT: aclrtSynchronizeStream failed, ret=%d; stopping without output copies or device reset\n", ret);
+        if (FILE *fault = fopen("DEVICE_FAULT.json", "w")) {
+            fprintf(fault, "{\"stage\":\"baseline_device_execution\",\"acl_error\":%d,\"device_tests_stopped\":true}\n", ret);
+            fclose(fault);
+        }
+        return 1;
     } else {
         printf("Kernel completed OK\n");
     }
@@ -238,9 +248,10 @@ int main(int argc, char *argv[])
     }
     aclrtFree(tilingDev);
     aclrtDestroyStream(stream);
-    aclrtResetDevice(deviceId);
+    // Device reset is outside this test's authorized scope.
     aclFinalize();
 
     printf("\n=== Phase A test %s ===\n", (ret == ACL_SUCCESS && !hasNaN) ? "PASSED" : "FAILED");
     return (ret == ACL_SUCCESS && !hasNaN) ? 0 : 1;
 }
+

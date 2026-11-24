@@ -182,3 +182,25 @@ cmake --build build_launch -j8
 ./build_launch/sfa_launch
 # → ERROR: aclrtSynchronizeStream failed, ret=507015
 ```
+
+## 构建材料审查：e6722fe
+
+已读取本次三个证据文件：build_log.txt为446B/8行摘要；kernel_hash.txt与kernel_size.txt
+均为0B。现标记BUILD_REPORTED，实际AIC/AIV及产物哈希待机器采集补齐；没有新增启动代码、
+设备精度或性能。具体检查与内网后续动作见evidence/BUILD_REVIEW.md，继续阶段A，无需用户搬文件。
+
+## 通知方式：按用户要求仅事件驱动
+
+误建的10分钟heartbeat已删除，没有分支定时轮询。
+tools/github_push_notify.py实现GitHub验签push事件到指定Codex聊天队列，7项本地测试通过；
+仅模拟queue，未发送真实消息。当前桌面消息endpoint与公网Webhook路由/注册尚未接通，
+不能声称push已能自动唤醒本聊天。配置和准确状态见tools/GITHUB_PUSH_NOTIFY.md。
+
+## 8bd2807：首次设备运行报告507015
+
+当前为EXECUTION_ERROR，尚未DEVICE_VALIDATED，没有新性能结果。已发现launcher同步失败后
+继续读输出并reset、索引2048与compact128任务不符、stats关闭但照读、gSize字段不符等问题。
+修正两个launcher的故障退出/marker并移除reset；其他数值/内存合同仍须完整修复后才能运行。
+具体静态审查见evidence/FIRST_LAUNCH_REVIEW.md。通知链仍未接通，本次是用户提醒后主动读取。
+
+
