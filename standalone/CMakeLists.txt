@@ -1,35 +1,34 @@
 cmake_minimum_required(VERSION 3.16)
-find_package(ASC REQUIRED)
 
+# Resolve ASC from the active, matched toolkit (ASC_DIR/CMAKE_PREFIX_PATH).
+# This target only compiles archived source; it never installs or launches.
+set(CMAKE_ASC_ARCHITECTURES "dav-3510" CACHE STRING "A5 compile target")
+find_package(ASC REQUIRED)
 project(sfa_standalone LANGUAGES ASC CXX)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(ASC_ROOT "/usr/local/Ascend/cann-9.2.1/aarch64-linux/asc")
-set(PKG_INC "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/sparse_flash_attention")
-set(COMMON_ASCENDC "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc")
+set(SFA_PROBE_TEMPLATE_MODE "0" CACHE STRING "Compile one original C/V template mode: 0 or 1")
+if(NOT SFA_PROBE_TEMPLATE_MODE MATCHES "^[01]$")
+    message(FATAL_ERROR "SFA_PROBE_TEMPLATE_MODE must be 0 or 1; it is not a runtime tiling key")
+endif()
+set(SFA_SDK_INCLUDE_DIRS "" CACHE STRING "Additional includes from the SAME toolkit that provides ASC")
+get_filename_component(SFA_BUNDLE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
-# tiling data header from sgl-kernel-npu (upstream public source)
-set(TILING_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
-
-add_executable(sfa_standalone sfa_standalone_entry.asc)
-
-target_include_directories(sfa_standalone PRIVATE
-    ${TILING_DIR}
-    ${ASC_ROOT}
-    ${ASC_ROOT}/include
-    ${ASC_ROOT}/include/basic_api
-    ${ASC_ROOT}/include/adv_api
-    ${ASC_ROOT}/include/interface
-    ${ASC_ROOT}/include/tiling
-    ${ASC_ROOT}/include/utils
-    ${ASC_ROOT}/include/comm_api
-    ${ASC_ROOT}/impl
-    ${ASC_ROOT}/impl/basic_api
-    ${PKG_INC}
-    ${PKG_INC}/arch35
-    ${COMMON_ASCENDC}
-)
-
+# No host main() is required. The non-template kernel instantiates Init/Process;
+# an unused kernel template could yield an archive with no device implementation.
+add_library(sfa_standalone STATIC sfa_standalone_entry.asc)
 target_compile_options(sfa_standalone PRIVATE
-    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=${CMAKE_ASC_ARCHITECTURES}>
 )
+target_compile_definitions(sfa_standalone PRIVATE SFA_PROBE_TEMPLATE_MODE=${SFA_PROBE_TEMPLATE_MODE})
+target_include_directories(sfa_standalone PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${SFA_BUNDLE_ROOT}/original"
+    "${SFA_BUNDLE_ROOT}/original/arch35"
+    "${SFA_BUNDLE_ROOT}/deps/sparse_flash_attention/arch35"
+    "${SFA_BUNDLE_ROOT}/deps/ascendc_common"
+    ${SFA_SDK_INCLUDE_DIRS}
+)
+message(STATUS "SFA compile-only target; public SGL POD, private source ABI NOT validated")
+message(STATUS "SFA source: ${SFA_BUNDLE_ROOT}; template mode: ${SFA_PROBE_TEMPLATE_MODE}")

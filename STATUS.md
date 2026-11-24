@@ -28,12 +28,12 @@
 
 内网代理继续按照START_HERE执行，直接提交命令、日志与结果。普通平台配置/编译错误自行处理，不要求用户逐项搬运。
 
-## Build Progress (2026-11-24 14:55)
+## 内网进展报告（commit 5ad9dbd，尚无原始日志）
 
 ### Verified working:
 1. ASC language pipeline: find_package(ASC) resolves, ccec with --npu-arch=dav-3510 accepted
 2. Tiling struct SparseFlashAttentionTilingDataMla: sgl-kernel-npu public POD accepted by compiler
-3. Upstream kernel identical to custom_cot (diff=0, verified)
+3. Report claims upstream kernel identical to custom_cot (diff=0); exact compared paths/hashes were not committed.
 4. Platform diagnostic: 4 candidates all fail with "Npu Arch Version[3002] is not support"
    in TBE tiling layer (sparse_flash_attention_tiling.cpp:1618)
 
@@ -44,6 +44,18 @@ fields from util_regbase.h's ConstInfo, but the standalone entry includes common
 first. Fix: remove #include "sparse_flash_attention_common.h" from standalone entry;
 let arch35 kernel_mla.h pull in util_regbase.h's ConstInfo via its own include chain.
 
-GET_TILING_DATA_WITH_STRUCT: confirmed injected by libaihac_codegen.so (binary).
-Standalone builds must manually read tiling data from GM (already implemented in
-standalone/sfa_standalone_entry.asc ReadTiling function).
+Report attributes GET_TILING_DATA_WITH_STRUCT to libaihac_codegen.so; the binary
+inspection evidence was not committed. An explicit GM-to-local load is possible
+and is already used in the pinned SGL entry; no generator-origin assumption is
+required for that path.
+
+## 外部代码审查后已修正（未在 A5 编译/运行）
+
+- `standalone` 误用了 arch22 模板，现改回真实 arch35 BaseApi cube/vector 服务。
+- 移除旧 common.h 和 static UB 假本地指针；AIV 精确复制144B到本地 POD，AIC 保持nullptr。
+- 新增非模板导出入口，固定实例化 Init/Process；构建目标改为无需main的静态库。
+- 使用仓库归档源码和原样 pinned POD；取消写死的9.2.1/vendor路径。
+- 下一步按 `standalone/README.md` 提交真实编译产物和日志，然后完成匹配host/tiling再上设备。
+- 当前没有新增 A5 数值或性能结果；原有 BF16 热环126.17µs仍是用户回传的两遍实现成绩。
+- 本地66项宿主测试：65通过、1项Linux显式开启的致命信号测试跳过。新增4项用真实入口和pinned POD、mock服务验证AIC/AIV×mode0/1；不冒充AscendC编译或设备验证。
+
