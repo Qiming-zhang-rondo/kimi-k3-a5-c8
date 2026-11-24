@@ -1,10 +1,15 @@
 # 单次完整执行入口
 
+**当前优先任务：[POST_COMPILE_EXECUTION_TASK.md](POST_COMPILE_EXECUTION_TASK.md)。**
+用户反馈host/device隔离后已编译通过：保留当前成功环境，直接完成原版设备运行、
+standalone融合入口接入及同轮三臂性能。先补真实构建证据，随后连续执行，无需阶段间向用户确认。
+SDK恢复工具仅在实际再次出现构建故障时使用，不把已通过的编译从头重做。
+
 内网执行代理请阅读 [AUTONOMOUS_EXECUTION_TASK.md](AUTONOMOUS_EXECUTION_TASK.md)，
 在已有工作容器中自主完成依赖发现、可复现构建、融合实现、正确性检查和配对性能测试。
 将源码、可复现命令、阶段状态和实际日志提交到 `sfa-cold-merge` 分支，供外部 Codex 直接审查。
 
-当前原版编译报告遇到SDK平台初始化崩溃。按 [PLATFORM_RECOVERY.md](PLATFORM_RECOVERY.md) 执行自动诊断并继续原任务；
+历史原版编译报告曾遇到SDK平台初始化崩溃；若实际再次发生，按 [PLATFORM_RECOVERY.md](PLATFORM_RECOVERY.md) 执行自动诊断并继续原任务；
 不要把芯片显示名当成SDK目标，也不要仅据状态摘要断言硬件无权限。真实tiling定义参考已收在 `upstream/`。
 
 这次交付的终点是可调用并经过真实验证的候选，或有实际执行证据的外部阻断。

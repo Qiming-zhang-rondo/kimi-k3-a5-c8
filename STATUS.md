@@ -133,3 +133,10 @@ SHA和宏上下文，不执行编译器/NPU、不修改源码/SDK。下一轮直
 4条设备分支、2条host分支及错误架构拒绝；证据收集器覆盖只读、缺失和路径逃逸。
 这是宿主控制测试，实际ASC构建/A5正确性仍未通过；不宣称新增性能收益。
 
+## 最新用户回传与下一阶段
+
+用户反馈：device头隔离后MicroAPI问题解决，内网编译通过。该反馈尚未附本轮原始产物；
+在内网补齐日志/哈希后记BUILD_PASS，继续设备运行，不把它记作DEVICE_VALIDATED或MEASURED。
+默认执行任务已切至POST_COMPILE_EXECUTION_TASK.md：最小direct launcher/匹配tiling，
+原版compact128精度，现有epilogue的standalone融合接入，以及10轮三臂AB/BA全流程性能。
+

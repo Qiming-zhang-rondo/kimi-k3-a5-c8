@@ -2,6 +2,7 @@
 
 本分支目标是交付 BF16 热端原生 Sparse Attention 与冷端状态合并的可运行候选。
 完整任务及验收要求见 `AUTONOMOUS_EXECUTION_TASK.md`；启动入口为 `START_HERE.md`。
+当前编译通过后的优先任务为 `POST_COMPILE_EXECUTION_TASK.md`：连续推进设备运行、融合和配对性能。
 
 - 内网代理拥有实际机器环境，负责在当地自主搜索依赖、修复构建、执行验证并提交证据。
 - 外部 Codex 负责源代码实现/审查、本地可执行测试及从 GitHub 检查返回结果。
