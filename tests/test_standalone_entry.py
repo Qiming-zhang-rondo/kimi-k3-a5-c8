@@ -1,4 +1,4 @@
-"""Host-compile and invoke the actual standalone .asc entry in four paths.
+"""Host-compile and invoke the actual standalone .asc entry across compiler passes.
 
 The compiler sees the real entry and pinned SGL POD, with lightweight host mocks
 for AscendC and the arch35 services. These tests validate dispatch, argument
@@ -192,11 +192,14 @@ class StandaloneEntryHostTests(unittest.TestCase):
             (directory / "driver.cpp").write_text(DRIVER)
             binary = directory / "entry_probe"
             command = [self.compiler, "-std=c++17", "-O0", "-Wno-unknown-pragmas",
-                       "-D__CCE_AICORE__=310", f"-DPROBE_EXPECTED_MODE={mode}",
+                       "-D__CCE_AICORE__=310", "-D__NPU_ARCH__=3510",
+                       f"-DPROBE_EXPECTED_MODE={mode}",
                        "-I", str(directory), "-I", str(ENTRY.parent),
                        str(directory / "driver.cpp"), "-o", str(binary)]
             if cube:
                 command.append("-D__DAV_C310_CUBE__=1")
+            else:
+                command.append("-D__DAV_C310_VEC__=1")
             # Mode 0 intentionally also tests the actual entry's default.
             if mode:
                 command.append(f"-DSFA_PROBE_TEMPLATE_MODE={mode}")
@@ -206,6 +209,66 @@ class StandaloneEntryHostTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.strip(),
                              f"HOST_ENTRY_PASS core={0 if cube else 1} mode={mode} init=1 process=1 bytes=144")
+
+    def compile_host_or_rejected_pass(self, defines, expect_success):
+        """Poison device-only headers so an empty host pass cannot hide parsing.
+
+        This checks preprocessing/entry wiring with an ordinary C++ compiler,
+        not SDK host or device code generation.
+        """
+        with tempfile.TemporaryDirectory(prefix="sfa-entry-pass-") as temp:
+            directory = Path(temp)
+            (directory / "arch35").mkdir()
+            (directory / "kernel_operator.h").write_text(KERNEL_OPERATOR)
+            poison = '#error "HOST_PASS_PARSED_DEVICE_ONLY_HEADER"\n'
+            (directory / "arch35/sparse_flash_attention_kernel_mla.h").write_text(poison)
+            (directory / "sparse_flash_attention_tiling_data.h").write_text(poison)
+            # Preserve the complete real entry bytes, but place them beside the
+            # poisoned quoted includes so its own directory cannot bypass them.
+            (directory / "sfa_standalone_entry.asc").write_bytes(ENTRY.read_bytes())
+            driver = r'''
+#include <iostream>
+#include "sfa_standalone_entry.asc"
+int main() {
+    try {
+        std::array<uint8_t, 64> sentinel{};
+        sentinel.fill(0x5a);
+        uint8_t *p = sentinel.data();
+        sfa_arch35_bf16_compile_probe(p,p,p,p,p,p,p,p,p,p,p,p,p,p);
+        Probe::Require(Probe::initCalls == 0 && Probe::processCalls == 0,
+                       "host pass ran native services");
+        Probe::Require(Probe::workspaceCalls == 0 && Probe::taskCalls == 1,
+                       "host pass ran device setup");
+        Probe::Require(!Probe::pipeAlive, "host pass constructed a pipe");
+        for (uint8_t byte : sentinel)
+            Probe::Require(byte == 0x5a, "host entry touched argument memory");
+        std::cout << "HOST_ONLY_PASS no_device_headers init=0 process=0\n";
+        return 0;
+    } catch (const std::exception &error) {
+        std::cerr << error.what() << "\n";
+        return 1;
+    }
+}
+'''
+            (directory / "driver.cpp").write_text(driver)
+            binary = directory / "host_probe"
+            command = [self.compiler, "-std=c++17", "-O0", "-Wno-unknown-pragmas",
+                       "-I", str(directory), "-I", str(ENTRY.parent),
+                       *[f"-D{define}" for define in defines],
+                       str(directory / "driver.cpp"), "-o", str(binary)]
+            compiled = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            output = compiled.stdout + compiled.stderr
+            if not expect_success:
+                self.assertNotEqual(compiled.returncode, 0, "unsupported device pass compiled")
+                self.assertNotIn("HOST_PASS_PARSED_DEVICE_ONLY_HEADER", output,
+                                 "reject the target before including device headers")
+                self.assertIn("3510", output, "expected explicit target guard diagnostic")
+                return
+            self.assertEqual(compiled.returncode, 0, output)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(),
+                             "HOST_ONLY_PASS no_device_headers init=0 process=0")
 
     def test_aic_c_mode(self):
         self.run_path(cube=True, mode=0)
@@ -218,6 +281,22 @@ class StandaloneEntryHostTests(unittest.TestCase):
 
     def test_aiv_v_mode(self):
         self.run_path(cube=False, mode=1)
+
+    def test_host_pass_without_npu_arch(self):
+        self.compile_host_or_rejected_pass([], expect_success=True)
+
+    def test_host_pass_with_npu_arch_zero(self):
+        self.compile_host_or_rejected_pass(["__NPU_ARCH__=0"], expect_success=True)
+
+    def test_unsupported_device_arch_is_rejected(self):
+        self.compile_host_or_rejected_pass(["__NPU_ARCH__=2201"], expect_success=False)
+
+    def test_device_markers_require_matching_npu_arch(self):
+        for marker in ("__DAV_C310_CUBE__=1", "__DAV_C310_VEC__=1"):
+            with self.subTest(marker=marker, architecture="missing"):
+                self.compile_host_or_rejected_pass([marker], expect_success=False)
+            with self.subTest(marker=marker, architecture="zero"):
+                self.compile_host_or_rejected_pass([marker, "__NPU_ARCH__=0"], expect_success=False)
 
 
 if __name__ == "__main__":

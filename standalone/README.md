@@ -11,6 +11,12 @@ pointer as in the original entry; AIV copies exactly 144 bytes (36 uint32 words)
 from GM into a local POD whose lifetime encloses `Init` and `Process`. There is
 no static UB buffer, rounded-up 160-byte read or GM-to-local pointer cast.
 
+ASC has separate host and device passes. Only a compiler-selected
+`__NPU_ARCH__ == 3510` pass may parse the archived arch35/VF implementation.
+The host scan still sees the exported signature and the mixed-task metadata.
+`SFA_BUILD_CONTEXT` messages record each pass's actual architecture/core macros;
+do not define those macros manually or infer API availability from package names.
+
 The non-template `sfa_arch35_bf16_compile_probe` symbol instantiates a fixed
 TND/PA_BSND template. Mode 0 and mode 1 are compiled separately; neither is
 inferred from a private byte at SGL's `dispatchKey` offset. The target is a
@@ -42,6 +48,33 @@ device artifact hashes, and symbol/metadata evidence for both AIC and AIV and
 the exported probe kernel. A normal exit from CMake configuration is not a
 device compilation result. Default desktop tests use host stubs and do not
 claim any ASC compilation.
+
+If compilation fails, collect the build configuration and SDK header evidence
+in one step. The internal agent must resolve the actual active SDK root from
+its build configuration; it does not need to ask the user for individual files:
+
+```bash
+python3 tools/collect_sfa_compile_evidence.py --build-dir /tmp/sfa-standalone-mode0 --output /tmp/sfa-compile-evidence-new --sdk-root "$ASCEND_HOME_PATH"
+```
+
+Use `ASCEND_HOME_PATH` only if it names the same toolkit selected by ASC. If not,
+pass the actual toolkit path from CMake/compiler configuration. Use a fresh
+output directory and include the original failed build log alongside this
+evidence. The collector does not execute any command it reads. A collected
+report is not a successful compilation.
+
+The 9.2.0 [public SDK header](https://github.com/hicann/asc-devkit/blob/02af6bddfd75b48d17cd2ec0d4da5bb3700cde44/impl/basic_api/kernel_macros.h#L119)
+places `MicroAPI = Reg` **inside AscendC**, guarded by `__NPU_ARCH__ == 3510`.
+Thus `no member MicroAPI` alone does not prove a missing/newer SDK is required.
+Host-pass parsing, a wrong target, or a different resolved header must first be
+distinguished using actual pass logs and header evidence. A made-up alias shim
+cannot establish API signatures and is intentionally removed.
+
+Require real 3510 AIC and AIV context/artifacts; a host-only archive containing
+the guarded signature is not an SFA device build pass. If a 3510 device pass
+still fails, retain that exact first error and investigate its actual resolved
+headers. The host-pass fix is a hypothesis pending SDK execution, not a claim
+that all current build errors are solved.
 
 ## Before device execution
 

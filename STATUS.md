@@ -60,7 +60,7 @@ required for that path.
 - 本地66项宿主测试：65通过、1项Linux显式开启的致命信号测试跳过。新增4项用真实入口和pinned POD、mock服务验证AIC/AIV×mode0/1；不冒充AscendC编译或设备验证。
 
 
-## BLOCKED: AscendC::MicroAPI not available in CANN 9.2.1 (2026-11-24 15:15)
+## 内网初始推断记录：MicroAPI 不可用（后来发现 SDK 中存在别名）
 
 ### Evidence
 - vf_basic_block_utils.h:58 references `AscendC::MicroAPI::CastTrait`
@@ -83,11 +83,11 @@ Need either:
 - ConstInfo issue fixed by Codex (ae36ad6)
 - Error occurs in vf_basic_block_utils.h (MicroAPI dependency)
 
-## MicroAPI Root Cause Analysis (2026-11-24 16:10)
+## 内网第二次推断记录（namespace 归属尚未由实际预处理确认）
 
 ### Codex fix ae36ad6 result: PARTIALLY EFFECTIVE
 - ✅ Fixed ConstInfo field mismatch (n2Size/s1Size/dSize now resolve)
-- ✅ Fixed tiling data 144-byte GM→UB copy
+- ✅ Fixed tiling data 144-byte GM→local POD copy
 - ✅ Fixed template instantiation (TND/PA_BSND, mode 0/1)
 - ❌ Did NOT fix MicroAPI issue — same `no member named 'MicroAPI' in namespace 'AscendC'` error
 
@@ -111,3 +111,25 @@ MicroAPI inside namespace AscendC (as used by custom_cot 9.1.0 build).
 - Error file: deps/sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_utils.h:58
 - Same error in both Codex entry (ae36ad6) and manual compat shim attempts
 - Full compile_commands.json available at /tmp/sfa_m0e/
+
+## 外部审查：不能据上述摘要判定 SDK 缺 API
+
+`1462a84b` 只提交了状态文字、未使用的compat shim和一个内部头include，
+没有提交实际编译日志、compile_commands.json或当前SDK头。故失败pass尚未确认。
+公开asc-devkit 9.2.0源码（02af6bdd）kernel_macros.h:119–124明确是
+`namespace AscendC { namespace Reg {} ... namespace MicroAPI = Reg; }`，
+别名受 `__NPU_ARCH__ == 3510` 控制。它不支持“别名在AscendC之外”的推断。
+
+已修正独立ASC入口：仅3510设备pass解析原arch35/VF头和实现；host pass保留
+导出签名和MIX_AIC_1_2任务元信息。错误设备架构明确拒绝，绝不手动补架构宏。
+加入SFA_BUILD_CONTEXT编译日志，移除内部kernel_macros.h直接include与猜测类型的shim。
+这针对有依据的host/device阶段混编假设；实际机器是否因此恢复，仍须重编确认。
+
+`tools/collect_sfa_compile_evidence.py`一次收集实际编译配置及匹配SDK头的原始字节、
+SHA和宏上下文，不执行编译器/NPU、不修改源码/SDK。下一轮直接提交完整日志和此证据，
+不能仅提交摘要或再次凭namespace错误要求换SDK。命令与判定见standalone/README.md。
+
+本轮本地73项宿主测试：72通过、1项Linux显式fatal-signal测试跳过。入口控制覆盖
+4条设备分支、2条host分支及错误架构拒绝；证据收集器覆盖只读、缺失和路径逃逸。
+这是宿主控制测试，实际ASC构建/A5正确性仍未通过；不宣称新增性能收益。
+
