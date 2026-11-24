@@ -1,157 +1,128 @@
-// ============================================================================
-// cold_state_merge.h — LSE-based cold state merge for BF16 hot-end attention
+// Scalar contract reference for merging a normalized hot state with a cold state.
 //
-// Inserts into SFAVectorService::ProcessVec2 between the final normalization
-// (FlashUpdateLastNew / LastDivNew) and the output copy-out (CopyOutAttentionOut).
+// REVIEW STATUS: host C++ tests exercise this header directly. This is NOT a
+// compiled/integrated AscendC operator or a performance implementation. The
+// scalar math calls still require verification/replacement in the device
+// toolchain. Native ABI, tiling, vector loads and final FP32 store are pending.
 //
-// Math contract (O_h and O_c are ALREADY normalized by their respective sums):
-//   m = max(m_h, m_c)
-//   w_h = exp(m_h - m)   (stable, never direct exp(m))
-//   w_c = exp(m_c - m)
-//   Z   = s_h * w_h + s_c * w_c
-//   O   = (O_h * s_h * w_h + O_c * s_c * w_c) / Z
+// Restricted layout: contiguous TND output [T,H,D], N2=1. A local M row advances
+// the flattened (token,head) index, NOT the token index. The caller derives
+// flatRowOffset from the real attention output offset and includes AIV/G splits.
 //
-// Edge cases:
-//   hot_present && !cold_present  -> O = O_h (already in vec2ResUb, no-op)
-//   !hot_present && cold_present  -> O = O_c
-//   !hot_present && !cold_present -> O = 0
-//   Non-finite m/s on a valid side -> propagate as error (do NOT mask).
-//
-// Presence tensors are device-side bool (1 byte per element, treated as logical
-// boolean; never bitwise-NOT a uint8).
-//
-// STATUS: first version, scalar per-row implementation. Vectorized (MicroAPI)
-// optimization is the next step after correctness verification.
-// ============================================================================
+// Hot and cold outputs are normalized. Statistics are FP32 in the same natural
+// exponential domain: logZ = maximum + log(sum), with finite maximum and finite
+// positive sum on every present side. Nonpresent sides are never inspected.
+// T is the accumulator/final output element type; COLD_T independently describes
+// cold GM bytes. HOT_OUTPUT_T describes the original hot reader output rounding.
+// The caller must verify its conversion matches the original native Cast round
+// mode; replacing the final GM store with FP32 requires separate integration.
+// This experiment calls the helper with T=float and an independent cold type.
 
 #pragma once
 
+#include <cmath>
+#include <cstdint>
 #include "sparse_flash_attention_common_arch35.h"
 
 namespace AscendC {
 
-// ---------------------------------------------------------------------------
-// Stable merge weight: exp(own - global). Never overflows because
-// own <= global, so the exponent is always <= 0.
-// ---------------------------------------------------------------------------
-__aicore__ inline float StableMergeWeight(float ownMax, float globalMax)
+__aicore__ inline bool ValidColdMergeStatistics(float maximum, float sum)
 {
-    return exp(ownMax - globalMax);
+    return std::isfinite(maximum) && std::isfinite(sum) && sum > 0.0f;
 }
 
-// ---------------------------------------------------------------------------
-// Tile-level merge: merges cold state into the hot output tile.
-// Called once per output tile in ProcessVec2, after normalization, before
-// ZeroInvalidAttnOut and CopyOutAttentionOut.
-//
-// The hot output in vec2ResUb is the NORMALIZED output O_h = A_h / s_h.
-// The merge therefore re-multiplies by s_h to reconstruct the numerator,
-// combines with the cold numerator, and re-normalizes.
-//
-// GM layout of cold tensors:
-//   coldOutput: [T, H, D] contiguous, dtype = OUTPUT_T (bf16)
-//   coldMax:    [T, H]   contiguous, float32
-//   coldSum:    [T, H]   contiguous, float32
-//   coldPresent: [T]     contiguous, bool (1 byte)
-//   hotPresent:  [T]     contiguous, bool (1 byte)
-//
-// This tile covers rows [tileRowOffset, tileRowOffset + mRealSize) for
-// head `headIdx`.
-// ---------------------------------------------------------------------------
-template <typename T, typename OUTPUT_T>
+template <typename T, typename COLD_T, typename HOT_OUTPUT_T = T>
 __aicore__ inline void MergeColdStateTile(
-    LocalTensor<T> &vec2ResUb,           // [mRealSize, dAlign] normalized hot output (in/out)
-    LocalTensor<float> &sumUb,           // [mRealSize] hot sum (per row)
-    LocalTensor<float> &maxUb,           // [mRealSize] hot max (per row)
-    __gm__ uint8_t *coldOutputGm,        // [T, H, D] cold output
-    __gm__ uint8_t *coldMaxGm,           // [T, H] float32 cold max
-    __gm__ uint8_t *coldSumGm,           // [T, H] float32 cold sum
-    __gm__ uint8_t *coldPresentGm,       // [T] bool
-    __gm__ uint8_t *hotPresentGm,        // [T] bool
-    int64_t tileRowOffset,               // global row index of first row in this tile
-    int64_t headIdx,                     // current head index
-    int64_t numHeads,                    // total heads
-    int64_t mRealSize,                   // rows in this tile
-    int64_t dAlign)                     // aligned D (e.g., 576)
+    LocalTensor<T> &hotOutputUb,
+    LocalTensor<float> &hotSumUb,
+    LocalTensor<float> &hotMaxUb,
+    __gm__ const uint8_t *coldOutputGm,
+    __gm__ const uint8_t *coldMaxGm,
+    __gm__ const uint8_t *coldSumGm,
+    __gm__ const uint8_t *coldPresentGm,
+    __gm__ const uint8_t *hotPresentGm,
+    int64_t flatRowOffset,
+    int64_t numHeads,
+    int64_t mRealSize,
+    int64_t outputDim,
+    int64_t ubRowStride)
 {
-    // Pre-compute GM strides
-    int64_t statIdxBase = tileRowOffset * numHeads + headIdx;
-    int64_t statStride = numHeads;  // stride between consecutive rows for same head
-    int64_t coldOutRowStride = dAlign * sizeof(OUTPUT_T);  // bytes per (T,H) row
-
+    // Layout/range/alignment and non-overlap validation belongs in the native
+    // host/tiling adapter. Supported dimensions require 0 < D <= UB stride.
+    const auto *coldOutput = reinterpret_cast<__gm__ const COLD_T *>(coldOutputGm);
+    const auto *coldMax = reinterpret_cast<__gm__ const float *>(coldMaxGm);
+    const auto *coldSum = reinterpret_cast<__gm__ const float *>(coldSumGm);
     for (int64_t m = 0; m < mRealSize; ++m) {
-        int64_t globalRow = tileRowOffset + m;
-        int64_t statIdx = globalRow * numHeads + headIdx;
+        const int64_t statIdx = flatRowOffset + m;
+        const int64_t tokenIdx = statIdx / numHeads;
+        const bool coldPresent = coldPresentGm[tokenIdx] != 0;
+        const bool hotPresent = hotPresentGm[tokenIdx] != 0;
 
-        // Read presence flags (logical bool, not bitwise)
-        bool coldPresent = coldPresentGm[globalRow] != 0;
-        bool hotPresent = hotPresentGm[globalRow] != 0;
-
-        // Case 1: hot only — vec2ResUb already has the correct value
-        if (hotPresent && !coldPresent) {
-            continue;
+        // Zero UB padding without reading unrelated cold GM elements.
+        for (int64_t d = outputDim; d < ubRowStride; ++d) {
+            hotOutputUb.SetValue(m * ubRowStride + d, static_cast<T>(0));
         }
-
-        // Case 2: both empty — zero the row
-        if (!hotPresent && !coldPresent) {
-            for (int64_t d = 0; d < dAlign; ++d) {
-                vec2ResUb.SetValue(m * dAlign + d, static_cast<T>(0));
+        if (!coldPresent && !hotPresent) {
+            for (int64_t d = 0; d < outputDim; ++d) {
+                hotOutputUb.SetValue(m * ubRowStride + d, static_cast<T>(0));
             }
             continue;
         }
 
-        // Load cold statistics
-        float coldSum = *reinterpret_cast<__gm__ float*>(
-            coldSumGm + statIdx * sizeof(float));
-        float coldMax = *reinterpret_cast<__gm__ float*>(
-            coldMaxGm + statIdx * sizeof(float));
-
-        // Case 3: cold only — copy cold output
-        if (!hotPresent && coldPresent) {
-            __gm__ OUTPUT_T *coldOutRow = reinterpret_cast<__gm__ OUTPUT_T*>(
-                coldOutputGm + statIdx * coldOutRowStride);
-            for (int64_t d = 0; d < dAlign; ++d) {
-                vec2ResUb.SetValue(m * dAlign + d,
-                    static_cast<T>(coldOutRow[d]));
+        // Validate the effective side(s) even in the one-sided cases. Invalid
+        // present state is an observable error, not an empty segment.
+        float hm = 0.0f, hs = 1.0f, cm = 0.0f, cs = 1.0f;
+        bool valid = true;
+        if (hotPresent) {
+            hm = hotMaxUb.GetValue(m);
+            hs = hotSumUb.GetValue(m);
+            valid = ValidColdMergeStatistics(hm, hs);
+        }
+        if (coldPresent) {
+            cm = coldMax[statIdx];
+            cs = coldSum[statIdx];
+            valid = valid && ValidColdMergeStatistics(cm, cs);
+        }
+        if (!valid) {
+            const float invalid = std::nanf("");
+            for (int64_t d = 0; d < outputDim; ++d) {
+                hotOutputUb.SetValue(m * ubRowStride + d, static_cast<T>(invalid));
             }
             continue;
         }
 
-        // Case 4: both valid — full LSE merge
-        float hotSum = sumUb.GetValue(m);
-        float hotMax = maxUb.GetValue(m);
-
-        // Combined max and stable weights
-        float combinedMax = hotMax > coldMax ? hotMax : coldMax;
-        float wH = StableMergeWeight(hotMax, combinedMax);  // exp(m_h - m) <= 1
-        float wC = StableMergeWeight(coldMax, combinedMax); // exp(m_c - m) <= 1
-
-        // Combined normalizer
-        float z = hotSum * wH + coldSum * wC;
-        if (z <= 0.0f) {
-            // Degenerate: zero total mass
-            for (int64_t d = 0; d < dAlign; ++d) {
-                vec2ResUb.SetValue(m * dAlign + d, static_cast<T>(0));
-            }
-            continue;
+        float hotWeight = hotPresent ? 1.0f : 0.0f;
+        float coldWeight = coldPresent ? 1.0f : 0.0f;
+        if (hotPresent && coldPresent) {
+            // Shift before log(sum), then normalize log weights. This also
+            // handles finite huge sums without overflowing hs + cs.
+            const float common = hm > cm ? hm : cm;
+            const float hotLog = (hm - common) + std::log(hs);
+            const float coldLog = (cm - common) + std::log(cs);
+            const float shift = hotLog > coldLog ? hotLog : coldLog;
+            hotWeight = std::exp(hotLog - shift);
+            coldWeight = std::exp(coldLog - shift);
+            const float denominator = hotWeight + coldWeight;
+            hotWeight /= denominator;
+            coldWeight /= denominator;
         }
-
-        // Pre-computed merge coefficients
-        float zh = hotSum * wH / z;
-        float zc = coldSum * wC / z;
-
-        // Load cold output row and merge with hot output row
-        __gm__ OUTPUT_T *coldOutRow = reinterpret_cast<__gm__ OUTPUT_T*>(
-            coldOutputGm + statIdx * coldOutRowStride);
-
-        // Scalar merge (vectorized TODO after correctness gate)
-        for (int64_t d = 0; d < dAlign; ++d) {
-            float oh = static_cast<float>(vec2ResUb.GetValue(m * dAlign + d));
-            float oc = static_cast<float>(coldOutRow[d]);
-            vec2ResUb.SetValue(m * dAlign + d,
-                static_cast<T>(oh * zh + oc * zc));
+        for (int64_t d = 0; d < outputDim; ++d) {
+            float value;
+            if (hotPresent && coldPresent) {
+                const float hot = static_cast<float>(static_cast<HOT_OUTPUT_T>(
+                    hotOutputUb.GetValue(m * ubRowStride + d)));
+                const float cold = static_cast<float>(coldOutput[statIdx * outputDim + d]);
+                value = hot * hotWeight + cold * coldWeight;
+            } else if (hotPresent) {
+                value = static_cast<float>(static_cast<HOT_OUTPUT_T>(
+                    hotOutputUb.GetValue(m * ubRowStride + d)));
+            } else {
+                value = static_cast<float>(coldOutput[statIdx * outputDim + d]);
+            }
+            hotOutputUb.SetValue(m * ubRowStride + d, static_cast<T>(value));
         }
     }
 }
 
 } // namespace AscendC
+

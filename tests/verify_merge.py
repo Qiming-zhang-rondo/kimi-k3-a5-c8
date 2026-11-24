@@ -1,9 +1,10 @@
-"""Verify cold_state_merge.h math contract on NPU."""
+"""Formula-only Torch checks; does not compile or execute cold_state_merge.h."""
 import torch
 import torch_npu
 
 torch.manual_seed(42)
 device = "npu:0"
+print("SCOPE: PyTorch formulas only; no AscendC header/kernel execution.")
 
 B, Q, H, D = 1, 4, 64, 512
 
@@ -39,6 +40,7 @@ for trial in range(5):
     rel = diff / ref.abs().max().item() if ref.abs().max() > 0 else 0
     ok = "✅" if diff < 1e-5 else "❌"
     print(f"  trial {trial}: max_diff={diff:.2e}, rel={rel:.2e} {ok}")
+    assert diff < 1e-5, f"formula mismatch: {diff}"
 
 print()
 print("=" * 60)
@@ -66,13 +68,14 @@ for trial in range(5):
     finite = torch.isfinite(result).all().item()
     ok = "✅" if finite and diff < 1e-3 else "❌"
     print(f"  trial {trial}: extreme(max=50 vs -50): diff={diff:.2e}, finite={finite} {ok}")
+    assert finite and diff < 1e-3, f"extreme formula mismatch: {diff}"
 
 print()
 print("=" * 60)
 print("Test 3: Split softmax == merged (ground truth equivalence)")
 print("=" * 60)
 
-n_hot, n_cold, n_q, n_h, d = 128, 1920, 4, 64, 512
+n_hot, n_cold, n_q, n_h, d = 128, 1920, 4, 8, 64
 
 for trial in range(5):
     hot_scores = torch.randn(n_q, n_h, n_hot, dtype=torch.float32, device=device)
@@ -94,8 +97,8 @@ for trial in range(5):
 
     hot_max = hot_scores.max(dim=-1, keepdim=True).values
     cold_max = cold_scores.max(dim=-1, keepdim=True).values
-    hot_sum = hot_probs.sum(dim=-1, keepdim=True)
-    cold_sum = cold_probs.sum(dim=-1, keepdim=True)
+    hot_sum = torch.exp(hot_scores - hot_max).sum(dim=-1, keepdim=True)
+    cold_sum = torch.exp(cold_scores - cold_max).sum(dim=-1, keepdim=True)
 
     m = torch.maximum(hot_max, cold_max)
     wH = torch.exp(hot_max - m)
@@ -107,17 +110,16 @@ for trial in range(5):
     rel = diff / ref.abs().max().item() if ref.abs().max() > 0 else 0
     ok = "✅" if rel < 1e-4 else "❌"
     print(f"  trial {trial}: full_softmax vs split+merge: abs={diff:.4e}, rel={rel:.4e} {ok}")
+    assert rel < 1e-4, f"split softmax formula mismatch: {rel}"
 
 print()
 print("=" * 60)
-print("Test 4: Edge cases (presence flags)")
+print("Presence/invalid-state tests are in test_uploaded_merge_regressions.py")
 print("=" * 60)
-print("  hot only (cold_present=False): output = hot_out (no-op) ✅ by design")
-print("  cold only (hot_present=False): output = cold_out (copy) ✅ by design")
-print("  both empty: output = 0 ✅ by design")
-print("  z <= 0 (degenerate): output = 0, guarded in code ✅")
+print("  This script does not execute presence branches or the C++ header.")
 
 print()
 print("=" * 60)
-print("ALL TESTS PASSED" if True else "FAILED")
+print("TORCH FORMULA CHECKS PASSED; native kernel compilation/runtime untested")
 print("=" * 60)
+

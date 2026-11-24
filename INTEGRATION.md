@@ -1,161 +1,167 @@
-# Integration Patch: Cold-State Merge into ProcessVec2
+# Verified integration contract and remaining blockers
 
-## File: `arch35/sparse_flash_attention_service_vector_mla.h`
+This is an implementation guide, not an applied patch. No source file in
+`original/` currently includes or calls `MergeColdStateTile`.
 
-### Insertion point: `ProcessVec2` (between L743 and L744)
+## 1. Where the source actually normalizes and stores output
 
-**Context (existing code, L738-751):**
+The supplied arch35 kernel documents no S2 core splitting
+(`original/arch35/sparse_flash_attention_kernel_mla.h:211`). Each task loops
+over its S2 tiles, and the last `ProcessVec2` iteration performs
+`FlashUpdateLastNew` or `LastDivNew` before `CopyOutAttentionOut`
+(`original/arch35/sparse_flash_attention_service_vector_mla.h:705-750`).
+
+For this supplied path, the merge belongs after hot normalization and after
+cleaning invalid HOT output, before the final combined output store.
+It must not run once per intermediate S2 tile.
+
+The old proposed placement before `ZeroInvalidAttnOut` is unsafe: hot-only
+invalid cleanup may erase a valid cold-only combined output. Statistics-on
+can modify the hot sentinel in `CopyFALseToGm`; correctness must not depend on
+that flag. A fully empty hot task may also be skipped by
+`kernel_mla.h:581-583`, so implementing cold-only requires handling that path,
+not just adding a call in the normal epilogue.
+
+## 2. Correct local-row to GM mapping
+
+The current restricted experiment uses TND, one KV head (N2=1) and contiguous
+cold `[T,H,D]` output with `[T,H,1]` statistics and `[T]` presence masks.
+
+The local M axis combines query and head. It does not enumerate tokens at a
+fixed head. `kvcache.h:139-151` computes M from S1 times G, and the two AIV
+subblocks divide those head rows. Q4/H64 normally means 32 head rows of ONE
+query in each AIV half.
+
+For the verified restricted TND/N2=1 mapping:
+
+```text
+flatRowOffset = runInfo.attentionOutOffset / constInfo.dSizeV
+flat = flatRowOffset + m
+query = flat / numHeads
+head = flat % numHeads
+cold output element = flat * outputDim + d
+cold max/sum element = flat
+presence element = query
+hot local output element = m * ubRowStride + d
+hot local max/sum element = m
+```
+
+The actual attention offset already includes batch/query, G-split and AIV
+half offsets (`kvcache.h:179-186`). Verify this mapping in the selected tiling
+branch. Reject unsupported layouts/N2/strides in the host adapter rather than
+silently generalizing it.
+
+Output D is 512 in the supplied vector service. 576 is the input latent plus
+RoPE dimension, not the output width. GM logical output D and UB stride are
+separate parameters in the corrected helper.
+
+## 3. Helper interface and dtype
+
+The corrected helper receives raw read-only GM byte pointers and explicit
+flattened row/stride metadata:
+
 ```cpp
-    bmm2ResBuf.SetCrossCore();
-    if (runInfo.s2LoopCount == runInfo.s2LoopLimit) {
-        if (unlikely(runInfo.s2LoopCount == 0)) {
-            LocalTensor<float> sumUb = this->softmaxSumBuf[runInfo.multiCoreIdxMod2].template Get<float>();
-            LastDivNew<T, Q_T, OUTPUT_T, dTemplateAlign64, false>(
-                vec2ResUb, vec2ResUb, sumUb, runInfo.vec2MRealSize, dTemplateAlign64, 1.0);
-        }
-        // ═══════════════════════════════════════════════════════════════
-        // [BEGIN] MXLLM-COLD-MERGE-001: merge cold-end state here
-        // ═══════════════════════════════════════════════════════════════
-        if (constInfo.hasColdState) {
-            LocalTensor<float> sumUb = this->softmaxSumBuf[runInfo.multiCoreIdxMod2].template Get<float>();
-            LocalTensor<float> maxUb = this->softmaxMaxBuf[runInfo.multiCoreIdxMod2].template Get<float>();
-            MergeColdStateTile<T, OUTPUT_T>(
-                vec2ResUb, sumUb, maxUb,
-                this->coldOutputGm, this->coldMaxGm, this->coldSumGm,
-                this->coldPresentGm, this->hotPresentGm,
-                runInfo.coldMergeRowOffset, runInfo.headIdx,
-                constInfo.numHeads,
-                runInfo.vec2MRealSize, dTemplateAlign64);
-        }
-        // ═══════════════════════════════════════════════════════════════
-        // [END] MXLLM-COLD-MERGE-001
-        // ═══════════════════════════════════════════════════════════════
-
-        // 全无效行attention_out写0, 避免陈旧L1数据经BMM2污染输出
-        LocalTensor<float> maxUb = this->softmaxMaxBuf[runInfo.multiCoreIdxMod2].template Get<float>();
-        ZeroInvalidAttnOut(vec2ResUb, maxUb, negativeFloatScalar * constInfo.softmaxScale,
-            runInfo.vec2MRealSize, dTemplateAlign64, dTemplateAlign64);
-
-        this->CopyOutAttentionOut(runInfo, constInfo, vec2ResUb, 0, vec2CalcSize);
-    }
+template <typename T, typename COLD_T, typename HOT_OUTPUT_T = T>
+void MergeColdStateTile(
+    LocalTensor<T>& hotOutputUb,
+    LocalTensor<float>& hotSumUb,
+    LocalTensor<float>& hotMaxUb,
+    __gm__ const uint8_t* coldOutput,
+    __gm__ const uint8_t* coldMax,
+    __gm__ const uint8_t* coldSum,
+    __gm__ const uint8_t* coldPresent,
+    __gm__ const uint8_t* hotPresent,
+    int64_t flatRowOffset, int64_t numHeads,
+    int64_t mRealSize, int64_t outputDim, int64_t ubRowStride);
 ```
 
-### New members to add to `SFAVectorService` class (near L170):
-```cpp
-    // [MXLLM-COLD-MERGE-001] Cold-state GM tensors for LSE merge
-    GlobalTensor<OUTPUT_T> coldOutputGm;     // [T, H, D]
-    GlobalTensor<float> coldMaxGm;           // [T, H]
-    GlobalTensor<float> coldSumGm;            // [T, H]
-    GlobalTensor<uint8_t> coldPresentGm;     // [T]
-    GlobalTensor<uint8_t> hotPresentGm;      // [T]
-```
+This is a scalar contract helper; its std math and scalar loads require device
+implementation/compilation review. A host C++ compile is not an AscendC compile.
+A high-performance version should stage GM loads and use vector operations.
 
-### New `ConstInfo` fields (in `sparse_flash_attention_common.h`):
-```cpp
-    // [MXLLM-COLD-MERGE-001]
-    bool hasColdState = false;   // if true, cold tensors are valid
-    int64_t numHeads = 0;        // for stride calculation
-```
+`COLD_T` describes the actual cold GM bytes, independently of hot dtype.
+The existing C4 reader may return FP32; interpreting those bytes as BF16 is
+incorrect. The current native hot path has FP32 local accumulators and BF16
+output. `HOT_OUTPUT_T` makes its original output rounding explicit; device
+conversion must be checked against the original `Cast(...CAST_ROUND...)`.
 
-### New `RunInfo` fields:
-```cpp
-    // [MXLLM-COLD-MERGE-001]
-    int64_t coldMergeRowOffset = 0;  // global row offset for this tile
-    int64_t headIdx = 0;             // current head index
-```
+The supplied final `Bmm2DataCopyOut` casts to its original `OUTPUT_T` and
+sizes strides using that type. A fused FP32 output requires new final store
+and output-schema/dispatch support. Passing FP32 cold bytes into the existing
+BF16 output template does not provide that support. Changing only the output
+macro can also select the wrong input branch in `sparse_flash_attention.cpp`.
 
-### New `InitGlobalBuffer` overload (near L844):
-```cpp
-    // [MXLLM-COLD-MERGE-001] Initialize cold-state GM tensors
-    __aicore__ inline void InitColdStateBuffers(
-        __gm__ uint8_t *coldOutput, __gm__ uint8_t *coldMax,
-        __gm__ uint8_t *coldSum, __gm__ uint8_t *coldPresent,
-        __gm__ uint8_t *hotPresent)
-    {
-        this->coldOutputGm.SetGlobalBuffer(reinterpret_cast<__gm__ OUTPUT_T*>(coldOutput));
-        this->coldMaxGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(coldMax));
-        this->coldSumGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(coldSum));
-        this->coldPresentGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(coldPresent));
-        this->hotPresentGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(hotPresent));
-    }
-```
+Existing `GlobalTensor` members are not raw byte pointers. Use a verified
+physical-address API or pass/retain the raw kernel parameters; do not copy the
+old guide's type-incompatible call literally.
 
-## File: `sparse_flash_attention.cpp` — New kernel parameters
+## 4. Mathematical and error contract
 
-The kernel entry needs 5 additional GM pointers:
-```cpp
-// Existing parameters (unchanged):
-//   query, key, value, sparseIndices, blockTable, queryRope, keyRope,
-//   attentionOut, softmaxMax, softmaxSum, workspace, tiling
+Both outputs are normalized; sums are unnormalized softmax denominators in
+the same exponent domain. Verify the real hot max/sum domain from its VF
+implementation rather than assuming it from names.
 
-// NEW parameters (append after softmaxSum):
-    __gm__ uint8_t *coldOutput,      // [T, H, D] OUTPUT_T
-    __gm__ uint8_t *coldMax,         // [T, H] float32
-    __gm__ uint8_t *coldSum,         // [T, H] float32
-    __gm__ uint8_t *coldPresent,     // [T] bool
-    __gm__ uint8_t *hotPresent,      // [T] bool
-```
+For each present side, maximum must be finite and sum finite and positive.
+Any invalid PRESENT state yields a visible nonfinite output, including
+one-sided cases. An absent state is ignored even if its buffers contain NaN.
+Both absent produces zero. Nonfinite values on a present output remain
+visible. Cold inputs are read-only and must not overlap final output.
 
-These are passed through the kernel template to `SFAVectorService::InitColdStateBuffers`.
+Use stable normalized log weights; the scalar helper first shifts maxima,
+then adds log(sum), then shifts those log weights. Do not clear invalid
+positive-presence states to zero.
 
-## File: `sparse_flash_attention_common.h` — ConstInfo extension
+Original two-pass merge rounds hot output before combining it with cold
+output. First validate that exact contract; a higher precision hot-accumulator
+variant needs separate accuracy evidence.
 
-Add to `ConstInfo`:
-```cpp
-    bool hasColdState = false;
-    int64_t numHeads = 0;
-```
+## 5. Native integration still required
 
-## Build instructions
+The upload has no applied modifications to kernel parameters, Init, vector
+service call sites or the host API. Implement an experimental native entry
+with the original query/KV inputs plus five cold/presence pointers and a
+correctly typed final output. Complete schema, ACLNN, Torch, tiling and all
+selected AIC/AIV dispatch paths.
 
-### Prerequisites
-- CANN 9.2.1 toolkit (ascend-toolkit)
-- AscendC compiler (`ccec`)
-- Target: Ascend950DT (arch35)
+Do not add fields to the wrong structure: the supplied
+`original/sparse_flash_attention_common.h` defines older fields, while arch35
+uses `RunInfo`/`ConstInfo` members from dependencies such as `util_regbase.h`.
+Those actual definitions and shared VF/buffer headers were not uploaded.
 
-### Build steps (standard CANN custom operator build)
-```bash
-# 1. Set environment
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
+Before native code can be built, obtain the matching dependencies actually
+included by the source, including:
 
-# 2. The operator builds as part of the custom_cot package.
-#    Modified files replace the originals in:
-#    custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/sparse_flash_attention/
+- `util_regbase.h` and the actual shared RunInfo/ConstInfo definitions;
+- `vf_mul_sel_softmaxflashv2_cast_nz_sfa.h`, `vf_flashupdate_new.h`;
+- shared buffer, buffer-manager, policy and tiling headers;
+- host op definition/schema and tiling sources, ACLNN and Torch binding;
+- real build configuration, commands and current package/toolchain version.
 
-# 3. Rebuild the operator .so using the CANN build system:
-#    (This step requires the full CANN operator build pipeline, which is
-#     NOT available in the experiment container. The files in this repo
-#     are drop-in replacements for the source tree.)
+No executable rebuild command or complete build tree was supplied. Do not
+guess a CANN upgrade or claim the files are drop-in replacements. Start from
+the same package/toolchain combination that passed the existing BF16 A/B.
 
-# Alternative: standalone kernel direct-invoke (for correctness testing only):
-#    Use msopgen to create a test project and compile cold_state_merge.h
-#    as a standalone kernel.
-```
+## 6. Validation and acceptance
 
-## Verification plan
+Host regression tests compile and invoke this helper with tensor stubs and
+check flattened mapping, independent dtype/stride, presence, invalid stats,
+normalization and finite extreme sums. They are not native runtime tests.
+The two Torch scripts check formulas only; assertion failures now exit
+nonzero.
 
-1. **Precision gate**: merged output vs BF16 math reference (same formula as `kv_native_merge.py`)
-2. **Empty-side gate**: cold-only, hot-only, both-empty produce correct results
-3. **Stale-buffer gate**: change cold state between runs, verify no stale reads
-4. **Performance**: 10-round AB/BA paired timing vs two-pass champion (126.17 µs reference)
-5. **Profiler**: confirm external Triton merge kernel disappears
+Once the native entry builds, check actual B1/Q4/K8192/H64/D512/R64/TopK2048/W128:
 
-## Numerical contract
+1. Original byte-writer and partition controls.
+2. Native hot output/LSE against independent math; zero-query counts 128 hot
+   and 1920 cold.
+3. Fused output against both current two-pass output and matching math.
+4. Cold-only, hot-only, both-empty, invalid present statistics, stats-on/off,
+   changed input buffers, and no cold-input mutation.
+5. Same-process idle-NPU AB/BA, warmup20, iterations100, 10 paired rounds,
+   comparing both the existing BF16 pipeline and native C4 W0.
+6. Profiler proves the external merge disappears without a hidden replacement
+   launch, and native memory/cross-core dependencies remain correct.
 
-The hot output in `vec2ResUb` at the merge point is the NORMALIZED output `O_h = A_h / s_h`.
-The merge reconstitutes the numerator and combines:
-```
-O = (O_h * s_h * w_h + O_c * s_c * w_c) / (s_h * w_h + s_c * w_c)
-```
-This is algebraically identical to merging unnormalized accumulators:
-```
-O = (A_h * w_h + A_c * w_c) / (s_h * w_h + s_c * w_c)
-```
-where `A_h = O_h * s_h` and `A_c = O_c * s_c`.
+Keep full pipeline timing, raw per-round event/wall pairs and actual output
+dtype. Do not add standalone stage medians to estimate pipeline savings.
 
-## Limitations (first version)
-
-1. **Scalar per-row merge** — correct but slow. Vectorized MicroAPI version is the optimization step.
-2. **GM scalar loads** — coldMax/coldSum loaded per element via GM. Should be DataCopy'd to UB as a batch.
-3. **No dual-buffer overlap** — cold output loaded one row at a time. Should tile the load.
-4. **Requires host-side integration** — the ACLNN API layer and tiling logic need new parameter plumbing.

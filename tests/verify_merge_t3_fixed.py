@@ -1,4 +1,4 @@
-"""Test 3 fixed: correct unnormalized sums."""
+"""Formula-only split-softmax check; does not execute the C++ header/kernel."""
 import torch
 import torch_npu
 
@@ -8,6 +8,7 @@ device = "npu:0"
 n_hot, n_cold, n_q, n_h, d = 128, 1920, 4, 8, 64
 
 print("Test 3 (fixed): Split softmax == merged")
+print("SCOPE: PyTorch formulas only; no AscendC header/kernel execution.")
 print(f"  shape: hot={n_hot}, cold={n_cold}, Q={n_q}, H={n_h}, D={d}")
 
 for trial in range(5):
@@ -53,5 +54,7 @@ for trial in range(5):
     rel = diff / ref.abs().max().item() if ref.abs().max() > 0 else 0
     ok = "✅" if rel < 1e-4 else "❌"
     print(f"  trial {trial}: abs={diff:.4e}, rel={rel:.4e} {ok}")
+    assert rel < 1e-4, f"split softmax formula mismatch: {rel}"
 
-print("\nDONE")
+print("\nTORCH FORMULA CHECKS PASSED; native kernel compilation/runtime untested")
+
