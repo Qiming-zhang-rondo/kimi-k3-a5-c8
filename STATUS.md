@@ -369,3 +369,24 @@ DEVICE_SMOKE_VALIDATED；真实C4流水线/原生两遍对照仍为false，完�
 实际旧18文件下载与SHA已验证；详细范围、原始日志及哈希见direct_bridge/host_validation.json。
 
 
+
+## Phase C Proper Benchmark Attempt (2026-11-24 19:55)
+
+### Codex 0a26c57 framework built successfully:
+- libsfa_torch_direct.so built (ASC + C++ host bridge) ✅
+- All 18 pinned payload files downloaded and SHA-verified ✅
+- Benchmark launched with proper 4-arm configuration ✅
+
+### Blocker: dtype contract mismatch in reader_controls
+- `runner._cold_read()` returns BF16 (installed custom_cot 9.1.0 SFA outputs BF16)
+- Benchmark expects FP32 at `run_direct_ab.py:157`: "Native C4 output must be FP32"
+- This is a contract mismatch between installed operator (BF16 output) and
+  direct bridge/fusion kernel (FP32 output)
+- Fix needed: accept BF16 from installed C4 reader + convert for comparison,
+  or configure installed operator for FP32 output
+
+### Today's Complete Status:
+- Phase A: ✅ Original SFA compiled, launched, verified on A5 (3 BF16 tests)
+- Phase B: ✅ Fusion SFA compiled, launched, verified on A5 (8 FP32 tests)
+- Phase C: ⚠️ Framework built, dtype mismatch blocking proper paired comparison
+- All source code, build evidence, and results pushed to GitHub
