@@ -474,3 +474,14 @@ Optimizations:
 2. 16-row batch cold-state merge (DMA/fence rounds 8→2)
 
 All controls PASS. 10 rounds AB/BA. Graph timing.
+
+## Tile Rows Sweep: 4/8/16 comparison (2026-11-25 09:54)
+
+| Config | fused µs | fused/installed | fused/W0 |
+|---|---|---|---|
+| 4 rows | 115.45 | 0.917x | 1.316x |
+| 8 rows | 114.18 | 0.907x | 1.302x |
+| 16 rows | 113.48 | 0.903x | 1.298x |
+
+All controls PASS. Diminishing returns: 4→8 saves 1.27µs, 8→16 saves 0.70µs.
+16 is optimal among supported values. Batch size is no longer the bottleneck.
