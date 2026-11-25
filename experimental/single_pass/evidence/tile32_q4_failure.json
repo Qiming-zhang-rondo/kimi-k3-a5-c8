@@ -1,0 +1,15 @@
+{
+  "status": "DEVICE_FAULT",
+  "experiment": "32-row tile (16->32 in 3 locations: row loop, stage0InQue, stage0OutQue)",
+  "changes": [
+    "L1227: Min(16, qsfaSparseCalSize) -> Min(32, qsfaSparseCalSize)",
+    "L1607: dVTemplateTypeInput * 16 * sizeof(KV_T) -> * 32 *",
+    "L1609: 576 * (16 + 1) * sizeof(Q_T) -> 576 * (32 + 1) *"
+  ],
+  "build": "COMPILED_OK (UB budget not exceeded at compile time)",
+  "runtime": "DEVICE_FAULT on first execution",
+  "hypothesis": "UB overflow or memory access violation at runtime (double-buffer 32-row exceeds available UB)",
+  "source_reverted": true,
+  "npu_hardware": "OK (npu-smi normal, no hardware fault)",
+  "action": "Waiting for Codex to provide proper 32-row tile implementation with buffer reuse/single-buffer adjustments"
+}
