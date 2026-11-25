@@ -1,0 +1,174 @@
+{
+  "q4": {
+    "status": "MEASURED",
+    "installed_native_twopass_vs_c4_w0": {
+      "baseline_us": 87.39,
+      "candidate_us": 125.91,
+      "ratio": 1.44
+    },
+    "direct_native_twopass_vs_c4_w0": {
+      "baseline_us": 87.38,
+      "candidate_us": 122.11,
+      "ratio": 1.398
+    },
+    "direct_fused_vs_c4_w0": {
+      "baseline_us": 87.36,
+      "candidate_us": 113.78,
+      "ratio": 1.302
+    },
+    "direct_fused_vs_installed_native_twopass": {
+      "baseline_us": 125.96,
+      "candidate_us": 113.8,
+      "ratio": 0.903
+    },
+    "direct_fused_vs_direct_native_twopass": {
+      "baseline_us": 122.18,
+      "candidate_us": 113.76,
+      "ratio": 0.931
+    },
+    "direct_fused_cold_store_vs_direct_fused": {
+      "baseline_us": 113.83,
+      "candidate_us": 111.89,
+      "ratio": 0.983
+    },
+    "direct_fused_cold_store_vs_installed_native_twopass": {
+      "baseline_us": 126.01,
+      "candidate_us": 111.93,
+      "ratio": 0.888
+    },
+    "direct_fused_cold_store_vs_c4_w0": {
+      "baseline_us": 87.45,
+      "candidate_us": 111.91,
+      "ratio": 1.28
+    }
+  },
+  "q32": {
+    "status": "MEASURED",
+    "installed_native_twopass_vs_c4_w0": {
+      "baseline_us": 90.73,
+      "candidate_us": 175.39,
+      "ratio": 1.933
+    },
+    "direct_native_twopass_vs_c4_w0": {
+      "baseline_us": 90.69,
+      "candidate_us": 179.2,
+      "ratio": 1.976
+    },
+    "direct_fused_vs_c4_w0": {
+      "baseline_us": 90.68,
+      "candidate_us": 123.16,
+      "ratio": 1.358
+    },
+    "direct_fused_vs_installed_native_twopass": {
+      "baseline_us": 175.38,
+      "candidate_us": 123.16,
+      "ratio": 0.702
+    },
+    "direct_fused_vs_direct_native_twopass": {
+      "baseline_us": 179.21,
+      "candidate_us": 123.15,
+      "ratio": 0.687
+    },
+    "direct_fused_cold_store_vs_direct_fused": {
+      "baseline_us": 123.17,
+      "candidate_us": 120.39,
+      "ratio": 0.978
+    },
+    "direct_fused_cold_store_vs_installed_native_twopass": {
+      "baseline_us": 175.4,
+      "candidate_us": 120.42,
+      "ratio": 0.686
+    },
+    "direct_fused_cold_store_vs_c4_w0": {
+      "baseline_us": 90.69,
+      "candidate_us": 120.4,
+      "ratio": 1.328
+    }
+  },
+  "q128": {
+    "status": "MEASURED",
+    "installed_native_twopass_vs_c4_w0": {
+      "baseline_us": 296.02,
+      "candidate_us": 587.84,
+      "ratio": 1.986
+    },
+    "direct_native_twopass_vs_c4_w0": {
+      "baseline_us": 296.04,
+      "candidate_us": 592.23,
+      "ratio": 2.001
+    },
+    "direct_fused_vs_c4_w0": {
+      "baseline_us": 295.99,
+      "candidate_us": 376.06,
+      "ratio": 1.271
+    },
+    "direct_fused_vs_installed_native_twopass": {
+      "baseline_us": 587.83,
+      "candidate_us": 376.06,
+      "ratio": 0.64
+    },
+    "direct_fused_vs_direct_native_twopass": {
+      "baseline_us": 592.23,
+      "candidate_us": 376.1,
+      "ratio": 0.635
+    },
+    "direct_fused_cold_store_vs_direct_fused": {
+      "baseline_us": 376.09,
+      "candidate_us": 373.61,
+      "ratio": 0.993
+    },
+    "direct_fused_cold_store_vs_installed_native_twopass": {
+      "baseline_us": 587.78,
+      "candidate_us": 373.59,
+      "ratio": 0.636
+    },
+    "direct_fused_cold_store_vs_c4_w0": {
+      "baseline_us": 295.95,
+      "candidate_us": 373.58,
+      "ratio": 1.262
+    }
+  },
+  "q512": {
+    "status": "MEASURED",
+    "installed_native_twopass_vs_c4_w0": {
+      "baseline_us": 1117.14,
+      "candidate_us": 2290.57,
+      "ratio": 2.05
+    },
+    "direct_native_twopass_vs_c4_w0": {
+      "baseline_us": 1117.1,
+      "candidate_us": 2373.3,
+      "ratio": 2.125
+    },
+    "direct_fused_vs_c4_w0": {
+      "baseline_us": 1117.13,
+      "candidate_us": 1397.34,
+      "ratio": 1.251
+    },
+    "direct_fused_vs_installed_native_twopass": {
+      "baseline_us": 2285.7,
+      "candidate_us": 1399.55,
+      "ratio": 0.612
+    },
+    "direct_fused_vs_direct_native_twopass": {
+      "baseline_us": 2378.72,
+      "candidate_us": 1400.02,
+      "ratio": 0.589
+    },
+    "direct_fused_cold_store_vs_direct_fused": {
+      "baseline_us": 1399.76,
+      "candidate_us": 1394.6,
+      "ratio": 0.996
+    },
+    "direct_fused_cold_store_vs_installed_native_twopass": {
+      "baseline_us": 2294.15,
+      "candidate_us": 1392.75,
+      "ratio": 0.607
+    },
+    "direct_fused_cold_store_vs_c4_w0": {
+      "baseline_us": 1117.33,
+      "candidate_us": 1392.92,
+      "ratio": 1.247
+    }
+  }
+}

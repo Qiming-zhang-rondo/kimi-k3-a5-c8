@@ -503,3 +503,15 @@ Key pairs:
 - cold_store/W0: 1.280x
 
 All controls PASS. Full results at /tmp/sfa-write-prepare-q4 (local).
+
+## sfa-write-prepare: Q32/128/512 MEASURED (2026-11-25 10:48)
+
+| Q | fused µs | cold-store µs | CS/fused | CS/installed |
+|---|---|---|---|---|
+| 4 | 113.80 | 111.89 | 0.983x | 0.888x |
+| 32 | 123.16 | 120.39 | 0.978x | 0.686x |
+| 128 | 376.06 | 373.61 | 0.993x | 0.636x |
+| 512 | 1399.55 | 1394.60 | 0.996x | 0.607x |
+
+Cold-store consistently faster at all Q. Advantage largest at small Q (decode).
+All controls PASS. Summaries in evidence/write_prepare_multi_q_summary.json.
