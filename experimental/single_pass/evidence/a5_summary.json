@@ -1,11 +1,15 @@
 {
   "status": "MEASURED",
-  "single_pass_w128_us": 339.22,
-  "single_pass_w0_us": 301.78,
-  "installed_c4_baseline_us": 80.44,
-  "installed_twopass_us": 107.3,
-  "vs_baseline": 4.22,
-  "vs_twopass": 3.16,
-  "note": "First version: hot rows still C4-decoded then BF16-overwritten. Next: hot bypass + DMA batching.",
-  "all_accuracy_gates": "PASS"
+  "root_cause_confirmed": "OLD RUN USED AIC=1 (Q4 sequential on 1 AIC)",
+  "fix": "AIC=4 parallel (auto-default in 192b6a4)",
+  "single_pass_w128_us": 94.66,
+  "single_pass_w0_us": 84.83,
+  "original_c4_direct_us": 80.01,
+  "installed_c4_baseline_us": 80.56,
+  "installed_twopass_us": 107.45,
+  "w128_vs_baseline": 1.175,
+  "w128_vs_twopass": 0.881,
+  "w128_vs_twopass_percent": "11.9% FASTER than installed two-pass",
+  "all_accuracy_gates": "PASS",
+  "note": "Single-pass W128 (C4 cold 1920 + BF16 hot 128, ONE kernel) beats two-pass by 11.9%"
 }
