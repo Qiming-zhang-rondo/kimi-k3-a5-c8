@@ -1,0 +1,70 @@
+{
+  "status": "MEASURED",
+  "arms": {},
+  "pairs": {
+    "installed_native_twopass_vs_c4_w0": {
+      "baseline_us": 87.39,
+      "candidate_us": 125.91,
+      "ratio": 1.44,
+      "ratio_min": 1.436,
+      "ratio_max": 1.444
+    },
+    "direct_native_twopass_vs_c4_w0": {
+      "baseline_us": 87.38,
+      "candidate_us": 122.11,
+      "ratio": 1.398,
+      "ratio_min": 1.396,
+      "ratio_max": 1.398
+    },
+    "direct_fused_vs_c4_w0": {
+      "baseline_us": 87.36,
+      "candidate_us": 113.78,
+      "ratio": 1.302,
+      "ratio_min": 1.298,
+      "ratio_max": 1.306
+    },
+    "direct_fused_vs_installed_native_twopass": {
+      "baseline_us": 125.96,
+      "candidate_us": 113.8,
+      "ratio": 0.903,
+      "ratio_min": 0.903,
+      "ratio_max": 0.908
+    },
+    "direct_fused_vs_direct_native_twopass": {
+      "baseline_us": 122.18,
+      "candidate_us": 113.76,
+      "ratio": 0.931,
+      "ratio_min": 0.931,
+      "ratio_max": 0.936
+    },
+    "direct_fused_cold_store_vs_direct_fused": {
+      "baseline_us": 113.83,
+      "candidate_us": 111.89,
+      "ratio": 0.983,
+      "ratio_min": 0.979,
+      "ratio_max": 0.984
+    },
+    "direct_fused_cold_store_vs_installed_native_twopass": {
+      "baseline_us": 126.01,
+      "candidate_us": 111.93,
+      "ratio": 0.888,
+      "ratio_min": 0.887,
+      "ratio_max": 0.889
+    },
+    "direct_fused_cold_store_vs_c4_w0": {
+      "baseline_us": 87.45,
+      "candidate_us": 111.91,
+      "ratio": 1.28,
+      "ratio_min": 1.266,
+      "ratio_max": 1.286
+    }
+  },
+  "controls": {
+    "installed_partition": "PASS",
+    "installed_writer": "PASS",
+    "installed_zero_query": "PASS",
+    "installed_reader": "PASS",
+    "direct_fused_vs_direct_native_twopass": "PASS",
+    "direct_fused_cold_store_vs_direct_native_twopass": "PASS"
+  }
+}

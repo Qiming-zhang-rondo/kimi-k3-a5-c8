@@ -485,3 +485,21 @@ All controls PASS. 10 rounds AB/BA. Graph timing.
 
 All controls PASS. Diminishing returns: 4→8 saves 1.27µs, 8→16 saves 0.70µs.
 16 is optimal among supported values. Batch size is no longer the bottleneck.
+
+## sfa-write-prepare: cold-store candidate Q4 MEASURED (2026-11-25 11:00)
+
+New candidate (ff5b27a): fuse cold byte scatter into BF16 hot store + partition.
+
+| Arm | µs |
+|---|---|
+| C4 W0 | 87.45 |
+| installed two-pass | 126.01 |
+| direct fused | 113.83 |
+| direct fused + cold-store | 111.91 |
+
+Key pairs:
+- cold_store/direct_fused: 0.983x [0.979, 0.984] (1.7% faster than current best)
+- cold_store/installed: 0.888x (11.2% faster than production)
+- cold_store/W0: 1.280x
+
+All controls PASS. Full results at /tmp/sfa-write-prepare-q4 (local).
