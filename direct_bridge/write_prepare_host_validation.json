@@ -5,9 +5,9 @@
   "change": "Keep native MXFP4 quantize and packed bytes; fuse cold-byte scatter into BF16 hot store/two-scan partition.",
   "tests": {
     "command": "PYTHONPATH=tests python -m unittest test_cold_store_prepare test_cold_store_runner test_direct_bridge_harness -v",
-    "passed": 29,
+    "passed": 34,
     "failed": 0,
-    "scope": "4 actual-kernel-body/metadata CPU tests; 4 writer/control/graph-poison tests; 21 harness tests. First 28 executed together, final added partition gate executed separately."
+    "scope": "4 actual-kernel-body/metadata CPU tests; 4 writer/control/graph-poison tests; 26 harness tests including exact independent zero-query RNE. All executed together, PASS."
   },
   "timed_path": {
     "native_quantize_unchanged": true,
@@ -23,5 +23,6 @@
     "full-pipeline graph must restore touched cold/hot/RoPE slots and all partition outputs",
     "all current math and graph output gates"
   ],
-  "device_results": "Not run on this machine; no latency/speedup claim."
+  "device_results": "Not run on this machine; no latency/speedup claim.",
+  "zero_query_policy_synced_from": "31affe895cc45fe139c249a4a73c454245d56a3b"
 }

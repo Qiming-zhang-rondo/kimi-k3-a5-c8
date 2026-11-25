@@ -3,6 +3,10 @@
 此候选在独立 `sfa-write-prepare` 分支。先让主分支正在进行的形状扫描继续完成；
 不要在它的运行目录checkout或覆盖文件，不抢占同一NPU。
 
+已同步主分支31affe8的独立精确零query参考门禁，保留原strict及legacy失败记录。
+因此大Q不必继续卡在旧tie-only条件；仍须本次状态逐位等于精确oracle，
+TwoSum无残差，且全部非零/数学/写入/分区/graph门禁通过。原ABI4库可直接复用。
+
 ## 实际改变
 
 旧：native quantize + cat → cold index_copy_ → BF16 hot store/partition → 冷/热attention。
@@ -22,7 +26,7 @@
 - 额外捕获完整pipeline，再只投毒本步冷/热/rope写槽及所有分区输出，graph replay必须恢复。
   当前token会被attention从热端读取，因此最终attention输出正确并不能证明冷scatter已捕获；
   此门禁会独立查全部cache字节与分区。
-- 既有数值参考、0.001原生等价、窄零Q RNE证明、0.01数学参考和图输出门禁保持。
+- 既有数值参考、非零query 0.001原生等价、独立精确零Q RNE证明、0.01数学参考和图输出门禁保持。
 
 ## 先跑一组，同轮对比当前最好路径
 

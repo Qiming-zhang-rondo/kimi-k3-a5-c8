@@ -15,11 +15,12 @@ import traceback
 
 from pinned_payload import activate_payload
 
-VERSION = "sfa-direct-c4-bf16-ab-v5-write-candidate"
+VERSION = "sfa-direct-c4-bf16-ab-v6-write-candidate"
 ACCEPTANCE_POLICY = ("Native equivalence remains global/worst-row relative L2 <=0.001. "
     "Only fused BF16 zero-query cold1920/hot128 may instead pass a current-run bit-exact "
-    "FP64-to-BF16 RNE proof; every difference from native must be an exact midpoint and one BF16 ULP. "
-    "The original failed strict comparison is retained. No nonzero-query or FP32 exception.")
+    "independent exact FP64-to-BF16 RNE proof, including a zero-residual TwoSum check. "
+    "Native midpoint/ULP differences remain diagnostic, not oracle constraints. "
+    "The original strict comparison and legacy tie-only verdict are retained. No nonzero-query or FP32 exception.")
 ARMS = ("c4_w0", "installed_native_twopass", "direct_native_twopass", "direct_fused")
 DIRECT_ARMS = ("direct_native_twopass", "direct_fused", "direct_fused_packed", "direct_fused_cold_store")
 PAIRS = (("c4_w0", "installed_native_twopass"),
@@ -266,6 +267,49 @@ def zero_query_exact_rne_gate(cold, hot, actual, native, *, cold_dtype, hot_dtyp
     return result
 
 
+def independent_zero_query_exact_rne_gate(cold, hot, actual, native, *, cold_dtype, hot_dtype, output_dtype):
+    """Accept only exact current-state RNE, independently of an approximate native merge.
+
+    The legacy verdict remains verbatim evidence. BF16 inputs multiplied by 15
+    are exact in FP64; TwoSum proves that adding the hot value lost no low bits.
+    Division by 16 is exact for this bounded BF16 exponent range. No earlier
+    CSV/result or tolerance is used as proof of the current output.
+    """
+    import numpy as np
+    from diagnose_merge_rounding import bf16_neighbors, bits
+    legacy = zero_query_exact_rne_gate(cold,hot,actual,native,
+        cold_dtype=cold_dtype,hot_dtype=hot_dtype,output_dtype=output_dtype)
+    result = {key:value for key,value in legacy.items()
+              if key not in ("passed","basis","actual_oracle_bit_mismatch_count")}
+    result.update(passed=False,basis="independent_exact_zero_query_BF16_RNE",
+        legacy_tie_only_proof=legacy,native_difference_policy="diagnostic_only",
+        exact_numerator_sum=False,oracle_is_exact=False)
+    conditions=("dtype_contract","shape_contract","all_finite",
+                "exact_zero_query_statistics","all_outputs_on_bf16_grid")
+    if not all(result.get(name,False) for name in conditions):
+        return result
+    co,ho=np.asarray(cold[0],np.float64),np.asarray(hot[0],np.float64)
+    a,b=15.0*co,ho
+    s=a+b
+    bb=s-a
+    error=(a-(s-bb))+(b-bb)
+    residual_count=int(np.count_nonzero(error))
+    result.update(two_sum_nonzero_residual_count=residual_count,
+                  two_sum_max_abs_residual=float(np.max(np.abs(error))),
+                  exact_numerator_sum=residual_count==0)
+    if residual_count:
+        result["rejection_reason"]="FP64 numerator addition lost low bits; no exact-oracle claim"
+        return result
+    precise=s/16.0
+    oracle,_,_,_=bf16_neighbors(precise)
+    # RNE underflow and exact cancellation both retain the result's zero sign.
+    oracle=np.where(oracle==0,np.copysign(np.float32(0),precise),oracle).astype(np.float32)
+    mismatch=bits(actual)!=bits(oracle)
+    result.update(oracle_is_exact=True,actual_oracle_bit_mismatch_count=int(mismatch.sum()),
+                  passed=bool(not mismatch.any()))
+    return result
+
+
 def graph_replay_control(call, buffers, torch, host, services):
     """Poison both bridge intermediates and final output before graph replay.
 
@@ -372,11 +416,12 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct", 
         checks[prefix+"_same_native_states_merge"] = strict_merge
         merge_acceptance = dict(passed=strict_merge["passed"], basis="strict_native_relative_l2")
         if zero and runner.direct_fused and not strict_merge["passed"]:
-            proof = zero_query_exact_rne_gate(tuple(host(t) for t in left), tuple(host(t) for t in direct),
+            proof = independent_zero_query_exact_rne_gate(tuple(host(t) for t in left), tuple(host(t) for t in direct),
                 host(actual), reference, cold_dtype=left[0].dtype, hot_dtype=direct[0].dtype, output_dtype=actual.dtype)
-            checks["zero_query_exact_rne_gate"] = proof
+            checks["zero_query_exact_rne_gate"] = proof.pop("legacy_tie_only_proof")
+            checks["independent_zero_query_exact_rne_gate"] = proof
             if proof["passed"]:
-                merge_acceptance = dict(passed=True, basis="exact_zero_query_BF16_RNE",
+                merge_acceptance = dict(passed=True, basis="independent_exact_zero_query_BF16_RNE",
                                         original_strict_comparison_passed=False)
         checks[prefix+"_merge_acceptance"] = merge_acceptance
         if arrays is not None:
@@ -395,7 +440,8 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct", 
     # Each merge's explicit acceptance verdict is authoritative; its original
     # strict result remains untouched for review, including a failed zeroQ row.
     checks["passed"] = all(item["passed"] for key,item in checks.items()
-        if isinstance(item, dict) and "passed" in item and not key.endswith("_same_native_states_merge"))
+        if isinstance(item,dict) and "passed" in item and not key.endswith("_same_native_states_merge")
+        and key not in ("zero_query_exact_rne_gate","independent_zero_query_exact_rne_gate"))
     checks["acceptance_policy"] = ACCEPTANCE_POLICY
     return checks
 
