@@ -34,6 +34,38 @@ class RoutedPlumbingTest(unittest.TestCase):
         self.assertFalse(args.fast_pair_ab)
         self.assertFalse(args.early_hot_ab)
         self.assertFalse(args.stats_ab)
+        self.assertFalse(args.load_tile_ab)
+        self.assertEqual(args.load_variants,[1,2,3,4,5])
+
+    def test_load_tile_candidates_use_same_stats_inputs_and_unique_dispatch_ids(self):
+        class Bridge:
+            def __init__(self):
+                self.prepared=[]
+            def prepare(self,*args):
+                plan=FakePlan("load_plan_"+str(len(self.prepared)))
+                self.prepared.append((args,plan))
+                return plan
+        bridge=Bridge()
+        query=object()
+        inputs=(query,)+tuple(object() for _ in range(9))
+        plans,calls,modes=RUNNER.prepare_load_tile_ab(bridge,query,8192,256,4,.125,
+                                                    False,inputs,[1,2,3,4,5])
+        self.assertEqual(len({id(plan) for plan in plans.values()}),7)
+        for args,plan in bridge.prepared:
+            self.assertEqual(args,(query,8192,256,4,.125,False))
+        for name in reversed(list(calls)):
+            self.assertEqual(calls[name](),plans[name].name)
+            self.assertEqual(plans[name].calls,[inputs+modes[name]])
+        self.assertEqual(modes["fast_pair"],(128,False,False,True,False,0))
+        self.assertEqual(modes["original_c4"],(0,True,False,False,False,0))
+        for variant in range(1,6):
+            self.assertEqual(modes["load_variant_"+str(variant)],(128,False,False,False,False,variant))
+        self.assertEqual(RUNNER.LOAD_TILE_GEOMETRY[4],
+            dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=1))
+        self.assertEqual(RUNNER.LOAD_TILE_GEOMETRY[5]["input_depth"],1)
+        for invalid in ([],[1,1],[0],[6],[True]):
+            with self.assertRaises(ValueError):
+                RUNNER.prepare_load_tile_ab(bridge,query,8192,256,4,.125,False,inputs,invalid)
 
     def test_stats_matrix_uses_independent_plans_with_identical_inputs_and_geometry(self):
         class Bridge:
@@ -77,9 +109,10 @@ class RoutedPlumbingTest(unittest.TestCase):
                 "rounds":[{"order":["candidate","baseline"],"error":"preserve raw failure"}]}}})
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"results.json"
-            path.write_text(json.dumps(dict(version="qsfa-recent128-single-pass-a5-v1.5-stats-ab",
-                status="ERROR",stats_ab=section)))
+            path.write_text(json.dumps(dict(version="qsfa-recent128-single-pass-a5-v1.6-load-tile-ab",
+                status="ERROR",stats_ab=section,load_tile_ab=section)))
             self.assertEqual(collector.collect(path)["stats_ab"],section)
+            self.assertEqual(collector.collect(path)["load_tile_ab"],section)
 
     def test_ab_calls_bind_distinct_plans_modes_and_shared_inputs(self):
         modes=RUNNER.plan_modes(True)

@@ -20,6 +20,7 @@
 #pragma weak QsfaSinglePassLaunchRouted
 #pragma weak QsfaSinglePassLaunchFastPair
 #pragma weak QsfaSinglePassLaunchEarlyHot
+#pragma weak QsfaSinglePassLaunchLoadTile
 #endif
 
 namespace {
@@ -51,6 +52,18 @@ pybind11::dict Configuration() {
     out["fast_pair_reader_available"]=QsfaSinglePassLaunchFastPair != nullptr;
     out["early_hot_reader_entry"]="QsfaSinglePassLaunchEarlyHot";
     out["early_hot_reader_available"]=QsfaSinglePassLaunchEarlyHot != nullptr;
+    out["load_tile_reader_entry"]="QsfaSinglePassLaunchLoadTile";
+    out["load_tile_reader_available"]=QsfaSinglePassLaunchLoadTile != nullptr;
+    pybind11::dict variants;
+    auto addVariant=[&](int id,int rows,int inputStride,int inputDepth,int outputDepth) {
+        pybind11::dict value;
+        value["rows"]=rows; value["input_stride_bytes"]=inputStride;
+        value["input_depth"]=inputDepth; value["output_depth"]=outputDepth;
+        variants[pybind11::int_(id)]=value;
+    };
+    addVariant(1,8,672,2,2); addVariant(2,16,416,2,2);
+    addVariant(3,16,416,2,1); addVariant(4,32,416,2,1); addVariant(5,32,416,1,1);
+    out["load_tile_variants"]=variants;
     out["default_reader"]="overlay";
     return out;
 }
@@ -88,7 +101,7 @@ public:
               const at::Tensor& table,const at::Tensor& actualQuery,const at::Tensor& actualKv,
               const at::Tensor& hotLatent,const at::Tensor& hotRope,const at::Tensor& tags,
               const at::Tensor& positions,int64_t window=128,bool coldOnly=false,bool routed=false,
-              bool fastPair=false,bool earlyHot=false) {
+              bool fastPair=false,bool earlyHot=false,int64_t loadVariant=0) {
         Check(query,device_,{q_,64,576},at::kBFloat16,"query");
         Check(cold,device_,{keys_/128,128,1,400},at::kChar,"cold");
         Check(indices,device_,{q_,1,2048},at::kInt,"indices");
@@ -100,16 +113,20 @@ public:
         Check(tags,device_,{capacity_},at::kLong,"ring_tags");
         Check(positions,device_,{q_},at::kLong,"query_positions");
         TORCH_CHECK(window==0 || window==128,"Prototype supports W0/W128 only");
+        TORCH_CHECK(loadVariant>=0 && loadVariant<=5,"Load variant must be 0 (disabled) or 1..5");
+        TORCH_CHECK(!loadVariant || window==128,"Load variants require window=128");
         TORCH_CHECK(!coldOnly || window==0,"Original C4 control requires window=0");
         TORCH_CHECK(static_cast<int>(coldOnly)+static_cast<int>(routed)+static_cast<int>(fastPair)+
-                    static_cast<int>(earlyHot)<=1,
-                    "Choose one of original C4, routed, fast-pair, or early-hot entries");
+                    static_cast<int>(earlyHot)+static_cast<int>(loadVariant>0)<=1,
+                    "Choose one of original C4, routed, fast-pair, early-hot, or load-variant entries");
         TORCH_CHECK(!routed || QsfaSinglePassLaunchRouted != nullptr,
                     "Routed reader requires the rebuilt three-entry shared library");
         TORCH_CHECK(!fastPair || QsfaSinglePassLaunchFastPair != nullptr,
                     "Fast-pair reader requires the rebuilt four-entry shared library");
         TORCH_CHECK(!earlyHot || QsfaSinglePassLaunchEarlyHot != nullptr,
                     "Early-hot reader requires the rebuilt five-entry shared library");
+        TORCH_CHECK(!loadVariant || QsfaSinglePassLaunchLoadTile != nullptr,
+                    "Load variants require the rebuilt shared library with load-tile entries");
         const std::initializer_list<at::Tensor> inputs={query,cold,indices,table,actualQuery,actualKv,
             hotLatent,hotRope,tags,positions};
         for (const auto& written:{output_,maximum_,sum_,workspace_,tiling_}) {
@@ -136,6 +153,8 @@ public:
         for (const auto& value:{output_,maximum_,sum_,workspace_,tiling_})
             c10_npu::NPUCachingAllocator::recordStream(value.storage().data_ptr(),stream);
         const int code=coldOnly ? QsfaSinglePassLaunchCold(raw,&buffers,aic_,capacity_,window)
+            : loadVariant ? QsfaSinglePassLaunchLoadTile(raw,&buffers,aic_,capacity_,window,
+                                                       static_cast<uint32_t>(loadVariant))
             : earlyHot ? QsfaSinglePassLaunchEarlyHot(raw,&buffers,aic_,capacity_,window)
             : fastPair ? QsfaSinglePassLaunchFastPair(raw,&buffers,aic_,capacity_,window)
             : routed ? QsfaSinglePassLaunchRouted(raw,&buffers,aic_,capacity_,window)
@@ -164,7 +183,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,module) {
             pybind11::arg("ring_tags"),pybind11::arg("query_positions"),
             pybind11::arg("window")=128,pybind11::arg("cold_only")=false,
             pybind11::arg("routed")=false,pybind11::arg("fast_pair")=false,
-            pybind11::arg("early_hot")=false)
+            pybind11::arg("early_hot")=false,pybind11::arg("load_variant")=0)
         .def("outputs",&Prepared::Outputs);
     module.def("prepare",[](const at::Tensor& query,int64_t keys,int64_t capacity,
                             int64_t aic,double scale,bool stats) {

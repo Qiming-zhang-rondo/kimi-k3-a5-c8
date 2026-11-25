@@ -1,0 +1,15 @@
+{
+  "candidate": "load rows 8/16/32, S2 attention fixed at 128",
+  "status": "HOST_CHECKS_PASS",
+  "load_layout_cases": 150,
+  "undefined_behavior_sanitizer": "PASS including full32 mask and bit31",
+  "actual_functions_tested": ["routed gather", "VF row loop", "BF16 NZ", "RoPE", "UB to L1/GM", "UB allocation", "host dispatch"],
+  "variants_explicit_UB_bytes": {"1":214784,"2":235776,"3":216192,"4":247936,"5":234624},
+  "cross_core_UB_included": 98304,
+  "resource_numbers_are_compiler_peak": false,
+  "ASC_device_compilation": "NOT_RUN",
+  "NPU_accuracy": "NOT_RUN",
+  "paired_performance": "NOT_MEASURED",
+  "measured_16row_champion_preserved": true,
+  "default_framework_reader_changed": false
+}

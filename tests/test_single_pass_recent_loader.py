@@ -36,7 +36,7 @@ class TestSinglePassRecentLoader(unittest.TestCase):
         text = HEADER.read_text()
         bodies = '\n'.join(actual_function(text, name) for name in (
             'CopyInSingleKv', 'CopyInKvSparse', 'OverlayRecentHotRows'))
-        code = r'''
+        code = '#include "' + str(HEADER.parent.parent / 'load_tile_config.h') + '"\n' + r'''
 #include <algorithm>
 #include <cassert>
 #include <cstdint>

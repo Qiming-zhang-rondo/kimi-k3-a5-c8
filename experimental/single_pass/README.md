@@ -1,5 +1,7 @@
 # C4 冷端 + BF16 recent128：原生单次 attention 原型
 
+最新实际tile候选见 [LOAD_TILE_TASK.md](LOAD_TILE_TASK.md)。`--load-tile-ab`在同库测试8/16/32行加载块及buffer对照；128行attention块不变，当前16行91µs实现保留。新候选宿主布局/UBSan检查通过，尚待A5编译和性能；不是此前只改三常量的故障版本。
+
 **452fa69原始配对：fast-pair91.55µs，比overlay97.60µs快6.2%，全部精度/graph门禁通过。**当前有效读取实现为fast-pair；新增第五入口early-hot尝试提前发起热DMA并共用输入同步，按 [EARLY_HOT_TASK.md](EARLY_HOT_TASK.md) 作独立同库配对。新候选尚未上卡，不预报80µs。框架真实模型精度任务可以同时用原已验证库推进。此原型不依赖已算好的 cold output/max/sum，不在W128候选里调用原生 cold attention，也没有第二次 hot attention 或外部 LSE merge。
 
 输入为原始合并 BF16 query、原 packed400 C4 cache、原 TopK、BF16 热环及位置 tags。沿原生 C4 的 gather/反量化流水，把命中的 BF16 热行写进相同 NZ tile；后面的 QK、online softmax、PV 和最终归一共用一次计算。TopK 不改变。

@@ -193,7 +193,9 @@ template<HardEvent E> void WaitFlag(int) {
                 source = Path(temp) / "actual_pipeline.cpp"
                 binary = Path(temp) / "actual_pipeline"
                 source.write_text(f"#define QSFA_RECENT_EARLY_HOT {early_hot}\n"
-                    + "#define QSFA_RECENT_ROUTE_FAST_PAIR 1\n" + STATE + prefix
+                    + "#define QSFA_RECENT_ROUTE_FAST_PAIR 1\n"
+                    + '#include "' + str(MODEL.HEADER.parent.parent / 'load_tile_config.h') + '"\n'
+                    + STATE + prefix
                     + MODEL.actual_vf(text) + QUEUES + vector + "\n".join(actual) + CASES)
                 compile_run = subprocess.run([compiler, "-std=c++17", "-O0", str(source), "-o", str(binary)],
                                              capture_output=True, text=True)

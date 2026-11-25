@@ -226,6 +226,7 @@ class RoutedLoaderTest(unittest.TestCase):
                 source = Path(temp) / "routed_actual.cpp"
                 binary = Path(temp) / "routed_actual"
                 source.write_text(f"#define QSFA_RECENT_ROUTE_FAST_PAIR {fast_pair}\n"
+                                  + '#include "' + str(HEADER.parent.parent / 'load_tile_config.h') + '"\n'
                                   + CPP_MODEL + actual_vf(text) + CPP_VECTOR + bodies + CPP_CASES)
                 compile_run = subprocess.run([compiler, "-std=c++17", "-O0", str(source),
                                               "-o", str(binary)], capture_output=True, text=True)

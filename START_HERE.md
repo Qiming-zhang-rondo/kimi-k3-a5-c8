@@ -25,3 +25,7 @@ e6ae40c的同库原始证据确认routed117.64µs，比overlay97.64µs慢20.5%�
 ## 当前80µs方向：统计输出2×2，再决定tile
 
 753ad93确认early-hot与fast-pair打平，保留91.7µs fast-pair。新任务 [experimental/single_pass/STATS_AND_TILE_TASK.md](experimental/single_pass/STATS_AND_TILE_TASK.md)：`--stats-ab`直接复用现有库，测original/fast-pair×stats OFF/ON，完整数学/graph及同合同配对。无需重编ASC，不再重复同步换序。加载tile8/16/32是下一步源码方向，尚未实现，32行资源需计入kernel额外98304B cross-core UB。80µs仍为目标，不能提前声称达到；框架模型精度并行继续。
+
+## 立即执行：实际加载tile候选已交付
+
+用户要求下班前直接拿到可测试代码。执行 [experimental/single_pass/LOAD_TILE_TASK.md](experimental/single_pass/LOAD_TILE_TASK.md)：完整8/16/32行布局、五种buffer配置、同库fast-pair基线。`--load-tile-ab`先精度再Q4graph同轮配对。不要再仅改三常量，也不要把281881d故障猜成已确认UB根因；先确认故障设备恢复/选择健康空闲设备，不绕过marker。新候选未测，不承诺80µs。模型精度任务继续并行。

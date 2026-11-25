@@ -71,6 +71,25 @@ def stats_ab_pairs():
             ("fast_pair_stats_on_vs_off","fast_pair_stats_off","fast_pair_stats_on"))
 
 
+LOAD_TILE_GEOMETRY={
+    1:dict(rows=8,input_stride_bytes=672,input_depth=2,output_depth=2),
+    2:dict(rows=16,input_stride_bytes=416,input_depth=2,output_depth=2),
+    3:dict(rows=16,input_stride_bytes=416,input_depth=2,output_depth=1),
+    4:dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=1),
+    5:dict(rows=32,input_stride_bytes=416,input_depth=1,output_depth=1)}
+
+
+def prepare_load_tile_ab(bridge,query,keys,capacity,aic,scale,stats,inputs,variants):
+    if not variants or len(set(variants))!=len(variants) or any(
+            type(value) is not int or value not in LOAD_TILE_GEOMETRY for value in variants):
+        raise ValueError("Select unique load variants from 1..5")
+    modes=dict(original_c4=(0,True,False,False,False,0),
+               fast_pair=(128,False,False,True,False,0))
+    modes.update({"load_variant_"+str(value):(128,False,False,False,False,value) for value in variants})
+    plans={name:bridge.prepare(query,keys,capacity,aic,scale,stats) for name in modes}
+    return plans,plan_calls(plans,inputs,modes),modes
+
+
 def routed_index_patterns(indices,positions,window=128):
     """Correctness-only permutations of the exact selected set, never timed."""
     import numpy as np
@@ -147,12 +166,15 @@ def execute(args,report,persist):
     if use_routed:
         require(report["bridge_configuration"].get("routed_reader_available") is True,
                 "--routed-ab requires the rebuilt library with QsfaSinglePassLaunchRouted")
-    if use_fast_pair or args.stats_ab:
+    if use_fast_pair or args.stats_ab or args.load_tile_ab:
         require(report["bridge_configuration"].get("fast_pair_reader_available") is True,
                 "--fast-pair-ab requires the rebuilt library with QsfaSinglePassLaunchFastPair")
     if args.early_hot_ab:
         require(report["bridge_configuration"].get("early_hot_reader_available") is True,
                 "--early-hot-ab requires the rebuilt library with QsfaSinglePassLaunchEarlyHot")
+    if args.load_tile_ab:
+        require(report["bridge_configuration"].get("load_tile_reader_available") is True,
+                "--load-tile-ab requires the rebuilt library with QsfaSinglePassLaunchLoadTile")
     report["launch_geometry"]=dict(queries=args.queries,aic_count=args.aic_count,
         aiv_count=2*args.aic_count,query_tiles_per_aic=args.queries//args.aic_count,
         aic_selection="auto" if args.aic_auto else "explicit")
@@ -180,6 +202,7 @@ def execute(args,report,persist):
     passed=True
     arrays=dict(cold_mathematical_reference=cold_math,mixed_mathematical_reference=mixed_math)
     stats_plans,stats_calls,stats_specs={},{},{}
+    load_plans,load_calls,load_modes={},{},{}
     with torch.inference_mode():
         for name,call in calls.items():
             tensor=call()
@@ -236,6 +259,69 @@ def execute(args,report,persist):
                 section["cross_checks"][reader+"_stats_on_vs_off"]=metric
             section["all_accuracy_controls_passed"]=all(item["passed"] for group in
                 (section["controls"],section["cross_checks"]) for item in group.values())
+            passed=passed and section["all_accuracy_controls_passed"]
+        if args.load_tile_ab:
+            load_plans,load_calls,load_modes=prepare_load_tile_ab(bridge,base.query,args.keys,
+                runner.capacity,args.aic_count,base.scale,args.return_stats,inputs,args.load_variants)
+            section=dict(status="STARTED",scope="same-library matched-stats prepared read; original TopK timing",
+                         geometry={str(value):LOAD_TILE_GEOMETRY[value] for value in args.load_variants},
+                         configuration=dict(return_stats=args.return_stats,aic_count=args.aic_count,
+                             library_sha256=report["bridge_build"].get("library_sha256"),
+                             reader_entry="QsfaSinglePassLaunchLoadTile"),
+                         controls={},cross_checks={},pattern_controls={},graph_controls={},timings={})
+            report["load_tile_ab"]=section
+            load_outputs={}
+            for name,call in load_calls.items():
+                actual=backend.host(call()).copy()
+                load_outputs[name]=actual
+                arrays["load_tile_ab_"+name]=actual
+                metric=compare(actual,cold_math if name=="original_c4" else mixed_math)
+                metric.update(passed=acceptable(metric,.01),tolerance=.01,
+                              reference_contract="Independent FP64 whole-selected-set softmax")
+                if args.return_stats:
+                    _,maximum,total=load_plans[name].outputs()
+                    m,s=backend.host(maximum),backend.host(total)
+                    healthy=bool(np.isfinite(m).all() and np.isfinite(s).all() and np.all(s>0))
+                    metric["returned_stats_finite_positive_sum"]=healthy
+                    metric["passed"]=metric["passed"] and healthy
+                section["controls"][name]=metric
+                persist()
+            for name in load_modes:
+                if not name.startswith("load_variant_"):
+                    continue
+                metric=compare(load_outputs[name],load_outputs["fast_pair"])
+                metric.update(passed=acceptable(metric,.001),tolerance=.001)
+                section["cross_checks"][name+"_vs_fast_pair"]=metric
+            # Homogeneous and alternating hot/cold orderings cover 8/16/32
+            # row loaders, without changing membership or the timed TopK.
+            pattern_modes={name:mode for name,mode in load_modes.items() if name!="original_c4"}
+            for pattern,pattern_ids in routed_index_patterns(ids,positions_cpu).items():
+                permuted_inputs=list(inputs)
+                permuted_inputs[2]=base.tensor(pattern_ids[:,None,:],torch.int32)
+                pattern_plans={name:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
+                                                  base.scale,args.return_stats) for name in pattern_modes}
+                pattern_calls=plan_calls(pattern_plans,permuted_inputs,pattern_modes)
+                pattern_outputs={}
+                checks={}
+                arrays["load_tile_pattern_"+pattern+"_indices"]=pattern_ids
+                for name,call in pattern_calls.items():
+                    actual=backend.host(call()).copy()
+                    pattern_outputs[name]=actual
+                    metric=compare(actual,mixed_math)
+                    metric.update(passed=acceptable(metric,.01),tolerance=.01)
+                    checks[name+"_vs_matching_math"]=metric
+                for name in pattern_modes:
+                    if name=="fast_pair":
+                        continue
+                    metric=compare(pattern_outputs[name],pattern_outputs["fast_pair"])
+                    metric.update(passed=acceptable(metric,.001),tolerance=.001)
+                    checks[name+"_vs_fast_pair"]=metric
+                section["pattern_controls"][pattern]=dict(
+                    scope="correctness-only order permutation; same selected set; not timed",
+                    checks=checks,passed=all(check["passed"] for check in checks.values()))
+                persist()
+            section["all_accuracy_controls_passed"]=all(item["passed"] for group in
+                (section["controls"],section["cross_checks"],section["pattern_controls"]) for item in group.values())
             passed=passed and section["all_accuracy_controls_passed"]
         report["cross_checks"]={
             "original_c4_direct_vs_installed_c4":compare(outputs["original_c4_direct"],outputs["installed_c4"]),
@@ -353,6 +439,19 @@ def execute(args,report,persist):
                         report["stats_ab"]["graph_controls"][name]=metric
                         persist()
                         require(metric["passed"],"Stats A/B graph replay control failed")
+                if args.load_tile_ab:
+                    for name,plan in load_plans.items():
+                        metric=graph_replay_control(load_calls[name],plan.outputs,torch,
+                            backend.host,dict(compare=compare,acceptable=acceptable))
+                        if args.return_stats:
+                            _,maximum,total=plan.outputs()
+                            m,s=backend.host(maximum),backend.host(total)
+                            healthy=bool(np.isfinite(m).all() and np.isfinite(s).all() and np.all(s>0))
+                            metric["returned_stats_finite_positive_sum_after_replay"]=healthy
+                            metric["passed"]=metric["passed"] and healthy
+                        report["load_tile_ab"]["graph_controls"][name]=metric
+                        persist()
+                        require(metric["passed"],"Load-tile graph replay control failed")
             report["timings"]={}
             for name in plans:
                 report["timings"][name]=paired_benchmark(calls["installed_c4"],calls[name],args,benchmark)
@@ -392,8 +491,22 @@ def execute(args,report,persist):
                     require(all(item.get("status")=="MEASURED" for item in
                                 report["stats_ab"]["timings"][key].values()),
                             "Stats A/B paired measurement failed; partial timing is not MEASURED")
+            if args.load_tile_ab:
+                for name in load_modes:
+                    if not name.startswith("load_variant_"):
+                        continue
+                    for baseline in ("fast_pair","original_c4"):
+                        key=name+"_vs_"+baseline
+                        report["load_tile_ab"]["timings"][key]=paired_benchmark(
+                            load_calls[baseline],load_calls[name],args,benchmark)
+                        persist()
+                        require(all(item.get("status")=="MEASURED" for item in
+                                    report["load_tile_ab"]["timings"][key].values()),
+                                "Load-tile paired measurement failed; partial timing is not MEASURED")
         if args.stats_ab:
             report["stats_ab"]["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
+        if args.load_tile_ab:
+            report["load_tile_ab"]["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["performance_scope"]="NOT_MEASURED" if args.timing=="none" else "paired prepared read only; no writes, no serving claim"
 
@@ -414,6 +527,10 @@ def parser():
     p.add_argument("--return-stats",action="store_true")
     p.add_argument("--stats-ab",action="store_true",
         help="No ASC rebuild: same-library original C4/fast-pair x stats OFF/ON paired controls")
+    p.add_argument("--load-tile-ab",action="store_true",
+        help="Validate/pair compiled load-tile candidates against matched-stats fast-pair and original C4")
+    p.add_argument("--load-variants",type=int,nargs="+",choices=(1,2,3,4,5),default=[1,2,3,4,5],
+        help="Load-tile candidate IDs to test (default all five)")
     p.add_argument("--routed-ab",action="store_true",
         help="Also validate and pair the distinct precision-routed entry against preserved overlay")
     p.add_argument("--fast-pair-ab",action="store_true",
@@ -443,7 +560,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run; recover the device first")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-single-pass-a5-v1.5-stats-ab",status="STARTED",
+    report=dict(version="qsfa-recent128-single-pass-a5-v1.6-load-tile-ab",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         candidate_contract="one direct ASC attention launch, original unsplit TopK; no cold attention call, partition or external merge",
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")
