@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 set(SFA_SDK_ROOT "$ENV{ASCEND_HOME_PATH}" CACHE PATH "Existing matched CANN toolkit; never switch installations")
 find_package(ASC REQUIRED)
 project(qsfa_recent128_single_pass LANGUAGES ASC CXX)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Prototype build type" FORCE)
+endif()
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(BUNDLE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
@@ -31,7 +35,9 @@ if(NOT ACL_INCLUDE OR NOT ACL_LIBRARY)
 endif()
 add_library(qsfa_recent128_direct SHARED single_pass_wrapper.asc original_c4_wrapper.asc)
 set_target_properties(qsfa_recent128_direct PROPERTIES POSITION_INDEPENDENT_CODE ON UNITY_BUILD OFF)
-target_compile_options(qsfa_recent128_direct PRIVATE $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>)
+target_compile_options(qsfa_recent128_direct PRIVATE
+    $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
+    $<$<COMPILE_LANGUAGE:ASC>:-O2>)
 target_include_directories(qsfa_recent128_direct PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${C4_ARCH}" "${C4_ROOT}"
     "${C4_ARCH}/common/op_kernel" "${ACL_INCLUDE}" "${BUNDLE_ROOT}/deps/ascendc_common")
 foreach(suffix "" "/include" "/include/basic_api" "/include/adv_api" "/include/interface" "/include/tiling"

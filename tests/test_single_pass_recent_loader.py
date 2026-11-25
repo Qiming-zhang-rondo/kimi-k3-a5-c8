@@ -179,6 +179,18 @@ int main() {
         }
         assert(nz.at(at) == expected);
     }
+    // W0 regression: native DMA runs, with no recent-token map stores.
+    v.recentEnabled = false;
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        std::fill(v.recentTileTokens, v.recentTileTokens + 16, -777);
+        v.physical[100] = scenario == 1 ? 7 : 3;
+        v.physical[101] = scenario == 2 ? 3 : 5;
+        assert(v.CopyInKvSparse({&packed}, 0, 100, 101, run, info) == 2);
+        for (const int64_t token : v.recentTileTokens) assert(token == -777);
+        const int firstPhysical = scenario == 1 ? 5 : 3;
+        assert(packed[0] == firstPhysical);
+    }
+    v.recentEnabled = true;
     // Window/tag validity: stale resident slots, old and future tokens do not
     // overwrite C4. Caller must reject absent required hot tags before launch.
     for (const int64_t token : {22, 151, 100}) {

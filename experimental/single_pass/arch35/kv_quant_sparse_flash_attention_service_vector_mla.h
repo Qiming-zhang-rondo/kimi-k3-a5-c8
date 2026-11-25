@@ -344,9 +344,13 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t Recent128QSFAVectorService<T
     uint32_t combineBytes = constInfo.dSizeVInput * sizeof(KV_T);
     int64_t keySrcStride = (keyOffset0 > keyOffset1 ? (keyOffset0 - keyOffset1) * sizeof(KV_T):
         (keyOffset1 - keyOffset0)) * sizeof(KV_T) - combineBytes;
-    recentTileTokens[startRow] = keyOffset0 >= 0 ? token0Idx : token1Idx;
-    if (keyOffset0 >= 0 && keyOffset1 >= 0) {
-        recentTileTokens[startRow + 1] = token1Idx;
+    // W0 must not materialize the hot row map: preserve the native C4
+    // gather/dequant path without per-token scalar array writes.
+    if (recentEnabled) {
+        recentTileTokens[startRow] = keyOffset0 >= 0 ? token0Idx : token1Idx;
+        if (keyOffset0 >= 0 && keyOffset1 >= 0) {
+            recentTileTokens[startRow + 1] = token1Idx;
+        }
     }
     if (keySrcStride >= INT32_MAX || keySrcStride < 0 || constInfo.sparseBlockSize > 1) {
         // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
@@ -363,8 +367,10 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t Recent128QSFAVectorService<T
         int64_t keyOffset = keyOffset0 > -1 ? keyOffset0 : keyOffset1;
         if (keyOffset1 > -1 && keyOffset1 < keyOffset0) {
             keyOffset = keyOffset1;
-            recentTileTokens[startRow] = token1Idx;
-            recentTileTokens[startRow + 1] = token0Idx;
+            if (recentEnabled) {
+                recentTileTokens[startRow] = token1Idx;
+                recentTileTokens[startRow + 1] = token0Idx;
+            }
         }
 
         // 当前仅支持COMBINE模式
@@ -968,7 +974,9 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessSparseK
         // 2、dequant by vf
         LocalTensor<Q_T> kvDequantOutUb = stage0OutQue.AllocTensor<Q_T>();
         DequantKv(kvDequantOutUb, kvInUb, dealRow, constInfo);
-        OverlayRecentHotRows(kvDequantOutUb, dealRow, runInfo, constInfo);
+        if (recentEnabled) {
+            OverlayRecentHotRows(kvDequantOutUb, dealRow, runInfo, constInfo);
+        }
         stage0InQue.FreeTensor(kvInUb);
         stage0OutQue.EnQue(kvDequantOutUb);
         kvDequantOutUb = stage0OutQue.DeQue<Q_T>();

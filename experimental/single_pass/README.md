@@ -1,6 +1,6 @@
 # C4 冷端 + BF16 recent128：原生单次 attention 原型
 
-**当前是源码原型及 CPU 合同通过，尚待 AscendC 编译和 A5 运行。**此原型不再依赖已算好的 cold output/max/sum，不在候选里调用原生 cold attention，也没有第二次 hot attention 或外部 LSE merge。
+**e1af回传摘要报精度通过，但W0=301.78µs、W128=339.22µs，性能尚未达标。**当前优先执行 [PERFORMANCE_RECOVERY.md](PERFORMANCE_RECOVERY.md)，补齐真实参数并修复W0路径；新默认AIC/Release/O2/旁路修改尚待A5测量。此原型不再依赖已算好的 cold output/max/sum，不在W128候选里调用原生 cold attention，也没有第二次 hot attention 或外部 LSE merge。
 
 输入为原始合并 BF16 query、原 packed400 C4 cache、原 TopK、BF16 热环及位置 tags。沿原生 C4 的 gather/反量化流水，把命中的 BF16 热行写进相同 NZ tile；后面的 QK、online softmax、PV 和最终归一共用一次计算。TopK 不改变。
 
@@ -11,6 +11,7 @@
 - 初始 Q4/K8192，B1、H64、D512/R64、TopK2048、page128、window0/128。
 - `native_c4_source/` 是用户交付的实际 C4 source；41 个源文件的 MANIFEST SHA256 已核对。源快照 `2a2beb51b4db2ae02c9c120527cbc04c4e99bbb7`。
 - 原始 C4 kernel 另编译为独立对照入口；候选 vector/kernel 位于本目录 `arch35/`，原文件不改动。
+- window0直接调独立原始C4入口；Q4默认自动选4 AIC，仍可显式1作并行对照。构建默认Release并显式ASC -O2。
 - 原安装包 C4 tiling 类型定义未包含在交付中，因此本目录明确采用 **新 standalone ABI1 / 72B POD**，host 和 kernel 共同重编。不能把它传给安装包 ACLNN，也不能复用旧 BF16 144B POD。
 - 原生 packed400 分支的模板为 BF16 query、INT8 storage、TEMPLATE_MODE=1、TND/PA_BSND、IS_SPLIT_G=false；不是 DT_FLOAT4 模板入口。此分支不使用 GM user scratch，保持 1B 非空占位。禁止走未验证的 SyncAll/空 padding 请求路径。
 - host 原型在运行前验证物理页表、原 TopK、causal 范围、BF16 tags；非法 recent tag 的设备 C4 fallback 仅防止非法地址，不能算成功启用热窗。

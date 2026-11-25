@@ -1,11 +1,9 @@
-# 当前优先：原生 C4 + BF16 recent128 单次 attention 原型上 A5
+# 当前优先：修复单遍 W0 的基础性能差距
 
-C4源码交接已完成：2a2beb51，41个source文件MANIFEST已核对；不要重复导出或继续旧两遍参数扫描。
+e1af1f5回传单遍精度PASS摘要，但W0=301.78µs、W128=339.22µs、installed C4=80.44µs。性能未达标，不能主要归因热行重复解码，因为W0已经3.75×。
 
-直接执行 [experimental/single_pass/A5_EXECUTION_TASK.md](experimental/single_pass/A5_EXECUTION_TASK.md)。代码、独立构建入口、Torch当前stream桥和精度/配对脚本已交付；候选每次只有一次attention，保留原TopK，无独立cold attention、外部分区或merge。先Q4/K8192/AIC4编译+精度，全部通过再graph同轮性能。常规编译/API差异自行修复并提交，不逐项让用户中转。
+直接执行 [experimental/single_pass/PERFORMANCE_RECOVERY.md](experimental/single_pass/PERFORMANCE_RECOVERY.md)：先用只读脚本提取刚才完整结果（真实AIC/flags/原始C4 direct/配对各轮），用现有库只确认Q4 AIC1/4；再隔离重编新Release/O2+window0原生旁路，并测原始C4/W0/W128。不要重扫其他形状或继续盲改VF，不逐项让用户中转。
 
-这是源码原型：本地9项CPU专项检查通过，未冒称AscendC编译、NPU精度或性能已通过。首版热行仍先过原C4解码再由BF16覆盖，性能需测。原生C4控制入口保留，实际源码与新72B自有tiling host/device共同重编，绝不拿猜的POD喂安装包。
+已修复默认Q4 AIC1→自动4，disabled recent map写入，W0直接原生C4入口，显式优化构建；本地3项针对性检查通过，新修改的A5性能尚未测。摘要保留，不编造实际AIC已确认或性能已恢复。
 
-本机推送接收器已恢复：真实GitHub push被202接受并由官方Codex queue返回0，目标为当前聊天；按sfa-framework-recent128分支路由、忽略[sfa-review]自提交，无定时轮询。工具见 tools/github_push_supervisor.py。密钥/部署配置只留本机，不在仓库。
-
-单遍设备验证通过后继续 [framework_integration/FRAMEWORK_EXECUTION_TASK.md](framework_integration/FRAMEWORK_EXECUTION_TASK.md) 的真实模型精度任务；不把单算子结果称为模型或服务通过。
+候选仍为一遍attention，原TopK与数学门槛不变，旧两遍有效实现和旧库保留。设备fault立即停止。返回小型原始证据到experimental/single_pass/evidence，不上传大npz。单遍达到可用性能后再继续真实模型框架精度任务。

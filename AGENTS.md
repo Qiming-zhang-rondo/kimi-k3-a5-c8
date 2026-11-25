@@ -1,7 +1,7 @@
 # 本分支执行规则
 
 当前用户已收口单算子优化，目标转为框架接入与真实模型精度验证。
-启动入口为 `START_HERE.md`；本轮优先任务为 `experimental/single_pass/A5_EXECUTION_TASK.md`。
+启动入口为 `START_HERE.md`；本轮优先任务为 `experimental/single_pass/PERFORMANCE_RECOVERY.md`。
 保留以下执行约束；旧 POST_COMPILE/优化任务仅作为历史参考，不再自动继续扫描。
 
 - 内网代理拥有实际机器环境，负责在当地自主搜索依赖、修复构建、执行验证并提交证据。

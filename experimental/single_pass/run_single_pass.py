@@ -21,6 +21,17 @@ def require(condition,message):
         raise RuntimeError(message)
 
 
+def select_aic_count(queries, requested=None):
+    if type(queries) is not int or not 1 <= queries <= 1024:
+        raise ValueError("Require Q1..1024")
+    supported=(1,2,4,8,16)
+    if requested is None:
+        return max(count for count in supported if count <= queries and queries % count == 0)
+    if type(requested) is not int or requested not in supported or requested > queries or queries % requested:
+        raise ValueError("Require AIC1/2/4/8/16 dividing Q")
+    return requested
+
+
 def execute(args,report,persist):
     import numpy as np
     from pinned_payload import activate_payload
@@ -68,6 +79,9 @@ def execute(args,report,persist):
         build_directory=args.build_directory,verbose=args.verbose)
     report["bridge_build"]=getattr(bridge,"_single_pass_build_identity",{})
     report["bridge_configuration"]=dict(bridge.configuration())
+    report["launch_geometry"]=dict(queries=args.queries,aic_count=args.aic_count,
+        aiv_count=2*args.aic_count,query_tiles_per_aic=args.queries//args.aic_count,
+        aic_selection="auto" if args.aic_auto else "explicit")
     plans={name:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
                               base.scale,args.return_stats)
         for name in ("original_c4_direct","single_pass_w0","single_pass_w128")}
@@ -158,7 +172,8 @@ def parser():
     p.add_argument("--device",required=True,help="Explicit NPU already checked idle; never an implicit shared device")
     p.add_argument("--queries",type=int,default=4)
     p.add_argument("--keys",type=int,choices=(8192,32768),default=8192)
-    p.add_argument("--aic-count",type=int,choices=(1,2,4,8,16),default=1)
+    p.add_argument("--aic-count",type=int,choices=(1,2,4,8,16),default=None,
+        help="Default: largest supported divisor of Q, up to 16 (Q4 uses 4 AICs)")
     p.add_argument("--seed",type=int,default=20261120)
     p.add_argument("--return-stats",action="store_true")
     p.add_argument("--timing",choices=("none","eager","graph"),default="none")
@@ -172,8 +187,11 @@ def parser():
 
 def main(argv=None):
     args=parser().parse_args(argv)
-    if not 1<=args.queries<=1024 or not 1<=args.aic_count<=min(args.queries,16) or args.queries%args.aic_count:
-        parser().error("Require Q1..1024 and AIC1..16 dividing Q")
+    args.aic_auto=args.aic_count is None
+    try:
+        args.aic_count=select_aic_count(args.queries,args.aic_count)
+    except ValueError as error:
+        parser().error(str(error))
     if args.warmup<0 or min(args.iterations,args.repeats)<1:
         parser().error("Invalid timing iteration counts")
     args.output=args.output.expanduser().resolve()
@@ -181,7 +199,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run; recover the device first")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-single-pass-a5-v1",status="STARTED",
+    report=dict(version="qsfa-recent128-single-pass-a5-v1.1-perf-defaults",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         candidate_contract="one direct ASC attention launch, original unsplit TopK; no cold attention call, partition or external merge",
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")

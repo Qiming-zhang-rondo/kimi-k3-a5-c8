@@ -1,0 +1,31 @@
+{
+  "status": "HOST_CHECKED_A5_PENDING",
+  "timestamp_utc": "2026-11-25T07:19:29.672493+00:00",
+  "targeted_tests_passed": 3,
+  "math_or_tolerance_changed": false,
+  "sdk_build": "NOT_RUN",
+  "npu_performance": "NOT_MEASURED",
+  "last_uploaded_summary_commit": "e1af1f523f2b03744626d3a1d1e23132fda0baea",
+  "last_summary": {
+    "w0_us": 301.78,
+    "w128_us": 339.22,
+    "installed_c4_us": 80.44
+  },
+  "hypothesis": "Q4 launch default AIC1 or build-path overhead; actual previous args not uploaded; not established root cause",
+  "changes": [
+    "Q4 default AIC4",
+    "ASC -O2 and default Release",
+    "W0 native C4 entry bypass",
+    "disabled recent map stores guarded",
+    "raw evidence extraction preserves failures"
+  ],
+  "source_sha256": {
+    "experimental/single_pass/run_single_pass.py": "64d8b2ffd9e446d04a958595879c43147dc9585c91c954edbd3020172f4fc90d",
+    "experimental/single_pass/collect_run_evidence.py": "eda003810d50fa7928b6e07e3d760ea6c9d3775d73a6b8ab555b44bb14fa284e",
+    "experimental/single_pass/CMakeLists.txt": "52b6c9094a04cc76dedc8c406d4f65d1a022e55d49309ddc2b63c9f2c6ff44c0",
+    "experimental/single_pass/single_pass_wrapper.asc": "cb07650f7cde002337878c1255dd7843c6119cde4a4537a70d88cfd5b093f65d",
+    "experimental/single_pass/arch35/kv_quant_sparse_flash_attention_service_vector_mla.h": "aa49abe57b878c9fc53401ba0c7e2ecd07668eaf33b06c3c77ec882d4305b431",
+    "tests/test_single_pass_perf_defaults.py": "28826cc5d1a7aa0bc3b1765ff6de65548d24aff94bc7bb8729f7efa16dbb4231",
+    "tests/test_single_pass_recent_loader.py": "a059612001753d92ecb533a2b482ade1433ab36278fe6aff7586474854bdac71"
+  }
+}
