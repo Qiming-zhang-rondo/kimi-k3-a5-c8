@@ -1,13 +1,11 @@
-# 独立候选分支：冷缓存scatter并入热环prepare
+# 当前任务：补齐两轮小证据，继续写融合prefill
 
-本分支 `sfa-write-prepare` 基于c2873ee，供正在进行的大形状扫描完成后单独测试。
-主分支 `sfa-cold-merge` 的形状扫描和当前113µs实现保持原样，不切换正在运行的checkout。
+主分支37bbc60回报Q32–1024读取融合已MEASURED；本分支1c0376b回报Q4写融合111.9µs，
+较同轮原读融合快约1.7%。现有上传摘要缺少完整门禁/配对分项，原12MB文件不用上传。
 
-新增候选见 [WRITE_PREPARE_NEXT.md](WRITE_PREPARE_NEXT.md)：
-原生C4量化和cat打包不变，将packed冷字节scatter并入既有BF16热写与two_scan分区，
-减少一次独立index_copy_调用。开关默认关闭，保留同轮direct_fused当前实现作基线。
-新增完整缓存字节/整数分区/写槽图重放门禁，通过后才计时。
+按 [COMPLETED_RUNS_NEXT.md](COMPLETED_RUNS_NEXT.md) 先用纯CPU收集器一次提取已有两轮，
+无需重跑；Q32/128/512已由8ac297e报告完成，勿重复；仅补尚未完成的Q1024，并复用已成功ABI4库。
+原113µs读融合仍保留作每个形状同轮基线，所有精度、缓存字节、partition和graph门禁保持。
 
-这是Python/Triton改动，未改AscendC库及ABI；可复用形状扫描已成功的ABI4设备库。
-已同步主分支31affe8的精确零query参考修正，34项针对宿主检查通过。
-新Triton设备编译/A5正确性/性能均未验证，不能先算提速。
+候选实现及原命令见 [WRITE_PREPARE_NEXT.md](WRITE_PREPARE_NEXT.md)。
+不能将当前单算子结果称为生产TPOT收益，不能覆盖正在运行的主分支checkout或实验环境。

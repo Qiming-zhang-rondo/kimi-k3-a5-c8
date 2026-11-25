@@ -25,6 +25,26 @@ def failed_checks(value, prefix="controls"):
     return failures
 
 
+def check_status(value):
+    # Presence matters: {} means neither field was supplied; explicit null is
+    # preserved as null, and must never be promoted to a successful check.
+    return {key:value[key] for key in ("passed","control_passed") if key in value}
+
+
+def graph_detail(value):
+    result=check_status(value)
+    if "fields" in value:
+        fields=value["fields"]
+        if fields is None:
+            result["fields"]=None
+        elif isinstance(fields,dict):
+            allowed=("passed","control_passed","mismatch_count","shape","dtype",
+                     "expected_shape","actual_shape","expected_dtype","actual_dtype")
+            result["fields"]={name:{key:field[key] for key in allowed if key in field}
+                              for name,field in fields.items() if isinstance(field,dict)}
+    return result
+
+
 def extract(path):
     report=json.loads(Path(path).read_text())
     result=dict(results=str(path),version=report.get("version"),status=report.get("status"),
@@ -36,7 +56,9 @@ def extract(path):
                       ("library","library_sha256","sdk_root","bridge_source_sha256")},
         controls={},timings={})
     for name,value in report.get("controls",{}).items():
-        item={key:value[key] for key in ("passed","control_passed") if key in value}
+        item=check_status(value)
+        item["check_statuses"]={key:check_status(check) for key,check in value.items()
+                                if isinstance(check,dict)}
         if "reader" in value:
             reader=value["reader"]
             item["reader"]={"passed":reader.get("passed")}
@@ -50,6 +72,8 @@ def extract(path):
             item["kernel_vs_matching_reference"]=metric(value["kernel_vs_matching_reference"])
         result["controls"][name]=item
     result["graph_capture_controls"]={key:value.get("passed") for key,value in report.get("graph_capture_controls",{}).items()}
+    result["graph_capture_detail"]={key:graph_detail(value)
+        for key,value in report.get("graph_capture_controls",{}).items() if isinstance(value,dict)}
     result["failed_check_paths"]=failed_checks(report.get("controls",{}))
     result["failed_check_paths"].update(failed_checks(report.get("graph_capture_controls",{}),"graph_capture_controls"))
     for name,value in report.get("timings",{}).items():
