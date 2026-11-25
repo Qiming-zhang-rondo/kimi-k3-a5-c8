@@ -133,6 +133,84 @@ class DirectBridgeHarnessTests(unittest.TestCase):
         kwargs["output_dtype"] = "torch.float32"
         self.assertFalse(harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)["passed"])
 
+    def test_independent_zero_oracle_accepts_correct_actual_despite_bad_nontie_native(self):
+        cold,hot,actual,native,kwargs=self.rounding_fixture()
+        hot[0].fill(1.)
+        native.reshape(-1)[0]=1+2/128  # Non-midpoint and two ULP native error.
+        result=harness.independent_zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["oracle_is_exact"])
+        self.assertEqual(result["two_sum_nonzero_residual_count"],0)
+        self.assertEqual(result["actual_oracle_bit_mismatch_count"],0)
+        self.assertFalse(result["legacy_tie_only_proof"]["passed"])
+        self.assertGreater(result["native_mismatches_not_at_exact_midpoint"],0)
+        self.assertGreater(result["native_mismatches_not_one_ulp"],0)
+
+    def test_independent_zero_oracle_rejects_one_wrong_actual_bf16_bit(self):
+        cold,hot,actual,native,kwargs=self.rounding_fixture()
+        actual.reshape(-1)[-1]=1+1/128
+        result=harness.independent_zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["actual_oracle_bit_mismatch_count"],1)
+
+    def test_independent_zero_oracle_rejects_nonexact_fp64_numerator(self):
+        cold,hot,actual,native,kwargs=self.rounding_fixture()
+        hot[0].fill(2.**-100)  # Exactly BF16, but lost when added to FP64 15.
+        actual.fill(15/16);native.fill(15/16)
+        result=harness.independent_zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["oracle_is_exact"])
+        self.assertGreater(result["two_sum_nonzero_residual_count"],0)
+        self.assertGreater(result["two_sum_max_abs_residual"],0)
+
+    def test_independent_zero_oracle_rejects_nonzero_statistics(self):
+        cold,hot,actual,native,kwargs=self.rounding_fixture()
+        cold[1].reshape(-1)[0]=.25
+        result=harness.independent_zero_query_exact_rne_gate(cold,hot,actual,native,**kwargs)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["exact_zero_query_statistics"])
+
+    def test_reader_acceptance_preserves_failed_legacy_and_does_not_override_nonzero(self):
+        import numpy as np
+        from diagnose_merge_rounding import metrics
+        cold,hot,actual,native,kwargs=self.rounding_fixture()
+        hot[0].fill(1.)
+        native.fill(1+2/128)
+        class Tensor(FakeTensor):
+            def __init__(self,value,dtype="torch.bfloat16"):
+                super().__init__(None,dtype)
+                self.array=np.asarray(value,np.float32);self.shape=self.array.shape
+        def state(values):
+            return tuple(Tensor(v,"torch.bfloat16" if i==0 else "torch.float32") for i,v in enumerate(values))
+        cold_t,hot_t=state(cold),state(hot)
+        def run(nonzero_correct):
+            base=types.SimpleNamespace(q_nope=Tensor(actual),q_rope=Tensor(actual),cu="qlen",
+                torch=types.SimpleNamespace(zeros_like=lambda t:Tensor(np.zeros_like(t.array))),
+                bytes_host=lambda t:t.array.view(np.uint8))
+            calls=[0]
+            def fused(*_):
+                calls[0]+=1
+                out=native if nonzero_correct and calls[0]==1 else actual
+                return Tensor(out),None,None
+            runner=types.SimpleNamespace(base=base,backend=types.SimpleNamespace(host=lambda t:t.array),
+                prepared=dict(recent_ring="indices",old_present="cp",recent_present="hp"),
+                expected_output_dtype="torch.bfloat16",direct_fused=True,
+                hot_cache="kv",hot_rope="kr",ring_table="table",ring_lengths="lengths",
+                _cold_read=lambda *_,**__:cold_t,_hot_read=lambda *_,**__:hot_t,
+                _merge=lambda *_:Tensor(native),direct_plan=types.SimpleNamespace(fused_hot=fused))
+            native_plan=types.SimpleNamespace(native_hot=lambda *_:hot_t)
+            services=dict(compare=metrics,acceptable=lambda metric,limit:metric["strict_passed"])
+            return harness.reader_controls(runner,native_plan,services)
+        checks=run(True)
+        self.assertTrue(checks["passed"])
+        self.assertFalse(checks["zero_query_same_native_states_merge"]["passed"])
+        self.assertFalse(checks["zero_query_exact_rne_gate"]["passed"])
+        self.assertTrue(checks["independent_zero_query_exact_rne_gate"]["passed"])
+        self.assertEqual(checks["zero_query_merge_acceptance"]["basis"],"independent_exact_zero_query_BF16_RNE")
+        rejected=run(False)
+        self.assertFalse(rejected["passed"])
+        self.assertFalse(rejected["nonzero_query_merge_acceptance"]["passed"])
+
     def test_manifest_checks_actual_bytes_and_rejects_missing_or_modified(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/"module.py"

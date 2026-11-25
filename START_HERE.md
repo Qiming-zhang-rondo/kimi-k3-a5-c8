@@ -1,13 +1,12 @@
-# 当前任务：大chunk形状与合并批量扫描
+# 当前任务：先收集小JSON，继续大形状计时
 
-用户最新要求优先覆盖Q32、64、128、256、512、1024，不能以Q4证明通用最优。
-执行 [SHAPE_SWEEP_NEXT.md](SHAPE_SWEEP_NEXT.md)。默认包括Q1/Q4对照、K8K/K32K、
-4/8/16 AIC、BF16合并8/16/32行，先返回大chunk覆盖，再继续调参。
+b4d2163已回传Q4再次MEASURED；Q32–1024尚为CONTROL_FAILED，没有有效性能数据。
+12MB原results无需上传。执行 [ZERO_ORACLE_NEXT.md](ZERO_ORACLE_NEXT.md)：
+先用纯CPU收集器一次提取旧7份JSON，再复用已成功ABI4库运行Q32及后续形状。
 
-56ab1fb已实测Q4/core4/rows16融合113.56µs，较同轮installed两遍快9.5%；
-保留此已验证库与结果。本轮动态形状/ABI4和可选packed输出尚待A5验证。
-原始18文件payload不改，精度门槛不变；完整逐元素和逐行检查继续执行。
+本轮仅Python门禁与数据收集改变，不改kernel、不重编、不放宽非零query的0.001门槛。
+旧strict与tie-only proof失败记录保留。新增独立零query证明必须用本次真实状态，
+证明FP64加法无残差且融合结果逐BF16 bit等于精确RNE参考；不再要求有偏差的native参考
+也只能差半值/1ULP。其他所有精度、分区/写入及graph门禁保持。
 
-先完成形状扫描，不扩展冷写融合。脚本从已验证build继承同SDK参数、隔离构建，
-逐组更新summary.csv及best_by_shape.csv，不等全矩阵结束才返回结果。
-设备故障停整个扫描，不reset、不换marker重试。规则见 [AGENTS.md](AGENTS.md)。
+主分支继续大形状任务；独立写入融合候选在sfa-write-prepare，暂不混入本轮。

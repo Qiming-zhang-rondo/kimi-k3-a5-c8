@@ -1,0 +1,12 @@
+{
+  "status": "HOST_VALIDATED_A5_PENDING",
+  "base_commit": "b4d2163e8ee282ad628cf4959a156b6aa08347c7",
+  "tests": {
+    "target_cpu_tests_passed": 25,
+    "collector_existing_result_smoke_passed": true,
+    "py_compile_passed": true
+  },
+  "policy": "Only current-state zero-query BF16 native-state merge can use an independent exact RNE proof. Retain original strict and legacy verdicts. All nonzero/math/partition/writer/pipeline/graph limits unchanged.",
+  "exactness": "BF16*15 is exact in FP64; TwoSum must have zero residual for a+b; division by16 is exact; actual must equal direct FP64-to-BF16 RNE bit for bit.",
+  "device_results": "No new NPU execution on this machine."
+}
