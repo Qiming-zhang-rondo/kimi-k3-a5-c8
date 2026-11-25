@@ -32,6 +32,47 @@ def select_aic_count(queries, requested=None):
     return requested
 
 
+def plan_modes(routed_ab=False):
+    """Explicit entries share one ABI/library; never load competing symbol sets."""
+    modes=dict(original_c4_direct=(0,True,False),single_pass_w0=(0,False,False),
+               single_pass_w128=(128,False,False))
+    if routed_ab:
+        modes["single_pass_w128_routed"]=(128,False,True)
+    return modes
+
+
+def plan_calls(plans,inputs,modes):
+    calls={}
+    for name,(window,cold_only,routed) in modes.items():
+        calls[name]=lambda name=name,window=window,cold_only=cold_only,routed=routed: \
+            plans[name].run(*inputs,window,cold_only,routed)[0]
+    return calls
+
+
+def routed_index_patterns(indices,positions,window=128):
+    """Correctness-only permutations of the exact selected set, never timed."""
+    import numpy as np
+    ids=np.asarray(indices)
+    positions=np.asarray(positions)
+    if ids.ndim!=2 or positions.shape!=(ids.shape[0],) or ids.shape[0]<1:
+        raise ValueError("Require [Q,TopK] indices and [Q] positions")
+    if not np.issubdtype(ids.dtype,np.integer) or not np.issubdtype(positions.dtype,np.integer):
+        raise ValueError("Indices and positions must be integer arrays")
+    if type(window) is not int or window<1 or np.any(ids<0) or np.any(ids>positions[:,None]):
+        raise ValueError("Require positive window and nonnegative causal indices")
+    grouped=[]
+    alternating=[]
+    for row,position in zip(ids,positions):
+        is_hot=row>=max(0,int(position)-window+1)
+        hot,cold=row[is_hot],row[~is_hot]
+        grouped.append(np.concatenate((hot,cold)))
+        paired=min(hot.size,cold.size)
+        prefix=np.stack((hot[:paired],cold[:paired]),axis=1).reshape(-1)
+        alternating.append(np.concatenate((prefix,hot[paired:],cold[paired:])))
+    return dict(hot_then_cold=np.ascontiguousarray(grouped,dtype=ids.dtype),
+                alternating_prefix=np.ascontiguousarray(alternating,dtype=ids.dtype))
+
+
 def execute(args,report,persist):
     import numpy as np
     from pinned_payload import activate_payload
@@ -79,27 +120,30 @@ def execute(args,report,persist):
         build_directory=args.build_directory,verbose=args.verbose)
     report["bridge_build"]=getattr(bridge,"_single_pass_build_identity",{})
     report["bridge_configuration"]=dict(bridge.configuration())
+    if args.routed_ab:
+        require(report["bridge_configuration"].get("routed_reader_available") is True,
+                "--routed-ab requires the rebuilt library with QsfaSinglePassLaunchRouted")
     report["launch_geometry"]=dict(queries=args.queries,aic_count=args.aic_count,
         aiv_count=2*args.aic_count,query_tiles_per_aic=args.queries//args.aic_count,
         aic_selection="auto" if args.aic_auto else "explicit")
+    modes=plan_modes(args.routed_ab)
+    report["reader_entries"]={name:dict(window=mode[0],original_c4=mode[1],routed=mode[2])
+                              for name,mode in modes.items()}
     plans={name:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
-                              base.scale,args.return_stats)
-        for name in ("original_c4_direct","single_pass_w0","single_pass_w128")}
+                              base.scale,args.return_stats) for name in modes}
     inputs=(base.query,runner.cold_cache,base.indices,base.table,base.cu,base.lengths,
             runner.hot_cache,runner.hot_rope,tags,positions)
-    calls=dict(installed_c4=lambda:base._read("c4",base.indices,cache=runner.cold_cache,statistics=False)[0],
-        original_c4_direct=lambda:plans["original_c4_direct"].run(*inputs,0,True)[0],
-        single_pass_w0=lambda:plans["single_pass_w0"].run(*inputs,0,False)[0],
-        single_pass_w128=lambda:plans["single_pass_w128"].run(*inputs,128,False)[0],
-        installed_twopass=lambda:runner.call())
+    calls=dict(installed_c4=lambda:base._read("c4",base.indices,cache=runner.cold_cache,statistics=False)[0])
+    calls.update(plan_calls(plans,inputs,modes))
+    calls["installed_twopass"]=lambda:runner.call()
     # The independent mathematical path decodes the actual original C4 bytes
     # and evaluates one FP64 softmax over the unchanged complete selected set.
     decoded=runner.decoded_kv()
     cold_math=attention_reference(data,kv_c4=decoded)
     mixed_math=attention_reference(data,kv_c4=decoded,window=128,hot_kv=data["kv"])
     bf16_math=attention_reference(data)
-    references={name:(mixed_math if name in ("single_pass_w128","installed_twopass") else cold_math)
-                for name in calls}
+    mixed_names={name for name,mode in modes.items() if mode[0]==128}|{"installed_twopass"}
+    references={name:(mixed_math if name in mixed_names else cold_math) for name in calls}
     report["controls"]={}
     outputs={}
     passed=True
@@ -136,6 +180,43 @@ def execute(args,report,persist):
             check.update(passed=acceptable(check,.01),tolerance=.01)
             passed=passed and check["passed"]
         report["cross_checks"]["single_pass_w128_vs_twopass_diagnostic"]["acceptance_gate"]=False
+        if args.routed_ab:
+            check=compare(outputs["single_pass_w128_routed"],outputs["single_pass_w128"])
+            check.update(passed=acceptable(check,.001),tolerance=.001,acceptance_gate=True)
+            report["cross_checks"]["single_pass_w128_routed_vs_overlay"]=check
+            passed=passed and check["passed"]
+            # The unchanged original TopK may be ordered into homogeneous
+            # blocks. Exercise both homogeneous and mixed 16-row loaders by
+            # changing order only, with no membership/cache/query changes.
+            # These controls are intentionally excluded from timing/graphs.
+            report["routed_pattern_controls"]={}
+            for pattern,pattern_ids in routed_index_patterns(ids,positions_cpu).items():
+                require(bool(np.array_equal(np.sort(pattern_ids,axis=1),np.sort(ids,axis=1))),
+                        "Routed pattern changed the selected set")
+                permuted_inputs=list(inputs)
+                permuted_inputs[2]=base.tensor(pattern_ids[:,None,:],torch.int32)
+                pattern_outputs={}
+                pattern_plans={arm:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
+                                                 base.scale,args.return_stats)
+                               for arm in ("overlay","routed")}
+                result=dict(scope="correctness-only order permutation; same selected set; not timed",
+                            selected_set_unchanged=True,checks={})
+                arrays["pattern_"+pattern+"_indices"]=pattern_ids
+                for arm,plan in pattern_plans.items():
+                    actual=backend.host(plan.run(*permuted_inputs,128,False,arm=="routed")[0]).copy()
+                    pattern_outputs[arm]=actual
+                    arrays["pattern_"+pattern+"_"+arm]=actual
+                    metric=compare(actual,mixed_math)
+                    metric.update(passed=acceptable(metric,.01),tolerance=.01,
+                                  reference_contract="Independent FP64 whole-selected-set softmax")
+                    result["checks"][arm+"_vs_matching_math"]=metric
+                metric=compare(pattern_outputs["routed"],pattern_outputs["overlay"])
+                metric.update(passed=acceptable(metric,.001),tolerance=.001)
+                result["checks"]["routed_vs_overlay"]=metric
+                result["passed"]=all(check["passed"] for check in result["checks"].values())
+                report["routed_pattern_controls"][pattern]=result
+                passed=passed and result["passed"]
+                persist()
         np.savez_compressed(args.output/"outputs.npz",**arrays)
         report["all_accuracy_controls_passed"]=bool(passed)
         persist()
@@ -158,6 +239,12 @@ def execute(args,report,persist):
             require(all(item.get("status")=="MEASURED" for item in
                         report["timings"]["single_pass_w128_vs_installed_twopass"].values()),
                     "Paired measurement failed; partial timing is not MEASURED")
+            if args.routed_ab:
+                report["timings"]["single_pass_w128_routed_vs_overlay"]=paired_benchmark(
+                    calls["single_pass_w128"],calls["single_pass_w128_routed"],args,benchmark)
+                require(all(item.get("status")=="MEASURED" for item in
+                            report["timings"]["single_pass_w128_routed_vs_overlay"].values()),
+                        "Routed/overlay paired measurement failed; partial timing is not MEASURED")
     report["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["performance_scope"]="NOT_MEASURED" if args.timing=="none" else "paired prepared read only; no writes, no serving claim"
 
@@ -176,6 +263,8 @@ def parser():
         help="Default: largest supported divisor of Q, up to 16 (Q4 uses 4 AICs)")
     p.add_argument("--seed",type=int,default=20261120)
     p.add_argument("--return-stats",action="store_true")
+    p.add_argument("--routed-ab",action="store_true",
+        help="Also validate and pair the distinct precision-routed entry against preserved overlay")
     p.add_argument("--timing",choices=("none","eager","graph"),default="none")
     p.add_argument("--warmup",type=int,default=20)
     p.add_argument("--iterations",type=int,default=100)
@@ -199,7 +288,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run; recover the device first")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-single-pass-a5-v1.1-perf-defaults",status="STARTED",
+    report=dict(version="qsfa-recent128-single-pass-a5-v1.2-routed-ab",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         candidate_contract="one direct ASC attention launch, original unsplit TopK; no cold attention call, partition or external merge",
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")

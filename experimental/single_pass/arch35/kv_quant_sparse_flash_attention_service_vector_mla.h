@@ -15,6 +15,10 @@
 #ifndef RECENT128_C4_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
 #define RECENT128_C4_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
 
+#ifndef QSFA_RECENT_ROUTE_HOT
+#define QSFA_RECENT_ROUTE_HOT 0
+#endif
+
 // Experimental single-pass Recent128 candidate, derived from the matched C4 source
 // exported at 42178380e76cbe3b10605e2c10cf17c0135b8a0e. Not SDK/device validated.
 // The original C4 gather/dequant and shared attention pipeline are preserved.
@@ -187,6 +191,19 @@ private:
     TEventID recentMte2ToMte3;
     __aicore__ inline void OverlayRecentHotRows(LocalTensor<Q_T> kvNz,
         int64_t rows, const RunInfo &runInfo, const ConstInfo &constInfo);
+#if QSFA_RECENT_ROUTE_HOT
+    bool recentRouteActive = false;
+    int64_t recentQueryPosition = -1;
+    int64_t recentQueryFirst = 0;
+    int64_t recentTileSlots[16];
+    uint32_t recentHotMask = 0;
+    __aicore__ inline void PrepareRecentQuery(const RunInfo &runInfo, const ConstInfo &constInfo);
+    __aicore__ inline int64_t ResolveRecentHotSlot(int64_t token);
+    __aicore__ inline void ReadRecentHotRows(LocalTensor<Q_T> kvNz, int64_t rows);
+    __aicore__ inline void WaitRecentHotRows();
+    __aicore__ inline void DequantKvRouted(LocalTensor<Q_T> kvNz, LocalTensor<KV_T> packed,
+        int64_t rows, ConstInfo &constInfo);
+#endif
 
     TPipe *tPipe;
     const KvQuantSparseFlashAttentionTilingDataMla *__restrict tilingData;
@@ -352,6 +369,45 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t Recent128QSFAVectorService<T
             recentTileTokens[startRow + 1] = token1Idx;
         }
     }
+#if QSFA_RECENT_ROUTE_HOT
+    if (recentRouteActive) {
+        // Match the native pair's physical-address ordering exactly. No global
+        // TopK sorting/partitioning and no extra attention/softmax are added.
+        const bool canPair = keySrcStride < INT32_MAX && keySrcStride >= 0 &&
+            constInfo.sparseBlockSize <= 1;
+        const bool swapPair = canPair && keyOffset1 > -1 && keyOffset1 < keyOffset0;
+        if (swapPair) {
+            recentTileTokens[startRow] = token1Idx;
+            recentTileTokens[startRow + 1] = token0Idx;
+        }
+        const int64_t count = (keyOffset0 >= 0) + (keyOffset1 >= 0);
+        bool pairHasHot = false;
+        for (int64_t i = 0; i < count; ++i) {
+            const int64_t row = startRow + i;
+            const int64_t slot = ResolveRecentHotSlot(recentTileTokens[row]);
+            recentTileSlots[row] = slot;
+            if (slot >= 0) {
+                recentHotMask |= uint32_t(1) << row;
+                pairHasHot = true;
+            }
+        }
+        if (pairHasHot) {
+            // Every hot row bypasses packed400 completely. The masked decoder
+            // below must also skip it, including its BF16 RoPE payload.
+            for (int64_t i = 0; i < count; ++i) {
+                const int64_t row = startRow + i;
+                if (recentTileSlots[row] < 0) {
+                    const int64_t offset = count == 1 ?
+                        (keyOffset0 >= 0 ? keyOffset0 : keyOffset1) :
+                        ((i == 0) != swapPair ? keyOffset0 : keyOffset1);
+                    CopyInSingleKv(kvInUb, row, offset, combineBytes);
+                }
+            }
+            return count;
+        }
+        // An all-cold pair keeps the original coalesced DMA below.
+    }
+#endif
     if (keySrcStride >= INT32_MAX || keySrcStride < 0 || constInfo.sparseBlockSize > 1) {
         // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
         CopyInSingleKv(kvInUb, startRow, keyOffset0, combineBytes);
@@ -450,6 +506,77 @@ Recent128QSFAVectorService<TEMPLATE_ARGS>::OverlayRecentHotRows(
     SetFlag<HardEvent::MTE2_MTE3>(recentMte2ToMte3);
     WaitFlag<HardEvent::MTE2_MTE3>(recentMte2ToMte3);
 }
+
+#if QSFA_RECENT_ROUTE_HOT
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
+Recent128QSFAVectorService<TEMPLATE_ARGS>::PrepareRecentQuery(
+    const RunInfo &runInfo, const ConstInfo &constInfo)
+{
+    recentRouteActive = recentEnabled && runInfo.boIdx == 0 &&
+        constInfo.dSizeVInput == 400 && constInfo.dSizeNope == 512 &&
+        constInfo.dSizeRope == 64 && constInfo.sparseBlockSize == 1;
+    if (recentRouteActive) {
+        recentQueryPosition = recentPositionsGm.GetValue(runInfo.s1oIdx);
+        recentRouteActive = recentQueryPosition >= 0;
+        recentQueryFirst = recentQueryPosition >= recentWindow - 1 ?
+            recentQueryPosition - (recentWindow - 1) : 0;
+    }
+}
+
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline int64_t
+Recent128QSFAVectorService<TEMPLATE_ARGS>::ResolveRecentHotSlot(int64_t token)
+{
+    if (token < recentQueryFirst || token > recentQueryPosition) {
+        return -1;
+    }
+    const int64_t slot = token % recentRingCapacity;
+    return recentTagsGm.GetValue(slot) == token ? slot : -1;
+}
+
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
+Recent128QSFAVectorService<TEMPLATE_ARGS>::ReadRecentHotRows(LocalTensor<Q_T> kvNz, int64_t rows)
+{
+    if (!recentRouteActive || !recentHotMask || rows <= 0 || rows > 16) {
+        return;
+    }
+    // VECOUT allocation/reuse is ordered on V. Hand that ownership to MTE2
+    // before its first write; do NOT assume disjoint rows remove this hazard.
+    // Unlike overlay, this event precedes cold decode, so their independent
+    // destinations can overlap in the pipeline without overwrite ordering.
+    SetFlag<HardEvent::V_MTE2>(recentVToMte2);
+    WaitFlag<HardEvent::V_MTE2>(recentVToMte2);
+    DataCopyExtParams p;
+    p.blockCount = 32;
+    p.blockLen = 32;
+    p.srcStride = 0;
+    p.dstStride = 16;
+    DataCopyPadExtParams<Q_T> pad;
+    pad.isPad = false;
+    pad.leftPadding = 0;
+    pad.rightPadding = 0;
+    pad.paddingValue = 0;
+    for (int64_t row = 0; row < rows; ++row) {
+        if (!(recentHotMask & (uint32_t(1) << row))) {
+            continue;
+        }
+        const int64_t slot = recentTileSlots[row];
+        p.blockCount = 32;
+        DataCopyPad(kvNz[row * 16], recentLatentGm[slot * 512], p, pad);
+        p.blockCount = 4;
+        DataCopyPad(kvNz[512 * 17 + row * 16], recentRopeGm[slot * 64], p, pad);
+    }
+}
+
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
+Recent128QSFAVectorService<TEMPLATE_ARGS>::WaitRecentHotRows()
+{
+    if (recentRouteActive && recentHotMask) {
+        // VECOUT's normal V->MTE3 queue event does not cover MTE2 producers.
+        SetFlag<HardEvent::MTE2_MTE3>(recentMte2ToMte3);
+        WaitFlag<HardEvent::MTE2_MTE3>(recentMte2ToMte3);
+    }
+}
+#endif
 
 // fp8->fp32
 static constexpr MicroAPI::CastTrait castTraitFp8_1 = {MicroAPI::RegLayout::ZERO, MicroAPI::SatMode::UNKNOWN,
@@ -616,6 +743,53 @@ __simd_vf__ void AntiquantVFImplBIMxfp4(__ubuf__ uint8_t *ubSrcAddr, __ubuf__ Q_
                                   vScaleCompact, vScaleIndex3, maskAll);
     }
 }
+
+#if QSFA_RECENT_ROUTE_HOT
+template <typename Q_T>
+__simd_vf__ void AntiquantVFImplBIMxfp4Routed(__ubuf__ uint8_t *ubSrcAddr, __ubuf__ Q_T *ubDstAddr,
+                                        uint32_t dealRowCount, uint32_t hotRows)
+{
+    constexpr uint32_t rowStrideBytes = 416;
+    constexpr uint32_t scaleOffsetBytes = 384;
+    constexpr uint32_t dTile = 128;
+    constexpr uint32_t packedTileBytes = dTile / 2;
+    constexpr uint32_t blockStride = 17;
+ 
+    MicroAPI::RegTensor<fp8_e8m0_t> vScaleE8M0;
+    MicroAPI::RegTensor<bfloat16_t> vScaleCompact;
+    MicroAPI::RegTensor<int16_t> vScaleIndex0, vScaleIndex1, vScaleIndex2, vScaleIndex3;
+    MicroAPI::MaskReg maskAll = MicroAPI::CreateMask<Q_T, MicroAPI::MaskPattern::ALL>();
+ 
+    MicroAPI::Arange(vScaleIndex0, 0);
+    MicroAPI::ShiftRights(vScaleIndex0, vScaleIndex0, static_cast<int16_t>(5), maskAll);
+    MicroAPI::Adds(vScaleIndex1, vScaleIndex0, static_cast<int16_t>(4), maskAll);
+    MicroAPI::Adds(vScaleIndex2, vScaleIndex0, static_cast<int16_t>(8), maskAll);
+    MicroAPI::Adds(vScaleIndex3, vScaleIndex0, static_cast<int16_t>(12), maskAll);
+ 
+    for (uint32_t row = 0; row < dealRowCount; ++row) {
+        // Uniform row routing: do not load scales or packed bytes of hot rows.
+        // Their uninitialised packed slots are intentionally never consumed.
+        if (hotRows & (uint32_t(1) << row)) {
+            continue;
+        }
+        __ubuf__ uint8_t *rowSrc = ubSrcAddr + row * rowStrideBytes;
+        MicroAPI::LoadAlign<uint8_t, MicroAPI::LoadDist::DIST_UNPACK_B8>(
+            (MicroAPI::RegTensor<uint8_t> &)vScaleE8M0, rowSrc + scaleOffsetBytes);
+        MicroAPI::Cast<bfloat16_t, fp8_e8m0_t, castTraitBIE8M0ToBf16>(
+            vScaleCompact, vScaleE8M0, maskAll);
+ 
+        __ubuf__ Q_T *rowDst = ubDstAddr + row * 16;
+        AntiquantBIMxfp4Tile<Q_T>(rowSrc, rowDst, vScaleCompact, vScaleIndex0, maskAll);
+        AntiquantBIMxfp4Tile<Q_T>(rowSrc + packedTileBytes, rowDst + dTile * blockStride,
+                                  vScaleCompact, vScaleIndex1, maskAll);
+        AntiquantBIMxfp4Tile<Q_T>(rowSrc + 2 * packedTileBytes, rowDst + 2 * dTile * blockStride,
+                                  vScaleCompact, vScaleIndex2, maskAll);
+        AntiquantBIMxfp4Tile<Q_T>(rowSrc + 3 * packedTileBytes, rowDst + 3 * dTile * blockStride,
+                                  vScaleCompact, vScaleIndex3, maskAll);
+    }
+}
+
+#endif
 
 template <typename Q_T, typename KV_T>
 __aicore__ inline void AntiquantVFFp8D448(LocalTensor<Q_T>& outputUb,  LocalTensor<KV_T>& inputUb, uint32_t dealRowCount)
@@ -837,6 +1011,42 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void Recent128QSFAVectorService<TEMPL
         });
 }
 
+#if QSFA_RECENT_ROUTE_HOT
+TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
+Recent128QSFAVectorService<TEMPLATE_ARGS>::DequantKvRouted(
+    LocalTensor<Q_T> kvNz, LocalTensor<KV_T> packed, int64_t rows, ConstInfo &constInfo)
+{
+    if (!recentRouteActive || !recentHotMask) {
+        DequantKv(kvNz, packed, rows, constInfo);
+        return;
+    }
+    const uint32_t validMask = (uint32_t(1) << rows) - 1;
+    if ((recentHotMask & validMask) == validMask) {
+        return; // All hot: neither latent nor RoPE reads the packed buffer.
+    }
+    __ubuf__ uint8_t *src = (__ubuf__ uint8_t *)(packed.GetPhyAddr());
+    __ubuf__ Q_T *dst = (__ubuf__ Q_T *)(kvNz.GetPhyAddr());
+    AntiquantVFImplBIMxfp4Routed<Q_T>(src, dst, static_cast<uint32_t>(rows), recentHotMask);
+    LocalTensor<Q_T> ropeSrc = packed[256].template ReinterpretCast<Q_T>();
+    LocalTensor<Q_T> ropeDst = kvNz[constInfo.dSizeNope * 17];
+    // Copy only contiguous cold runs. A single unmasked native Rope Copy
+    // would overwrite BF16 hot rows with uninitialised packed payload.
+    int64_t row = 0;
+    while (row < rows) {
+        if (recentHotMask & (uint32_t(1) << row)) {
+            ++row;
+            continue;
+        }
+        const int64_t first = row;
+        while (row < rows && !(recentHotMask & (uint32_t(1) << row))) {
+            ++row;
+        }
+        Copy(ropeDst[first * 16], ropeSrc[first * 208], constInfo.dSizeRope,
+            static_cast<uint8_t>(row - first), {17, 1, 1, 13});
+    }
+}
+#endif
+
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::CopyOutKvUb2L1(
     Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> &outputL1,
@@ -942,6 +1152,9 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessSparseK
     // 4x + 1 = (2x + 2) + (2x - 1)
     // 4x + 2 = (2x + 2) + (2x)
     // 4x + 3 = (2x + 2) + (2x + 1)
+#if QSFA_RECENT_ROUTE_HOT
+    PrepareRecentQuery(runInfo, constInfo);
+#endif
     int64_t s2Start = sparseS2Start;
     int64_t s2 = sparseS2Start;
     bool meetEnd = false;
@@ -949,6 +1162,9 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessSparseK
     // 处理一个s2的base块
     while ((s2 < sparseS2End) && !meetEnd) { // 拷贝到s2End或者遇到-1
         int64_t dealRow = 0;
+#if QSFA_RECENT_ROUTE_HOT
+        recentHotMask = 0;
+#endif
         // 1、copy kv in, gm ->ub
         LocalTensor<KV_T> kvInUb = stage0InQue.AllocTensor<KV_T>();
         while (dealRow < Min(16, qsfaSparseCalSize) && s2<sparseS2End) { // 拷贝满16行或者遇到-1
@@ -973,10 +1189,18 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessSparseK
 
         // 2、dequant by vf
         LocalTensor<Q_T> kvDequantOutUb = stage0OutQue.AllocTensor<Q_T>();
+#if QSFA_RECENT_ROUTE_HOT
+        // Hot DMA writes only hot NZ rows; masked VF/Rope writes only cold
+        // rows. Reuse ownership is handed off BEFORE cold decode, not after.
+        ReadRecentHotRows(kvDequantOutUb, dealRow);
+        DequantKvRouted(kvDequantOutUb, kvInUb, dealRow, constInfo);
+        WaitRecentHotRows();
+#else
         DequantKv(kvDequantOutUb, kvInUb, dealRow, constInfo);
         if (recentEnabled) {
             OverlayRecentHotRows(kvDequantOutUb, dealRow, runInfo, constInfo);
         }
+#endif
         stage0InQue.FreeTensor(kvInUb);
         stage0OutQue.EnQue(kvDequantOutUb);
         kvDequantOutUb = stage0OutQue.DeQue<Q_T>();

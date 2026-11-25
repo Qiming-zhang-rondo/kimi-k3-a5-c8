@@ -32,6 +32,9 @@ QSFA_SINGLE_PASS_EXPORT uint32_t QsfaSinglePassAbiVersion(void);
 QSFA_SINGLE_PASS_EXPORT uint32_t QsfaSinglePassBuffersBytes(void);
 QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunch(void *stream, const SinglePassBuffers *buffers,
     uint32_t aicCount, uint32_t ringCapacity, uint32_t window);
+// Additive entry: same ABI1 descriptor; independent precision-routed kernel.
+QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchRouted(void *stream, const SinglePassBuffers *buffers,
+    uint32_t aicCount, uint32_t ringCapacity, uint32_t window);
 // Independent original native C4 kernel, compiled in a separate ASC TU.
 QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchCold(void *stream, const SinglePassBuffers *buffers,
     uint32_t aicCount, uint32_t ringCapacity, uint32_t window);

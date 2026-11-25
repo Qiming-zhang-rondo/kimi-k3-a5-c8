@@ -33,7 +33,7 @@ find_library(ACL_LIBRARY ascendcl PATHS "${SFA_SDK_ROOT}/aarch64-linux/lib64" "$
 if(NOT ACL_INCLUDE OR NOT ACL_LIBRARY)
     message(FATAL_ERROR "No matched ACL headers/library in SFA_SDK_ROOT")
 endif()
-add_library(qsfa_recent128_direct SHARED single_pass_wrapper.asc original_c4_wrapper.asc)
+add_library(qsfa_recent128_direct SHARED single_pass_wrapper.asc original_c4_wrapper.asc routed_single_pass_wrapper.asc)
 set_target_properties(qsfa_recent128_direct PROPERTIES POSITION_INDEPENDENT_CODE ON UNITY_BUILD OFF)
 target_compile_options(qsfa_recent128_direct PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
@@ -47,4 +47,4 @@ foreach(suffix "" "/include" "/include/basic_api" "/include/adv_api" "/include/i
     endif()
 endforeach()
 target_link_libraries(qsfa_recent128_direct PRIVATE m "${ACL_LIBRARY}" ascendc_runtime)
-message(STATUS "New standalone ABI1; C4 native producer + BF16 hot NZ overlay; one attention; no device validation claimed")
+message(STATUS "Standalone ABI1; separate overlay/routed entries with unchanged native C4 control; no device validation claimed")

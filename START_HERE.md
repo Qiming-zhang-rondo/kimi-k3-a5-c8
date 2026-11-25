@@ -1,4 +1,4 @@
-# 当前只推进真实模型框架精度，不再等待单算子摸高
+# 当前并行任务：真实模型精度 + 冷热互斥读取
 
 用户最新要求是直接接框架使用。单遍算子源码已完成；7a2fad回传摘要报告AIC4/W12894.66µs、installed两遍107.45µs、精度PASS。尚未证明赢过所有历史最强，冠军A/B不再是框架接入前置。
 
@@ -9,3 +9,7 @@
 这是accuracy_eager测试版，包含CPU参考和head补齐；不能拿它测TPOT或称图/并发/MTP/PD已完成。保留PrologV3默认选择，若显式共同NATIVE精度实验必须OFF/ON同设置且在权重转换前。单遍数学.01门槛与standalone一致，旧ABI4 .001门槛不变。
 
 可选冠军对比脚本 experimental/single_pass/run_champion_ab.py 分别提供prepared_read和write_read同轮AB/BA，旧ABI4最强cold-store路径保留；只有用户后续需要再跑，不阻塞模型精度。singlepass脚本今后自动产生evidence_summary.json，请上传机器生成小证据，不再只手写15行summary。生产适配和算子团队交接以真实模型精度结果为准。
+
+## 用户重新开启读取优化（不阻塞框架任务）
+
+新增同库独立routed入口，热行跳过C4读取和解码。按 [experimental/single_pass/ROUTED_READ_TASK.md](experimental/single_pass/ROUTED_READ_TASK.md) 隔离构建，`--routed-ab` 先精度后Q4同轮graph配对。保留原overlay入口及已有94µs报告，不承诺新延迟。模型接入继续用已验证overlay库，新候选通过前不默认替换。禁止自动重跑历史扫描或让用户逐项中转。

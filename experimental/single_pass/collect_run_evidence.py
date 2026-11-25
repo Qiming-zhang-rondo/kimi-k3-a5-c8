@@ -42,6 +42,7 @@ def collect(path):
         all_accuracy_controls_passed=data.get("all_accuracy_controls_passed"),controls=controls,
         cross_checks={name:{key:value[key] for key in METRICS if key in value}
                      for name,value in data.get("cross_checks",{}).items()},
+        routed_pattern_controls=data.get("routed_pattern_controls"),
         graph_controls={name:{key:value[key] for key in METRICS if key in value}
                         for name,value in data.get("graph_controls",{}).items()},
         timings=pairs,traceback=data.get("traceback"),performance_scope=data.get("performance_scope"),

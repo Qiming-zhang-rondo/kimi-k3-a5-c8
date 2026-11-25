@@ -1,0 +1,29 @@
+{
+  "candidate": "single-pass mutually exclusive C4/BF16 row routing",
+  "local_status": "HOST_CHECKS_PASS",
+  "tests": {
+    "single_pass": 12,
+    "single_pass_math_contract": 7,
+    "framework_regression": 37,
+    "actual_loader_memory_scenarios": 66,
+    "original_native_source_files_unchanged": 41
+  },
+  "validated_locally": [
+    "Actual scalar loader and VF row loop compiled in a host memory model",
+    "Hot rows neither DMA nor consume packed C4 bytes",
+    "Cold rows preserve packed400, BF16 NZ latent and RoPE layout",
+    "All-cold, all-hot, mixed, pair reordering, tail, tags and ring wrap",
+    "Distinct overlay/routed dispatch; original TopK retained for timings",
+    "A5 control permutations preserve exact selected membership"
+  ],
+  "not_validated_locally": [
+    "AscendC AIC/AIV compilation",
+    "MicroAPI floating-point lowering",
+    "Hardware pipeline synchronization",
+    "NPU accuracy and paired performance",
+    "Real model accuracy and serving performance"
+  ],
+  "device_status": "NOT_RUN",
+  "performance": "NOT_MEASURED",
+  "default_reader": "preserved measured overlay; routed is opt-in"
+}
