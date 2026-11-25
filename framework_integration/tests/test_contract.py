@@ -171,6 +171,29 @@ class Recent128ContractTest(unittest.TestCase):
         self.assertEqual(fusion_eligibility(eligible, **dict(args, library_available=False)).reason,
                          "library_unavailable")
 
+    def test_single_pass_config_requires_paths_and_bypasses_old_hot128_abi4_gate(self):
+        values = dict(window=128, reader="single_pass", library_dir="/tmp/single-pass-build",
+                      source_root="/tmp/operator-source", diagnostics_path="/tmp/recent128-single-pass",
+                      preprocess="native_accuracy")
+        cfg = parse_recent128_config({"sfa_recent128": values})
+        self.assertEqual(cfg.reader, "single_pass")
+        self.assertEqual(cfg.preprocess, "native_accuracy")
+        for name in ("library_dir", "source_root", "diagnostics_path"):
+            incomplete = dict(values)
+            del incomplete[name]
+            with self.subTest(missing=name), self.assertRaises(ContractError):
+                parse_recent128_config({"sfa_recent128": incomplete})
+        # This helper delegates to the dedicated whole-TopK runtime; it cannot
+        # bless an old ABI4 hot merge even when that old count128 gate matches.
+        for count in (0, 1, 127, 128):
+            decision = fusion_eligibility(cfg, hot_count=count, heads=64, latent_dim=512,
+                                          rope_dim=64, query_count=4, library_available=True)
+            self.assertFalse(decision.use_fused)
+            self.assertEqual(decision.reason, "single_pass_whole_topk_runtime")
+        delegated = fusion_eligibility(cfg, hot_count=128, heads=32, latent_dim=512,
+                                      rope_dim=0, query_count=4, library_available=False)
+        self.assertEqual(delegated.reason, "single_pass_whole_topk_runtime")
+
 
 if __name__ == "__main__":
     unittest.main()

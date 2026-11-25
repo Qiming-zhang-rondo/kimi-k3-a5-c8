@@ -11,10 +11,12 @@ import atexit
 from collections import Counter
 from functools import lru_cache
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sys
 from weakref import WeakSet
 
 import numpy as np
@@ -43,6 +45,23 @@ def load_bridge(source_root, library_dir):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.load_sfa_direct(library_dir)
+
+
+@lru_cache(maxsize=4)
+def load_single_pass_math(source_root):
+    path=Path(source_root).expanduser().resolve()/"experimental/single_pass/host_contract.py"
+    name="recent128_single_pass_math_"+hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    spec=importlib.util.spec_from_file_location(name,path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Missing independent single-pass mathematical reference")
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[name]=module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name,None)
+        raise
+    return module
 
 
 def normalize_state(result, *, rows, heads, dim):
@@ -78,8 +97,12 @@ def merge_states(cold, hot, cold_present, hot_present):
 
 def comparison(actual, expected):
     """Full tensor gate; zero/tiny reference rows retain an absolute guard."""
-    a = actual.detach().float().cpu().numpy().astype(np.float64)
-    b = expected.detach().float().cpu().numpy().astype(np.float64)
+    return comparison_arrays(actual.detach().float().cpu().numpy(),expected.detach().float().cpu().numpy())
+
+
+def comparison_arrays(actual, expected, limit=.001):
+    a = np.asarray(actual,dtype=np.float64)
+    b = np.asarray(expected,dtype=np.float64)
     if a.shape != b.shape or not np.isfinite(a).all() or not np.isfinite(b).all():
         return {"passed": False, "reason": "shape_or_nonfinite"}
     delta = a - b
@@ -90,7 +113,7 @@ def comparison(actual, expected):
     rel = abs_norm / np.maximum(ref_norm, 1e-12)
     global_l2 = float(np.linalg.norm(delta) / max(float(np.linalg.norm(b)), 1e-12))
     worst = float(rel.max(initial=0))
-    return {"passed": global_l2 <= .001 and worst <= .001,
+    return {"passed": global_l2 <= limit and worst <= limit,
             "relative_l2": global_l2, "worst_row_relative_l2": worst,
             "max_abs": float(np.abs(delta).max(initial=0))}
 
@@ -121,6 +144,7 @@ class Recent128Runtime:
         self.tags = np.full(config.capacity, -1, np.int64)
         self.hot = self.rope = self.table = self.kv_lengths = None
         self.bridge = None
+        self.single_pass_reader = None
         self.plans = {}
         self.counts = Counter()
         self.reasons = Counter()
@@ -130,7 +154,10 @@ class Recent128Runtime:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         layer = re.sub(r"[^A-Za-z0-9_.-]", "_", str(getattr(impl, "layer_name", "unnamed")))
         self.report = self.report_dir / f"recent128-{os.getpid()}-{layer}.json"
-        if config.reader != "native":
+        if config.reader == "single_pass":
+            from .single_pass_reader import SinglePassReader
+            self.single_pass_reader=SinglePassReader(config,impl)
+        elif config.reader != "native":
             if not config.library_dir:
                 raise RuntimeError("fused reader requires library_dir; native fallback is not a library substitute")
             self.bridge = load_bridge(config.source_root, config.library_dir)
@@ -150,11 +177,15 @@ class Recent128Runtime:
             fusion_status="EXERCISED" if self.counts["fused_rows"] else "NOT_EXERCISED",
             fusion_coverage=self.counts["fused_rows"] / max(self.counts["query_rows"], 1),
             control_max=self.control_max, failure=self.failed,
+            control_limit=.01 if self.single_pass_reader is not None else .001,
+            control_scope="full_FP64_whole_selected_set" if self.single_pass_reader is not None else "compact_native_twopass",
             prolog_changed=self.config.preprocess == "native_accuracy",
             preprocess=self.config.preprocess,
             native_quantizer_changed=False, topk_changed=False,
             performance_claim=False,
-            library_identity=getattr(self.bridge, "_sfa_build_identity", None))
+            library_identity=(self.single_pass_reader.bridge_identity if self.single_pass_reader is not None
+                              else getattr(self.bridge, "_sfa_build_identity", None)),
+            single_pass_last_call=(self.single_pass_reader.last_call_metadata if self.single_pass_reader is not None else None))
         temporary = self.report.with_suffix(".tmp")
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(self.report)
@@ -246,9 +277,73 @@ class Recent128Runtime:
             self.counts["head_padding_rows"] += n * (64-size)
         return output
 
+    def _read_single_pass(self, query, q_rope, cache, topk, table, q_lengths, k_lengths, ids_cpu):
+        """One candidate attention per head group; CPU math is a full control.
+
+        This is explicitly an accuracy harness. It gathers only selected cold
+        pages for its independent FP64 oracle, and never invokes a second NPU
+        attention to manufacture the candidate output.
+        """
+        import torch
+        if q_rope is None or q_rope.shape[-1] != 64 or cache.shape[-1] != 400:
+            self._error("Single-pass prototype requires real R64/packed400; R0/272B is not silently adapted")
+        n,heads,_=query.shape
+        positions=self.step.positions.copy()
+        logical_keys=self.end
+        logical_pages=(logical_keys+127)//128
+        table_cpu=table.detach().cpu().numpy()
+        if table_cpu.ndim!=2 or table_cpu.shape[0]!=1 or table_cpu.shape[1]<logical_pages:
+            self._error("Single-pass page table does not cover the logical sequence")
+        active=table_cpu[0,:logical_pages].astype(np.int64,copy=False)
+        if np.any(active<0) or np.any(active>=cache.shape[0]):
+            self._error("Single-pass logical page maps outside the original C4 allocation")
+        if np.any((ids_cpu>=0)&(ids_cpu>positions[:,None,None])):
+            self._error("Single-pass original TopK contains future IDs; refusing to alter its membership")
+        valid=ids_cpu[ids_cpu>=0]
+        if any(not np.any(row>=0) for row in ids_cpu[:,0]):
+            self._error("First single-pass model prototype requires at least one valid selection in every query")
+        selected_pages=np.unique(valid//128)
+        physical_pages=active[selected_pages]
+        gather=torch.as_tensor(physical_pages,device=query.device,dtype=torch.int64)
+        cold_cpu=cache.index_select(0,gather).view(torch.uint8).cpu().numpy()
+        compact_table=np.zeros((1,logical_pages),dtype=np.int32)
+        compact_table[0,selected_pages]=np.arange(len(selected_pages),dtype=np.int32)
+        hot_cpu=self.hot.detach().float().cpu().numpy()
+        rope_cpu=self.rope.detach().float().cpu().numpy()
+        q_cpu=query.detach().float().cpu().numpy()
+        qr_cpu=q_rope.detach().float().cpu().numpy()
+        math_module=load_single_pass_math(self.config.source_root)
+        contract=math_module.SinglePassContract(queries=n,keys=logical_keys,topk=ids_cpu.shape[-1],
+            ring_capacity=self.config.capacity,window=128,aic_count=1,scale=float(self.impl.scale))
+        reference=np.empty((n,heads,512),dtype=np.float64)
+        for start in range(0,heads,64):
+            count=min(64,heads-start)
+            q=np.zeros((n,64,576),dtype=np.float32)
+            q[:,:count,:512]=q_cpu[:,start:start+count]
+            q[:,:count,512:]=qr_cpu[:,start:start+count]
+            values=math_module.dense_attention_reference(contract,query=q,cold_packed=cold_cpu,
+                block_table=compact_table,topk=ids_cpu,positions=positions,
+                hot_latent=hot_cpu,hot_rope=rope_cpu,hot_tags=self.tags)
+            reference[:,start:start+count]=values["output"][:,:count]
+        tags=torch.as_tensor(self.tags,device=query.device,dtype=torch.int64)
+        pos=torch.as_tensor(positions,device=query.device,dtype=torch.int64)
+        result=self.single_pass_reader.read(query,q_rope,cache,topk,table,q_lengths,k_lengths,
+            self.hot,self.rope,tags,pos,self.config.capacity)
+        metrics=comparison_arrays(result.detach().float().cpu().numpy(),reference,limit=.01)
+        if not metrics["passed"]:
+            self._error("Single-pass model attention failed full FP64 matching math: "+json.dumps(metrics))
+        for name in self.control_max:
+            self.control_max[name]=max(self.control_max[name],metrics[name])
+        self.counts["fused_rows"]+=n
+        self.counts["fused_kernel_calls"]+=self.single_pass_reader.last_attention_calls
+        self.counts["candidate_attention_calls"]+=self.single_pass_reader.last_attention_calls
+        self.counts["full_math_checked_rows"]+=n
+        # The mathematical reference is on CPU; validation_attention_calls=0.
+        self.counts["validation_attention_calls"]+=0
+        return result
+
     def read(self, query, q_rope, kv_cache, topk, metadata, q_lengths, k_lengths, block_table):
         import torch
-        from ascend_vllm.patch.worker.patch_device_op import _get_mxfp4_entry, _mxfp4_read
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         if bool(_EXTRA_CTX.capturing):
             self._error("accuracy_eager integration must not enter graph capture")
@@ -261,8 +356,30 @@ class Recent128Runtime:
         ql = q_lengths.detach().cpu().numpy().reshape(-1)
         if lengths.tolist() != [self.end] or ql.tolist() != [n]:
             self._error("Attention sequence metadata differs from raw-KV write metadata")
-        parts = partition_reference(topk.detach().cpu().numpy(), positions=self.step.positions,
+        ids_cpu=topk.detach().cpu().numpy()
+        parts = partition_reference(ids_cpu, positions=self.step.positions,
             tags=self.tags, window=128, capacity=self.config.capacity)
+        if self.single_pass_reader is not None:
+            cache=kv_cache[0]
+            page=int(metadata.block_size)
+            if page!=128:
+                self._error("Single-pass model prototype requires page128 metadata")
+            cache=cache.view(-1,page,*cache.shape[2:])
+            if cache.element_size()!=1:
+                self._error("Single-pass packed C4 storage must have one-byte elements")
+            cache=cache.view(torch.int8) # raw-byte reinterpretation, never a numeric FP8 cast.
+            table=metadata.block_table if block_table is None else block_table
+            result=self._read_single_pass(query,q_rope,cache,topk,table,q_lengths,k_lengths,ids_cpu)
+            self.counts["read_calls"]+=1
+            self.counts["query_rows"]+=n
+            self.counts["cold_only_rows"]+=int(np.sum(parts["recent_counts"]==0))
+            self.counts["mixed_rows"]+=int(np.sum(parts["recent_present"]&parts["old_present"]))
+            self.counts["hot_only_rows"]+=int(np.sum(parts["recent_present"]&~parts["old_present"]))
+            self.step=None
+            if self.counts["read_calls"]==1 or self.counts["read_calls"]%128==0:
+                self.flush()
+            return result
+        from ascend_vllm.patch.worker.patch_device_op import _get_mxfp4_entry, _mxfp4_read
         device = query.device
         to_device = lambda a, dtype: torch.as_tensor(a, device=device, dtype=dtype).contiguous()
         old = to_device(parts["old"], torch.int32)

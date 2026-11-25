@@ -1,0 +1,22 @@
+{
+  "status": "FRAMEWORK_SINGLE_PASS_HOST_CHECKED",
+  "timestamp_utc": "2026-11-25T07:54:28.571603+00:00",
+  "framework_tests_passed": 37,
+  "champion_optional_helper_tests_passed": 3,
+  "npu_model_execution": "NOT_RUN",
+  "model_accuracy": "NOT_MEASURED",
+  "production_ready": false,
+  "candidate_npu_attention_calls": "ceil(local_heads/64) per forward; one when local_heads<=64",
+  "validation_npu_attention_calls": 0,
+  "matching_reference": "all query/head rows, original TopK and actual C4 bytes, full FP64 softmax",
+  "mathematical_gate": 0.01,
+  "old_abi4_native_equivalence_gate_unchanged": 0.001,
+  "scope": "accuracy_eager B1 R64 packed400; head padding, selected-page CPU math; not TPOT",
+  "source_sha256": {
+    "framework_integration/sfa_recent128/runtime.py": "d2c04139fedeba104557fefd6b2f090b89a96233d6895fcce16b5f421621eb16",
+    "framework_integration/sfa_recent128/contract.py": "05b60f103ff8bb634f24a1303cb4d2c5f73302db0907c7e326faf20e485f981b",
+    "framework_integration/sfa_recent128/single_pass_reader.py": "bc1802a8ac552de3d3198688dd71a55d925151476075e98ccacff56ba94b7781",
+    "framework_integration/run_model_probe.py": "89466b5ffce75a69e322102be22f8148172ab4009ea54d2d8774c8ac560b5861",
+    "framework_integration/collect_framework_evidence.py": "a6b18be795182be66e58d6efe64b46e1977f197f85fc6f6fcfa3cbedf120f539"
+  }
+}

@@ -49,7 +49,7 @@ def engine_options(options, *, arm, source_root, library_dir, diagnostics, max_q
         raise ValueError("additional_config must be a JSON object")
     additional["sfa_recent128"] = dict(window=0 if arm == "off" else 128,
         execution="accuracy_eager", max_query_chunk=max_query_chunk,
-        reader="native" if arm in ("off", "native") else "fused_required",
+        reader="native" if arm in ("off", "native") else ("single_pass" if arm=="single_pass" else "fused_required"),
         preprocess="native_accuracy" if native_accuracy_preprocess else "preserve",
         source_root=str(source_root), library_dir=str(library_dir) if library_dir else None,
         diagnostics_path=str(diagnostics))
@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--mxllm-root", type=Path, required=True)
     parser.add_argument("--operator-source", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--library-dir", type=Path)
-    parser.add_argument("--arm", choices=("off", "native", "fused"), required=True)
+    parser.add_argument("--arm", choices=("off", "native", "fused", "single_pass"), required=True)
     parser.add_argument("--max-query-chunk", type=int, default=512)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--native-accuracy-preprocess", action="store_true",

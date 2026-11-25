@@ -25,9 +25,18 @@ def collect(directory, *, require_fusion=True):
         if require_fusion and (not layer.get("fusion_exercised") or counts.get("fused_rows", 0) <= 0
                                or counts.get("fused_kernel_calls", 0) <= 0):
             problems.append(dict(file=path.name, reason="fusion not exercised in this layer/rank"))
+        single_pass=layer.get("reader")=="single_pass"
+        if single_pass and (layer.get("control_scope")!="full_FP64_whole_selected_set"
+                            or layer.get("control_limit")!=.01
+                            or counts.get("query_rows",0)<=0
+                            or counts.get("full_math_checked_rows")!=counts.get("query_rows")
+                            or counts.get("candidate_attention_calls",0)<=0
+                            or counts.get("validation_attention_calls")!=0):
+            problems.append(dict(file=path.name,reason="single-pass full mathematical control/coverage missing"))
+        limit=.01 if single_pass else .001
         for name in ("relative_l2", "worst_row_relative_l2"):
             metric = layer.get("control_max", {}).get(name)
-            if not isinstance(metric, (int, float)) or not math.isfinite(metric) or not 0 <= metric <= .001:
+            if not isinstance(metric, (int, float)) or not math.isfinite(metric) or not 0 <= metric <= limit:
                 problems.append(dict(file=path.name, reason="invalid or failing native control " + name))
     keys = set().union(*(layer.get("counters", {}) for layer in layers))
     totals = {key:sum(layer.get("counters", {}).get(key, 0) for layer in layers) for key in sorted(keys)}

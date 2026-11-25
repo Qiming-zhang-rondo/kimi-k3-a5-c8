@@ -216,7 +216,14 @@ def main(argv=None):
             marker.write_text(json.dumps(dict(status="DEVICE_FAULT",results=str(args.output/"results.json")))+"\n")
             report["device_fault_marker"]=str(marker)
     persist()
-    print(json.dumps(dict(status=report["status"],results=str(args.output/"results.json"))))
+    # Always emit a machine-generated small handoff; a handwritten latency
+    # summary cannot establish which library/core count was actually tested.
+    from collect_run_evidence import collect,portable
+    evidence=args.output/"evidence_summary.json"
+    evidence.write_text(json.dumps(portable(collect(args.output/"results.json")),
+        ensure_ascii=False,indent=2,allow_nan=False)+"\n")
+    print(json.dumps(dict(status=report["status"],results=str(args.output/"results.json"),
+                          evidence_summary=str(evidence))))
     return 0 if report["status"] in ("VALIDATED_ONLY","MEASURED") else 1
 
 

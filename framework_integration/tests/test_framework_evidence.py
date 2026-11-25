@@ -87,5 +87,19 @@ class FrameworkEvidenceTests(unittest.TestCase):
         self.assertEqual(result["counters"]["fused_rows"],0)
         self.assertEqual(result["model_accuracy"],"NOT_MEASURED")
 
+    def test_single_pass_uses_whole_math_gate_and_requires_full_row_coverage(self):
+        self.layer(reader="single_pass",control_scope="full_FP64_whole_selected_set",control_limit=.01,
+            counters=dict(read_calls=2,query_rows=256,fused_rows=256,fused_kernel_calls=2,
+                          full_math_checked_rows=256,candidate_attention_calls=2,validation_attention_calls=0),
+            control_max=dict(relative_l2=.002,worst_row_relative_l2=.003,max_abs=.01))
+        self.assertEqual(collector.collect(self.root)["status"],"WIRING_VALIDATED")
+        # The old compact-native contract stays strict at .001.
+        self.layer(control_max=dict(relative_l2=.002,worst_row_relative_l2=.003,max_abs=.01))
+        self.assertEqual(collector.collect(self.root)["status"],"FAILED")
+        self.layer(reader="single_pass",control_scope="full_FP64_whole_selected_set",control_limit=.01,
+            counters=dict(read_calls=2,query_rows=256,fused_rows=256,fused_kernel_calls=2,
+                          full_math_checked_rows=1,candidate_attention_calls=2,validation_attention_calls=0))
+        self.assertEqual(collector.collect(self.root)["status"],"FAILED")
+
 
 if __name__=="__main__": unittest.main()

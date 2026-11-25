@@ -43,8 +43,8 @@ class Recent128Config:
             raise ContractError("Only execution='accuracy_eager' is implemented; no serving-performance claim")
         if self.preprocess not in ("preserve", "native_accuracy"):
             raise ContractError("preprocess must be preserve or native_accuracy; the explicit override is offline accuracy only")
-        if self.reader not in ("native", "fused_eligible", "fused_required"):
-            raise ContractError("reader must be native, fused_eligible or fused_required")
+        if self.reader not in ("native", "fused_eligible", "fused_required", "single_pass"):
+            raise ContractError("reader must be native, fused_eligible, fused_required or single_pass")
         for name in ("library_dir", "source_root", "diagnostics_path"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -52,7 +52,7 @@ class Recent128Config:
         if self.enabled and self.diagnostics_path is None:
             raise ContractError("Enabled recent128 requires diagnostics_path for explicit fusion coverage and native fallback reasons")
         if self.enabled and self.reader != "native" and (self.library_dir is None or self.source_root is None):
-            raise ContractError("A fused reader needs library_dir and source_root; the runtime must load and verify the real library")
+            raise ContractError("A non-native reader needs library_dir and source_root; the runtime must load and verify the real library")
 
     @property
     def enabled(self):
@@ -228,11 +228,18 @@ def fusion_eligibility(config, *, hot_count, heads, latent_dim, rope_dim,
     requires a real loaded library and fusion for every eligible group; it does
     not invent hot tokens to turn counts0..127 into count128. Callers must report
     row counts/reasons and mark fusion NOT_EXERCISED if fused_rows stays zero.
+
+    single_pass is a separate whole-TopK operator/runtime, not the old ABI4 hot
+    merge. It never uses this helper's count128 gate. The dedicated reader
+    validates its actual B1/R64 contract and explicit local-head padding before
+    calling the new ABI; those accuracy-only adapters confer no serving claim.
     """
     if not config.enabled:
         return FusionDecision(False, "window_disabled")
     if config.reader == "native":
         return FusionDecision(False, "reader_native")
+    if config.reader == "single_pass":
+        return FusionDecision(False, "single_pass_whole_topk_runtime")
     if not library_available:
         if config.reader == "fused_required":
             raise ContractError("fused_required could not load the real direct library")

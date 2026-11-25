@@ -1,5 +1,9 @@
 # recent128 框架精度接入候选
 
+当前优先执行 [SINGLE_PASS_FRAMEWORK_TASK.md](SINGLE_PASS_FRAMEWORK_TASK.md)。新增 `--arm single_pass` 接入ABI1整TopK单遍reader；旧 `--arm fused` 保留为ABI4热读＋冷态归约对照。单遍框架源码已接线，实际模型仍待内网验证。
+
+单遍精度模式使用所有行的独立FP64完整softmax数学参考（.01，与standalone一致），不调用NPU冷读/热读来生成候选或参考；旧ABI4的.001 compact-native门槛保持。物理C4 pool完整保留、逻辑页表按原映射传递；CPU参考只取TopK选中页，检查缺失BF16 tags和future索引。当前仅R64/packed400，NoPE0显式拒绝。该测试入口包含CPU参考和head补齐，不代表生产性能。
+
 从单算子进入真实模型验证。策略保持 **C4 冷 KV + 原始 BF16 recent128**，模型原来的 TopK、Hadamard 权重和 MXFP4 量化参数均不改动。
 
 这次交付是实际 MXLLM worker overlay、原生 BF16 写点、attention 替换、融合入口调用及模型 smoke。**尚未在实际模型上运行，不是生产性能交付。** 内网执行任务见 [FRAMEWORK_EXECUTION_TASK.md](FRAMEWORK_EXECUTION_TASK.md)，无需用户逐项搬运依赖和错误。
