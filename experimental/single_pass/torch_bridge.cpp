@@ -18,6 +18,7 @@
 // an explicit routed run requires the rebuilt three-entry library.
 #if defined(__ELF__)
 #pragma weak QsfaSinglePassLaunchRouted
+#pragma weak QsfaSinglePassLaunchFastPair
 #endif
 
 namespace {
@@ -45,6 +46,8 @@ pybind11::dict Configuration() {
     out["overlay_reader_entry"]="QsfaSinglePassLaunch";
     out["routed_reader_entry"]="QsfaSinglePassLaunchRouted";
     out["routed_reader_available"]=QsfaSinglePassLaunchRouted != nullptr;
+    out["fast_pair_reader_entry"]="QsfaSinglePassLaunchFastPair";
+    out["fast_pair_reader_available"]=QsfaSinglePassLaunchFastPair != nullptr;
     out["default_reader"]="overlay";
     return out;
 }
@@ -81,7 +84,8 @@ public:
     State Run(const at::Tensor& query,const at::Tensor& cold,const at::Tensor& indices,
               const at::Tensor& table,const at::Tensor& actualQuery,const at::Tensor& actualKv,
               const at::Tensor& hotLatent,const at::Tensor& hotRope,const at::Tensor& tags,
-              const at::Tensor& positions,int64_t window=128,bool coldOnly=false,bool routed=false) {
+              const at::Tensor& positions,int64_t window=128,bool coldOnly=false,bool routed=false,
+              bool fastPair=false) {
         Check(query,device_,{q_,64,576},at::kBFloat16,"query");
         Check(cold,device_,{keys_/128,128,1,400},at::kChar,"cold");
         Check(indices,device_,{q_,1,2048},at::kInt,"indices");
@@ -94,9 +98,12 @@ public:
         Check(positions,device_,{q_},at::kLong,"query_positions");
         TORCH_CHECK(window==0 || window==128,"Prototype supports W0/W128 only");
         TORCH_CHECK(!coldOnly || window==0,"Original C4 control requires window=0");
-        TORCH_CHECK(!coldOnly || !routed,"Original C4 control cannot select the routed entry");
+        TORCH_CHECK(static_cast<int>(coldOnly)+static_cast<int>(routed)+static_cast<int>(fastPair)<=1,
+                    "Choose one of original C4, routed, or fast-pair entries");
         TORCH_CHECK(!routed || QsfaSinglePassLaunchRouted != nullptr,
                     "Routed reader requires the rebuilt three-entry shared library");
+        TORCH_CHECK(!fastPair || QsfaSinglePassLaunchFastPair != nullptr,
+                    "Fast-pair reader requires the rebuilt four-entry shared library");
         const std::initializer_list<at::Tensor> inputs={query,cold,indices,table,actualQuery,actualKv,
             hotLatent,hotRope,tags,positions};
         for (const auto& written:{output_,maximum_,sum_,workspace_,tiling_}) {
@@ -123,6 +130,7 @@ public:
         for (const auto& value:{output_,maximum_,sum_,workspace_,tiling_})
             c10_npu::NPUCachingAllocator::recordStream(value.storage().data_ptr(),stream);
         const int code=coldOnly ? QsfaSinglePassLaunchCold(raw,&buffers,aic_,capacity_,window)
+            : fastPair ? QsfaSinglePassLaunchFastPair(raw,&buffers,aic_,capacity_,window)
             : routed ? QsfaSinglePassLaunchRouted(raw,&buffers,aic_,capacity_,window)
                      : QsfaSinglePassLaunch(raw,&buffers,aic_,capacity_,window);
         TORCH_CHECK(code==0,"Single-pass C entry rejected launch descriptor");
@@ -148,7 +156,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,module) {
             pybind11::arg("actual_kv"),pybind11::arg("hot_latent"),pybind11::arg("hot_rope"),
             pybind11::arg("ring_tags"),pybind11::arg("query_positions"),
             pybind11::arg("window")=128,pybind11::arg("cold_only")=false,
-            pybind11::arg("routed")=false)
+            pybind11::arg("routed")=false,pybind11::arg("fast_pair")=false)
         .def("outputs",&Prepared::Outputs);
     module.def("prepare",[](const at::Tensor& query,int64_t keys,int64_t capacity,
                             int64_t aic,double scale,bool stats) {

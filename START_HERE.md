@@ -13,3 +13,7 @@
 ## 用户重新开启读取优化（不阻塞框架任务）
 
 新增同库独立routed入口，热行跳过C4读取和解码。按 [experimental/single_pass/ROUTED_READ_TASK.md](experimental/single_pass/ROUTED_READ_TASK.md) 隔离构建，`--routed-ab` 先精度后Q4同轮graph配对。保留原overlay入口及已有94µs报告，不承诺新延迟。模型接入继续用已验证overlay库，新候选通过前不默认替换。禁止自动重跑历史扫描或让用户逐项中转。
+
+## 最新读取优化：cold-pair快速路径
+
+e6ae40c的同库原始证据确认routed117.64µs，比overlay97.64µs慢20.5%，输出一致。当前有效实现仍用overlay，不能把旧routed称优化成功。用户授权继续实现冷pair直接原生搬运，最新任务为 [experimental/single_pass/FAST_PAIR_TASK.md](experimental/single_pass/FAST_PAIR_TASK.md)。先Q4同库三臂精度/graph配对，`--fast-pair-ab`；保留所有原始结果。80µs只是争取目标，未测前不宣称达到。框架模型精度继续并行，不等待本轮摸高。

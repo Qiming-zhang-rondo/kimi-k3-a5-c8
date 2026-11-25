@@ -1,0 +1,20 @@
+{
+  "candidate": "cold-pair native DMA fast path",
+  "status": "HOST_CHECKS_PASS",
+  "single_pass_tests": 13,
+  "mathematical_contract_tests": 7,
+  "framework_regression_tests": 37,
+  "actual_loader_scenarios": 132,
+  "memory_contract": [
+    "Fast mode does not materialize token row map",
+    "Cold slots stay poisoned and are never consumed",
+    "Cold pairs do not resolve slots or read tags",
+    "Hot rows neither transfer nor decode C4",
+    "Physical pair order, latent/RoPE NZ and guard rows preserved"
+  ],
+  "controls": "preserved overlay and routed-v1 in the same shared library",
+  "device_compile": "NOT_RUN",
+  "device_accuracy": "NOT_RUN",
+  "paired_performance": "NOT_MEASURED",
+  "target_80us": "OPTIMIZATION_GOAL; no measured guarantee"
+}

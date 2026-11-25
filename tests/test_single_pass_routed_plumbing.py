@@ -24,11 +24,12 @@ class FakePlan:
 class RoutedPlumbingTest(unittest.TestCase):
     def test_default_keeps_original_and_overlay_only(self):
         modes=RUNNER.plan_modes()
-        self.assertEqual(modes,dict(original_c4_direct=(0,True,False),
-            single_pass_w0=(0,False,False),single_pass_w128=(128,False,False)))
+        self.assertEqual(modes,dict(original_c4_direct=(0,True,False,False),
+            single_pass_w0=(0,False,False,False),single_pass_w128=(128,False,False,False)))
         args=RUNNER.parser().parse_args(["--payload-dir","payload","--library","lib.so",
             "--output","out","--device","npu:0"])
         self.assertFalse(args.routed_ab)
+        self.assertFalse(args.fast_pair_ab)
 
     def test_ab_calls_bind_distinct_plans_modes_and_shared_inputs(self):
         modes=RUNNER.plan_modes(True)
@@ -40,9 +41,22 @@ class RoutedPlumbingTest(unittest.TestCase):
         for name in reversed(list(calls)):
             self.assertEqual(calls[name](),name)
             self.assertEqual(plans[name].calls,[inputs+modes[name]])
-        self.assertEqual(modes["single_pass_w128"],(128,False,False))
-        self.assertEqual(modes["single_pass_w128_routed"],(128,False,True))
+        self.assertEqual(modes["single_pass_w128"],(128,False,False,False))
+        self.assertEqual(modes["single_pass_w128_routed"],(128,False,True,False))
         self.assertEqual(RUNNER.plan_modes(),{k:v for k,v in modes.items() if not v[2]})
+
+    def test_fast_pair_adds_distinct_entry_without_replacing_previous_routed(self):
+        modes=RUNNER.plan_modes(fast_pair_ab=True)
+        self.assertEqual({k:v for k,v in modes.items() if not v[3]},RUNNER.plan_modes(True))
+        self.assertEqual(modes["single_pass_w128_fast_pair"],(128,False,False,True))
+        plans={name:FakePlan(name) for name in modes}
+        inputs=tuple(object() for _ in range(10))
+        calls=RUNNER.plan_calls(plans,inputs,modes)
+        for name in reversed(list(calls)):
+            self.assertEqual(calls[name](),name)
+            self.assertEqual(plans[name].calls,[inputs+modes[name]])
+        for mode in modes.values():
+            self.assertLessEqual(sum(mode[1:]),1)
 
     def test_correctness_patterns_preserve_multiset_and_exercise_tile_routes(self):
         positions=np.array([8190,8191],dtype=np.int64)

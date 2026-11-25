@@ -18,6 +18,9 @@
 #ifndef QSFA_RECENT_ROUTE_HOT
 #define QSFA_RECENT_ROUTE_HOT 0
 #endif
+#ifndef QSFA_RECENT_ROUTE_FAST_PAIR
+#define QSFA_RECENT_ROUTE_FAST_PAIR 0
+#endif
 
 // Experimental single-pass Recent128 candidate, derived from the matched C4 source
 // exported at 42178380e76cbe3b10605e2c10cf17c0135b8a0e. Not SDK/device validated.
@@ -179,7 +182,9 @@ private:
 
     // The C4 pair loader may swap logical tokens to coalesce physical DMA.
     // Track exactly that produced row order; never assume original TopK order.
+#if !QSFA_RECENT_ROUTE_FAST_PAIR
     int64_t recentTileTokens[16];
+#endif
     bool recentEnabled = false;
     int64_t recentRingCapacity = 0;
     int64_t recentWindow = 0;
@@ -189,8 +194,10 @@ private:
     GlobalTensor<int64_t> recentPositionsGm;
     TEventID recentVToMte2;
     TEventID recentMte2ToMte3;
+#if !QSFA_RECENT_ROUTE_FAST_PAIR
     __aicore__ inline void OverlayRecentHotRows(LocalTensor<Q_T> kvNz,
         int64_t rows, const RunInfo &runInfo, const ConstInfo &constInfo);
+#endif
 #if QSFA_RECENT_ROUTE_HOT
     bool recentRouteActive = false;
     int64_t recentQueryPosition = -1;
@@ -363,13 +370,54 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t Recent128QSFAVectorService<T
         (keyOffset1 - keyOffset0)) * sizeof(KV_T) - combineBytes;
     // W0 must not materialize the hot row map: preserve the native C4
     // gather/dequant path without per-token scalar array writes.
+#if !QSFA_RECENT_ROUTE_FAST_PAIR
     if (recentEnabled) {
         recentTileTokens[startRow] = keyOffset0 >= 0 ? token0Idx : token1Idx;
         if (keyOffset0 >= 0 && keyOffset1 >= 0) {
             recentTileTokens[startRow + 1] = token1Idx;
         }
     }
-#if QSFA_RECENT_ROUTE_HOT
+#endif
+#if QSFA_RECENT_ROUTE_FAST_PAIR
+    if (recentRouteActive) {
+        // Keep the overwhelmingly common cold pair on native DMA. In
+        // particular, do not build token/slot arrays before issuing its copy.
+        const bool candidate0 = token0Idx >= recentQueryFirst && token0Idx <= recentQueryPosition;
+        const bool candidate1 = token1Idx >= recentQueryFirst && token1Idx <= recentQueryPosition;
+        if (candidate0 || candidate1) {
+            const int64_t slot0 = candidate0 ? ResolveRecentHotSlot(token0Idx) : -1;
+            const int64_t slot1 = candidate1 ? ResolveRecentHotSlot(token1Idx) : -1;
+            if (slot0 >= 0 || slot1 >= 0) {
+                const bool canPair = keySrcStride < INT32_MAX && keySrcStride >= 0 &&
+                    constInfo.sparseBlockSize <= 1;
+                const bool swapPair = canPair && keyOffset1 >= 0 && keyOffset1 < keyOffset0;
+                const int64_t count = (keyOffset0 >= 0) + (keyOffset1 >= 0);
+                const int64_t firstSlot = keyOffset0 < 0 ? slot1 : (swapPair ? slot1 : slot0);
+                const int64_t firstOffset = keyOffset0 < 0 ? keyOffset1 :
+                    (swapPair ? keyOffset1 : keyOffset0);
+                if (firstSlot >= 0) {
+                    recentTileSlots[startRow] = firstSlot;
+                    recentHotMask |= uint32_t(1) << startRow;
+                } else {
+                    CopyInSingleKv(kvInUb, startRow, firstOffset, combineBytes);
+                }
+                if (count == 2) {
+                    const int64_t secondSlot = swapPair ? slot0 : slot1;
+                    if (secondSlot >= 0) {
+                        recentTileSlots[startRow + 1] = secondSlot;
+                        recentHotMask |= uint32_t(1) << (startRow + 1);
+                    } else {
+                        CopyInSingleKv(kvInUb, startRow + 1,
+                            swapPair ? keyOffset0 : keyOffset1, combineBytes);
+                    }
+                }
+                return count;
+            }
+            // A stale tag falls back to native C4 for device safety. The
+            // host must still reject missing required hot values before run.
+        }
+    }
+#elif QSFA_RECENT_ROUTE_HOT
     if (recentRouteActive) {
         // Match the native pair's physical-address ordering exactly. No global
         // TopK sorting/partitioning and no extra attention/softmax are added.
@@ -423,10 +471,12 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t Recent128QSFAVectorService<T
         int64_t keyOffset = keyOffset0 > -1 ? keyOffset0 : keyOffset1;
         if (keyOffset1 > -1 && keyOffset1 < keyOffset0) {
             keyOffset = keyOffset1;
+#if !QSFA_RECENT_ROUTE_FAST_PAIR
             if (recentEnabled) {
                 recentTileTokens[startRow] = token1Idx;
                 recentTileTokens[startRow + 1] = token0Idx;
             }
+#endif
         }
 
         // 当前仅支持COMBINE模式
@@ -441,6 +491,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t Recent128QSFAVectorService<T
     return (keyOffset0 > -1) + (keyOffset1 > -1);
 }
 
+#if !QSFA_RECENT_ROUTE_FAST_PAIR
 // Replace only token rows proven resident in this query's recent window.
 // The caller must reject future selections and missing/stale tags for selected
 // recent tokens. Device-side C4 fallback below only prevents unsafe ring reads;
@@ -506,6 +557,7 @@ Recent128QSFAVectorService<TEMPLATE_ARGS>::OverlayRecentHotRows(
     SetFlag<HardEvent::MTE2_MTE3>(recentMte2ToMte3);
     WaitFlag<HardEvent::MTE2_MTE3>(recentMte2ToMte3);
 }
+#endif
 
 #if QSFA_RECENT_ROUTE_HOT
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void

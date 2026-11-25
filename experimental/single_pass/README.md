@@ -1,10 +1,10 @@
 # C4 冷端 + BF16 recent128：原生单次 attention 原型
 
-**AIC4回传摘要报告原overlay版本W128=94.66µs，installed C4=80.56µs、两遍=107.45µs，精度PASS。**最新独立候选把热行C4读取和反量化都跳过，执行 [ROUTED_READ_TASK.md](ROUTED_READ_TASK.md) 作同库配对；尚未声称新候选A5通过或更快。框架真实模型精度任务可以同时用原已验证库推进。此原型不依赖已算好的 cold output/max/sum，不在W128候选里调用原生 cold attention，也没有第二次 hot attention 或外部 LSE merge。
+**e6ae40c原始配对：overlay97.64µs，新routed117.64µs（慢20.5%），精度逐位一致。**保留overlay有效实现；最新第四入口加入全冷pair快速路径，按 [FAST_PAIR_TASK.md](FAST_PAIR_TASK.md) 测同库三臂对照。它尚未上卡，不预报80µs。框架真实模型精度任务可以同时用原已验证库推进。此原型不依赖已算好的 cold output/max/sum，不在W128候选里调用原生 cold attention，也没有第二次 hot attention 或外部 LSE merge。
 
 输入为原始合并 BF16 query、原 packed400 C4 cache、原 TopK、BF16 热环及位置 tags。沿原生 C4 的 gather/反量化流水，把命中的 BF16 热行写进相同 NZ tile；后面的 QK、online softmax、PV 和最终归一共用一次计算。TopK 不改变。
 
-旧overlay为了保住原生流水，**热token也读取和反量化C4，再用真正BF16热值覆盖**。这个入口保留作对照。新routed入口只读取每行所需的精度；通过 `--routed-ab`显式运行，默认仍为已验证overlay。新接口是ABI1上的独立附加导出，15指针和72B tiling不变；Linux桥接默认overlay仍可使用旧库，routed必须重编三入口库。
+旧overlay为了保住原生流水，**热token也读取和反量化C4，再用真正BF16热值覆盖**。这个入口保留作对照。routed入口只读取每行所需精度，但上轮慢于overlay；新增fast_pair使全冷pair直接原生DMA，跳过slot解析与数组写入。用 `--fast-pair-ab`测试全部三种读取路径，默认仍是已验证overlay。附加导出不改变15指针/72B tiling；Linux默认overlay仍可使用旧库，fast_pair必须重编四入口库。
 
 ## 范围与来源
 

@@ -32,20 +32,21 @@ def select_aic_count(queries, requested=None):
     return requested
 
 
-def plan_modes(routed_ab=False):
+def plan_modes(routed_ab=False,fast_pair_ab=False):
     """Explicit entries share one ABI/library; never load competing symbol sets."""
-    modes=dict(original_c4_direct=(0,True,False),single_pass_w0=(0,False,False),
-               single_pass_w128=(128,False,False))
-    if routed_ab:
-        modes["single_pass_w128_routed"]=(128,False,True)
+    modes=dict(original_c4_direct=(0,True,False,False),single_pass_w0=(0,False,False,False),
+               single_pass_w128=(128,False,False,False))
+    if routed_ab or fast_pair_ab:
+        modes["single_pass_w128_routed"]=(128,False,True,False)
+    if fast_pair_ab:
+        modes["single_pass_w128_fast_pair"]=(128,False,False,True)
     return modes
 
 
 def plan_calls(plans,inputs,modes):
     calls={}
-    for name,(window,cold_only,routed) in modes.items():
-        calls[name]=lambda name=name,window=window,cold_only=cold_only,routed=routed: \
-            plans[name].run(*inputs,window,cold_only,routed)[0]
+    for name,mode in modes.items():
+        calls[name]=lambda name=name,mode=mode:plans[name].run(*inputs,*mode)[0]
     return calls
 
 
@@ -84,6 +85,7 @@ def execute(args,report,persist):
     from kv_window_backend import benchmark
     from run_direct_ab import graph_replay_control
     from load_single_pass import load_single_pass
+    use_routed=args.routed_ab or args.fast_pair_ab
 
     data=validate_variable_case(synthetic_case(batch=1,queries=args.queries,keys=args.keys,
         heads=64,dim=512,rope_dim=64,topk=2048,page=128,seed=args.seed),
@@ -120,14 +122,17 @@ def execute(args,report,persist):
         build_directory=args.build_directory,verbose=args.verbose)
     report["bridge_build"]=getattr(bridge,"_single_pass_build_identity",{})
     report["bridge_configuration"]=dict(bridge.configuration())
-    if args.routed_ab:
+    if use_routed:
         require(report["bridge_configuration"].get("routed_reader_available") is True,
                 "--routed-ab requires the rebuilt library with QsfaSinglePassLaunchRouted")
+    if args.fast_pair_ab:
+        require(report["bridge_configuration"].get("fast_pair_reader_available") is True,
+                "--fast-pair-ab requires the rebuilt library with QsfaSinglePassLaunchFastPair")
     report["launch_geometry"]=dict(queries=args.queries,aic_count=args.aic_count,
         aiv_count=2*args.aic_count,query_tiles_per_aic=args.queries//args.aic_count,
         aic_selection="auto" if args.aic_auto else "explicit")
-    modes=plan_modes(args.routed_ab)
-    report["reader_entries"]={name:dict(window=mode[0],original_c4=mode[1],routed=mode[2])
+    modes=plan_modes(args.routed_ab,args.fast_pair_ab)
+    report["reader_entries"]={name:dict(window=mode[0],original_c4=mode[1],routed=mode[2],fast_pair=mode[3])
                               for name,mode in modes.items()}
     plans={name:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
                               base.scale,args.return_stats) for name in modes}
@@ -180,11 +185,15 @@ def execute(args,report,persist):
             check.update(passed=acceptable(check,.01),tolerance=.01)
             passed=passed and check["passed"]
         report["cross_checks"]["single_pass_w128_vs_twopass_diagnostic"]["acceptance_gate"]=False
-        if args.routed_ab:
-            check=compare(outputs["single_pass_w128_routed"],outputs["single_pass_w128"])
-            check.update(passed=acceptable(check,.001),tolerance=.001,acceptance_gate=True)
-            report["cross_checks"]["single_pass_w128_routed_vs_overlay"]=check
-            passed=passed and check["passed"]
+        if use_routed:
+            variant_names=["single_pass_w128_routed"]
+            if args.fast_pair_ab:
+                variant_names.append("single_pass_w128_fast_pair")
+            for name in variant_names:
+                check=compare(outputs[name],outputs["single_pass_w128"])
+                check.update(passed=acceptable(check,.001),tolerance=.001,acceptance_gate=True)
+                report["cross_checks"][name+"_vs_overlay"]=check
+                passed=passed and check["passed"]
             # The unchanged original TopK may be ordered into homogeneous
             # blocks. Exercise both homogeneous and mixed 16-row loaders by
             # changing order only, with no membership/cache/query changes.
@@ -196,23 +205,29 @@ def execute(args,report,persist):
                 permuted_inputs=list(inputs)
                 permuted_inputs[2]=base.tensor(pattern_ids[:,None,:],torch.int32)
                 pattern_outputs={}
+                pattern_modes=dict(overlay=(128,False,False,False),routed=(128,False,True,False))
+                if args.fast_pair_ab:
+                    pattern_modes["fast_pair"]=(128,False,False,True)
                 pattern_plans={arm:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
                                                  base.scale,args.return_stats)
-                               for arm in ("overlay","routed")}
+                               for arm in pattern_modes}
                 result=dict(scope="correctness-only order permutation; same selected set; not timed",
                             selected_set_unchanged=True,checks={})
                 arrays["pattern_"+pattern+"_indices"]=pattern_ids
                 for arm,plan in pattern_plans.items():
-                    actual=backend.host(plan.run(*permuted_inputs,128,False,arm=="routed")[0]).copy()
+                    actual=backend.host(plan.run(*permuted_inputs,*pattern_modes[arm])[0]).copy()
                     pattern_outputs[arm]=actual
                     arrays["pattern_"+pattern+"_"+arm]=actual
                     metric=compare(actual,mixed_math)
                     metric.update(passed=acceptable(metric,.01),tolerance=.01,
                                   reference_contract="Independent FP64 whole-selected-set softmax")
                     result["checks"][arm+"_vs_matching_math"]=metric
-                metric=compare(pattern_outputs["routed"],pattern_outputs["overlay"])
-                metric.update(passed=acceptable(metric,.001),tolerance=.001)
-                result["checks"]["routed_vs_overlay"]=metric
+                for arm in pattern_modes:
+                    if arm=="overlay":
+                        continue
+                    metric=compare(pattern_outputs[arm],pattern_outputs["overlay"])
+                    metric.update(passed=acceptable(metric,.001),tolerance=.001)
+                    result["checks"][arm+"_vs_overlay"]=metric
                 result["passed"]=all(check["passed"] for check in result["checks"].values())
                 report["routed_pattern_controls"][pattern]=result
                 passed=passed and result["passed"]
@@ -239,12 +254,19 @@ def execute(args,report,persist):
             require(all(item.get("status")=="MEASURED" for item in
                         report["timings"]["single_pass_w128_vs_installed_twopass"].values()),
                     "Paired measurement failed; partial timing is not MEASURED")
-            if args.routed_ab:
+            if use_routed:
                 report["timings"]["single_pass_w128_routed_vs_overlay"]=paired_benchmark(
                     calls["single_pass_w128"],calls["single_pass_w128_routed"],args,benchmark)
                 require(all(item.get("status")=="MEASURED" for item in
                             report["timings"]["single_pass_w128_routed_vs_overlay"].values()),
                         "Routed/overlay paired measurement failed; partial timing is not MEASURED")
+            if args.fast_pair_ab:
+                for label,baseline in (("overlay","single_pass_w128"),("routed","single_pass_w128_routed")):
+                    key="single_pass_w128_fast_pair_vs_"+label
+                    report["timings"][key]=paired_benchmark(
+                        calls[baseline],calls["single_pass_w128_fast_pair"],args,benchmark)
+                    require(all(item.get("status")=="MEASURED" for item in report["timings"][key].values()),
+                            "Fast-pair paired measurement failed; partial timing is not MEASURED")
     report["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["performance_scope"]="NOT_MEASURED" if args.timing=="none" else "paired prepared read only; no writes, no serving claim"
 
@@ -265,6 +287,8 @@ def parser():
     p.add_argument("--return-stats",action="store_true")
     p.add_argument("--routed-ab",action="store_true",
         help="Also validate and pair the distinct precision-routed entry against preserved overlay")
+    p.add_argument("--fast-pair-ab",action="store_true",
+        help="Also validate/pair fast-pair routing against both preserved overlay and prior routed entries")
     p.add_argument("--timing",choices=("none","eager","graph"),default="none")
     p.add_argument("--warmup",type=int,default=20)
     p.add_argument("--iterations",type=int,default=100)
@@ -288,7 +312,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run; recover the device first")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-single-pass-a5-v1.2-routed-ab",status="STARTED",
+    report=dict(version="qsfa-recent128-single-pass-a5-v1.3-fast-pair-ab",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         candidate_contract="one direct ASC attention launch, original unsplit TopK; no cold attention call, partition or external merge",
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")

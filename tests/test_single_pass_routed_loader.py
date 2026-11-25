@@ -32,6 +32,8 @@ CPP_MODEL = r'''
 using KV_T = int8_t;
 using Q_T = uint16_t; // BF16 bits; this model deliberately does no FP4 math.
 constexpr uint32_t BUFFER_SIZE_BYTE_32B = 32;
+std::vector<uint8_t>* tagStorage = nullptr;
+uint32_t tagReads = 0, resolveCalls = 0;
 template<class T> struct Tensor {
     std::vector<uint8_t>* storage = nullptr;
     size_t offset = 0;
@@ -40,6 +42,7 @@ template<class T> struct Tensor {
         return {storage, offset + static_cast<size_t>(index) * sizeof(T)};
     }
     T GetValue(int64_t index) const {
+        if (storage == tagStorage) ++tagReads;
         T value;
         const size_t address = offset + index * sizeof(T);
         assert(address + sizeof(T) <= storage->size());
@@ -210,17 +213,25 @@ class RoutedLoaderTest(unittest.TestCase):
         names = ("CopyInSingleKv", "CopyInKvSparse", "PrepareRecentQuery",
                  "ResolveRecentHotSlot", "ReadRecentHotRows", "WaitRecentHotRows",
                  "DequantKvRouted")
-        bodies = "\n".join(_EXTRACT.actual_function(text, name) for name in names)
-        code = CPP_MODEL + actual_vf(text) + CPP_VECTOR + bodies + CPP_CASES
-        with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "routed_actual.cpp"
-            binary = Path(temp) / "routed_actual"
-            source.write_text(code)
-            compile_run = subprocess.run([compiler, "-std=c++17", "-O0", str(source),
-                                          "-o", str(binary)], capture_output=True, text=True)
-            self.assertEqual(compile_run.returncode, 0, compile_run.stderr)
-            execution = subprocess.run([str(binary)], capture_output=True, text=True)
-            self.assertEqual(execution.returncode, 0, execution.stderr)
+        actual = []
+        for name in names:
+            body = _EXTRACT.actual_function(text, name)
+            if name == "ResolveRecentHotSlot":
+                # Observe scalar helper calls without replacing its logic.
+                body = body.replace("{", "{ ++resolveCalls;", 1)
+            actual.append(body)
+        bodies = "\n".join(actual)
+        for fast_pair in (0, 1):
+            with self.subTest(fast_pair=fast_pair), tempfile.TemporaryDirectory() as temp:
+                source = Path(temp) / "routed_actual.cpp"
+                binary = Path(temp) / "routed_actual"
+                source.write_text(f"#define QSFA_RECENT_ROUTE_FAST_PAIR {fast_pair}\n"
+                                  + CPP_MODEL + actual_vf(text) + CPP_VECTOR + bodies + CPP_CASES)
+                compile_run = subprocess.run([compiler, "-std=c++17", "-O0", str(source),
+                                              "-o", str(binary)], capture_output=True, text=True)
+                self.assertEqual(compile_run.returncode, 0, compile_run.stderr)
+                execution = subprocess.run([str(binary)], capture_output=True, text=True)
+                self.assertEqual(execution.returncode, 0, execution.stderr)
 
 
 CPP_CASES = r'''
@@ -240,7 +251,7 @@ int main() {
     std::vector<uint8_t> cold(512 * 400), packed(16 * 416);
     std::vector<uint8_t> latent(256 * 512 * 2), rope(256 * 64 * 2), nz(576 * 17 * 2);
     std::vector<uint8_t> tags(256 * 8), positions(8);
-    coldStorage = &cold; packedStorage = &packed;
+    coldStorage = &cold; packedStorage = &packed; tagStorage = &tags;
     forbiddenPhysical.resize(512);
     MockVector v;
     v.keyGm = {&cold}; v.recentLatentGm = {&latent}; v.recentRopeGm = {&rope};
@@ -283,6 +294,9 @@ int main() {
         std::fill(forbiddenPhysical.begin(), forbiddenPhysical.end(), false);
         allowedColdRows = 0; coldReadBytes = 0; vfReadRows = 0;
         originalDecodeCalls = 0; vWaits = 0; dmaWaits = 0;
+        tagReads = resolveCalls = 0;
+        std::fill(v.recentTileTokens, v.recentTileTokens + 16, -777);
+        std::fill(v.recentTileSlots, v.recentTileSlots + 16, -888);
         v.recentHotMask = 0;
         v.PrepareRecentQuery(run, info);
         std::vector<int64_t> expected;
@@ -294,8 +308,10 @@ int main() {
             if (b >= 0) expected.push_back(swap ? a : b);
         }
         uint32_t hotMask = 0;
+        uint32_t windowCandidates = 0;
         for (size_t row = 0; row < expected.size(); ++row) {
             const int64_t token = expected[row];
+            windowCandidates += token >= 23 && token <= 150;
             const bool hot = token >= 23 && token <= 150 && !(stale && token % 2);
             if (hot) {
                 hotMask |= 1u << row;
@@ -314,8 +330,20 @@ int main() {
         assert(rows == expected.size());
         assert(v.recentHotMask == hotMask);
         assert(coldReadBytes == 400 * (rows - __builtin_popcount(hotMask)));
+        assert(tagReads == windowCandidates);
+#if QSFA_RECENT_ROUTE_FAST_PAIR
+        assert(resolveCalls == windowCandidates);
+        for (int row = 0; row < 16; ++row) assert(v.recentTileTokens[row] == -777);
+#else
+        assert(resolveCalls == rows);
+#endif
         for (int row = 0; row < rows; ++row) {
+#if !QSFA_RECENT_ROUTE_FAST_PAIR
             assert(v.recentTileTokens[row] == expected[row]);
+#else
+            if (hotMask & (1u << row)) assert(v.recentTileSlots[row] == expected[row] % 256);
+            else assert(v.recentTileSlots[row] == -888);
+#endif
             if (hotMask & (1u << row))
                 assert(std::all_of(packed.begin() + row * 416,
                     packed.begin() + (row + 1) * 416, [](uint8_t x){return x == 0xee;}));
