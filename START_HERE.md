@@ -21,3 +21,7 @@ e6ae40c的同库原始证据确认routed117.64µs，比overlay97.64µs慢20.5%�
 ## 最新读取候选：热DMA提前入队
 
 452fa69已回传fast-pair91.55µs，比overlay97.60µs快6.2%，数学/graph/排列均通过。保留fast-pair作为当前有效读取实现。用户继续优化，新任务 [experimental/single_pass/EARLY_HOT_TASK.md](experimental/single_pass/EARLY_HOT_TASK.md)：第五独立入口提前发起热DMA，经输入队列同步冷/热完成，省去单独完成事件；本机SDK确认依赖后，`--early-hot-ab`先精度再与fast-pair同轮graph配对。新候选未测前不替换默认，不承诺80µs；框架精度并行继续。
+
+## 当前80µs方向：统计输出2×2，再决定tile
+
+753ad93确认early-hot与fast-pair打平，保留91.7µs fast-pair。新任务 [experimental/single_pass/STATS_AND_TILE_TASK.md](experimental/single_pass/STATS_AND_TILE_TASK.md)：`--stats-ab`直接复用现有库，测original/fast-pair×stats OFF/ON，完整数学/graph及同合同配对。无需重编ASC，不再重复同步换序。加载tile8/16/32是下一步源码方向，尚未实现，32行资源需计入kernel额外98304B cross-core UB。80µs仍为目标，不能提前声称达到；框架模型精度并行继续。

@@ -8,6 +8,8 @@
 
 最新可选 `--early-hot-ab` 同时保留以上对照并测试热DMA提前入队；需重编五入口库。现有fast-pair的类/入口和同步顺序不变。框架默认reader也不自动切换到实验候选。
 
+753ad93回传early-hot与fast-pair同轮91.7627/91.7554µs，换序无收益。当前下一步按 [STATS_AND_TILE_TASK.md](STATS_AND_TILE_TASK.md)：`--stats-ab`复用已有库测original/fast-pair×stats OFF/ON，不重编ASC，统一框架实际无需返回统计量的合同；再决定KV加载tile8/16/32的资源和源码改造。新的tile内核尚未交付，不能把任务说明当成已经完成扫描。
+
 ## 范围与来源
 
 - 初始 Q4/K8192，B1、H64、D512/R64、TopK2048、page128、window0/128。

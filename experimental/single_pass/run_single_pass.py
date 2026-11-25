@@ -52,6 +52,25 @@ def plan_calls(plans,inputs,modes):
     return calls
 
 
+def prepare_stats_ab(bridge,query,keys,capacity,aic,scale,inputs):
+    """Four independent outputs; only runtime stats/reader fields differ."""
+    specs={}
+    for stats in (False,True):
+        suffix="stats_on" if stats else "stats_off"
+        specs["original_c4_"+suffix]=(stats,(0,True,False,False,False))
+        specs["fast_pair_"+suffix]=(stats,(128,False,False,True,False))
+    plans={name:bridge.prepare(query,keys,capacity,aic,scale,spec[0]) for name,spec in specs.items()}
+    calls=plan_calls(plans,inputs,{name:spec[1] for name,spec in specs.items()})
+    return plans,calls,specs
+
+
+def stats_ab_pairs():
+    return (("fast_pair_vs_original_stats_off","original_c4_stats_off","fast_pair_stats_off"),
+            ("fast_pair_vs_original_stats_on","original_c4_stats_on","fast_pair_stats_on"),
+            ("original_stats_on_vs_off","original_c4_stats_off","original_c4_stats_on"),
+            ("fast_pair_stats_on_vs_off","fast_pair_stats_off","fast_pair_stats_on"))
+
+
 def routed_index_patterns(indices,positions,window=128):
     """Correctness-only permutations of the exact selected set, never timed."""
     import numpy as np
@@ -128,7 +147,7 @@ def execute(args,report,persist):
     if use_routed:
         require(report["bridge_configuration"].get("routed_reader_available") is True,
                 "--routed-ab requires the rebuilt library with QsfaSinglePassLaunchRouted")
-    if use_fast_pair:
+    if use_fast_pair or args.stats_ab:
         require(report["bridge_configuration"].get("fast_pair_reader_available") is True,
                 "--fast-pair-ab requires the rebuilt library with QsfaSinglePassLaunchFastPair")
     if args.early_hot_ab:
@@ -160,6 +179,7 @@ def execute(args,report,persist):
     outputs={}
     passed=True
     arrays=dict(cold_mathematical_reference=cold_math,mixed_mathematical_reference=mixed_math)
+    stats_plans,stats_calls,stats_specs={},{},{}
     with torch.inference_mode():
         for name,call in calls.items():
             tensor=call()
@@ -181,6 +201,42 @@ def execute(args,report,persist):
                 report["controls"][name]["returned_stats_finite_positive_sum"]=healthy
                 passed=passed and healthy
             persist()
+        if args.stats_ab:
+            stats_plans,stats_calls,stats_specs=prepare_stats_ab(bridge,base.query,args.keys,
+                runner.capacity,args.aic_count,base.scale,inputs)
+            section=dict(status="STARTED",scope="same-library 2x2 runtime stats toggle; prepared read only; no ASC rebuild",
+                         configuration={name:dict(return_stats=spec[0],window=spec[1][0],
+                             original_c4=spec[1][1],fast_pair=spec[1][3]) for name,spec in stats_specs.items()},
+                         shared_inputs=True,independent_prepared_outputs=True,
+                         controls={},cross_checks={},graph_controls={},timings={})
+            report["stats_ab"]=section
+            stats_outputs={}
+            persist()
+            for name,call in stats_calls.items():
+                actual=backend.host(call()).copy()
+                stats_outputs[name]=actual
+                arrays["stats_ab_"+name]=actual
+                reference=cold_math if stats_specs[name][1][1] else mixed_math
+                metric=compare(actual,reference)
+                metric.update(passed=acceptable(metric,.01),tolerance=.01,
+                              reference_contract="Independent FP64 whole-selected-set softmax")
+                if stats_specs[name][0]:
+                    _,maximum,total=stats_plans[name].outputs()
+                    m,s=backend.host(maximum),backend.host(total)
+                    healthy=bool(np.isfinite(m).all() and np.isfinite(s).all() and np.all(s>0))
+                    metric["returned_stats_finite_positive_sum"]=healthy
+                    metric["passed"]=metric["passed"] and healthy
+                    arrays["stats_ab_"+name+"_maximum"]=m
+                    arrays["stats_ab_"+name+"_sum"]=s
+                section["controls"][name]=metric
+                persist()
+            for reader in ("original_c4","fast_pair"):
+                metric=compare(stats_outputs[reader+"_stats_on"],stats_outputs[reader+"_stats_off"])
+                metric.update(passed=acceptable(metric,.001),tolerance=.001)
+                section["cross_checks"][reader+"_stats_on_vs_off"]=metric
+            section["all_accuracy_controls_passed"]=all(item["passed"] for group in
+                (section["controls"],section["cross_checks"]) for item in group.values())
+            passed=passed and section["all_accuracy_controls_passed"]
         report["cross_checks"]={
             "original_c4_direct_vs_installed_c4":compare(outputs["original_c4_direct"],outputs["installed_c4"]),
             "single_pass_w0_vs_original_c4_direct":compare(outputs["single_pass_w0"],outputs["original_c4_direct"]),
@@ -284,6 +340,19 @@ def execute(args,report,persist):
                     report["graph_controls"][name]=graph_replay_control(calls[name],plan.outputs,torch,
                         backend.host,dict(compare=compare,acceptable=acceptable))
                     persist()
+                if args.stats_ab:
+                    for name,plan in stats_plans.items():
+                        metric=graph_replay_control(stats_calls[name],plan.outputs,torch,
+                            backend.host,dict(compare=compare,acceptable=acceptable))
+                        if stats_specs[name][0]:
+                            _,maximum,total=plan.outputs()
+                            m,s=backend.host(maximum),backend.host(total)
+                            healthy=bool(np.isfinite(m).all() and np.isfinite(s).all() and np.all(s>0))
+                            metric["returned_stats_finite_positive_sum_after_replay"]=healthy
+                            metric["passed"]=metric["passed"] and healthy
+                        report["stats_ab"]["graph_controls"][name]=metric
+                        persist()
+                        require(metric["passed"],"Stats A/B graph replay control failed")
             report["timings"]={}
             for name in plans:
                 report["timings"][name]=paired_benchmark(calls["installed_c4"],calls[name],args,benchmark)
@@ -315,6 +384,16 @@ def execute(args,report,persist):
                         calls[baseline],calls["single_pass_w128_early_hot"],args,benchmark)
                     require(all(item.get("status")=="MEASURED" for item in report["timings"][key].values()),
                             "Early-hot paired measurement failed; partial timing is not MEASURED")
+            if args.stats_ab:
+                for key,baseline,candidate in stats_ab_pairs():
+                    report["stats_ab"]["timings"][key]=paired_benchmark(
+                        stats_calls[baseline],stats_calls[candidate],args,benchmark)
+                    persist()
+                    require(all(item.get("status")=="MEASURED" for item in
+                                report["stats_ab"]["timings"][key].values()),
+                            "Stats A/B paired measurement failed; partial timing is not MEASURED")
+        if args.stats_ab:
+            report["stats_ab"]["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["performance_scope"]="NOT_MEASURED" if args.timing=="none" else "paired prepared read only; no writes, no serving claim"
 
@@ -333,6 +412,8 @@ def parser():
         help="Default: largest supported divisor of Q, up to 16 (Q4 uses 4 AICs)")
     p.add_argument("--seed",type=int,default=20261120)
     p.add_argument("--return-stats",action="store_true")
+    p.add_argument("--stats-ab",action="store_true",
+        help="No ASC rebuild: same-library original C4/fast-pair x stats OFF/ON paired controls")
     p.add_argument("--routed-ab",action="store_true",
         help="Also validate and pair the distinct precision-routed entry against preserved overlay")
     p.add_argument("--fast-pair-ab",action="store_true",
@@ -362,7 +443,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run; recover the device first")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-single-pass-a5-v1.4-early-hot-ab",status="STARTED",
+    report=dict(version="qsfa-recent128-single-pass-a5-v1.5-stats-ab",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         candidate_contract="one direct ASC attention launch, original unsplit TopK; no cold attention call, partition or external merge",
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")

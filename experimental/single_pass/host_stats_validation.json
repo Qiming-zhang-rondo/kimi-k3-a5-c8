@@ -1,0 +1,18 @@
+{
+  "experiment": "same-library original C4/fast-pair x stats OFF/ON",
+  "status": "HOST_CHECKS_PASS",
+  "single_pass_host_tests": 17,
+  "kernel_source_changed": false,
+  "ASC_rebuild_required": false,
+  "runtime_abi": "unchanged ABI1 15 pointers / 72B tiling",
+  "checks_scheduled_on_A5": [
+    "Independent complete mathematical output references",
+    "Same-reader ON/OFF output consistency",
+    "Stats ON finite max and positive finite sum before and after graph replay",
+    "Four paired measurements, separate Prepared outputs, common inputs"
+  ],
+  "device_accuracy": "NOT_RUN",
+  "paired_performance": "NOT_MEASURED",
+  "load_tile_variants": "NOT_IMPLEMENTED_IN_THIS_CHANGE",
+  "target_80us": "optimization goal, not a measured result"
+}
