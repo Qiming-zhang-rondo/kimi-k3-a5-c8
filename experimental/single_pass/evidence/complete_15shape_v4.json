@@ -1,0 +1,122 @@
+{
+  "q1_k32768": {
+    "c4_baseline_us": 80.7,
+    "v4_us": 82.18,
+    "v4_vs_c4": 1.018,
+    "fast_pair_us": 91.76,
+    "v4_vs_fast_pair": 0.896,
+    "aic_count": 1
+  },
+  "q1_k8192": {
+    "c4_baseline_us": 80.15,
+    "v4_us": 81.75,
+    "v4_vs_c4": 1.02,
+    "fast_pair_us": 91.35,
+    "v4_vs_fast_pair": 0.895,
+    "aic_count": 1
+  },
+  "q1024_k8192": {
+    "c4_baseline_us": 4764.95,
+    "v4_us": 4767.37,
+    "v4_vs_c4": 1.001,
+    "fast_pair_us": 5424.46,
+    "v4_vs_fast_pair": 0.879,
+    "aic_count": 16
+  },
+  "q128_k32768": {
+    "c4_baseline_us": 562.98,
+    "v4_us": 563.52,
+    "v4_vs_c4": 1.001,
+    "fast_pair_us": 642.86,
+    "v4_vs_fast_pair": 0.877,
+    "aic_count": 16
+  },
+  "q128_k8192": {
+    "c4_baseline_us": 561.79,
+    "v4_us": 562.66,
+    "v4_vs_c4": 1.002,
+    "fast_pair_us": 641.52,
+    "v4_vs_fast_pair": 0.877,
+    "aic_count": 16
+  },
+  "q16_k8192": {
+    "c4_baseline_us": 81.59,
+    "v4_us": 83.42,
+    "v4_vs_c4": 1.022,
+    "fast_pair_us": 92.88,
+    "v4_vs_fast_pair": 0.898,
+    "aic_count": 16
+  },
+  "q2_k8192": {
+    "c4_baseline_us": 80.1,
+    "v4_us": 82.18,
+    "v4_vs_c4": 1.026,
+    "fast_pair_us": 91.27,
+    "v4_vs_fast_pair": 0.9,
+    "aic_count": 2
+  },
+  "q256_k8192": {
+    "c4_baseline_us": 1112.3,
+    "v4_us": 1113.1,
+    "v4_vs_c4": 1.001,
+    "fast_pair_us": 1271.59,
+    "v4_vs_fast_pair": 0.875,
+    "aic_count": 16
+  },
+  "q32_k32768": {
+    "c4_baseline_us": 150.87,
+    "v4_us": 152.68,
+    "v4_vs_c4": 1.012,
+    "fast_pair_us": 172.27,
+    "v4_vs_fast_pair": 0.886,
+    "aic_count": 16
+  },
+  "q32_k8192": {
+    "c4_baseline_us": 149.82,
+    "v4_us": 151.56,
+    "v4_vs_c4": 1.012,
+    "fast_pair_us": 171.09,
+    "v4_vs_fast_pair": 0.886,
+    "aic_count": 16
+  },
+  "q512_k32768": {
+    "c4_baseline_us": 2240.63,
+    "v4_us": 2233.75,
+    "v4_vs_c4": 0.997,
+    "fast_pair_us": 2554.53,
+    "v4_vs_fast_pair": 0.874,
+    "aic_count": 16
+  },
+  "q512_k8192": {
+    "c4_baseline_us": 2212.63,
+    "v4_us": 2221.17,
+    "v4_vs_c4": 1.004,
+    "fast_pair_us": 2542.2,
+    "v4_vs_fast_pair": 0.874,
+    "aic_count": 16
+  },
+  "q64_k8192": {
+    "c4_baseline_us": 287.27,
+    "v4_us": 288.64,
+    "v4_vs_c4": 1.005,
+    "fast_pair_us": 327.75,
+    "v4_vs_fast_pair": 0.881,
+    "aic_count": 16
+  },
+  "q8_k8192": {
+    "c4_baseline_us": 80.62,
+    "v4_us": 83.2,
+    "v4_vs_c4": 1.032,
+    "fast_pair_us": 91.88,
+    "v4_vs_fast_pair": 0.905,
+    "aic_count": 8
+  },
+  "q4_k8192": {
+    "c4_baseline_us": 80.48,
+    "v4_us": 82.05,
+    "v4_vs_c4": 1.019,
+    "fast_pair_us": 92.16,
+    "v4_vs_fast_pair": 0.89,
+    "aic_count": 4
+  }
+}
