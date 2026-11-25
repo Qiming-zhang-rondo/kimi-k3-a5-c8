@@ -456,3 +456,21 @@ graph replay不会每次重新执行Python/C++输入检查，不能把direct与i
 首测4AIC+16行，按OPTIMIZE_NEXT.md一次完成四臂配对及独立hot/merge阶段计时。
 本地检查只覆盖host合同/CPP mock/设备头CPU模型，范围见
 `direct_bridge/optimization_v4_host_validation.json`；新候选SDK编译/A5正确性/性能均待验证。
+
+## Optimized Performance: 4AIC + 16-row batch (2026-11-25 09:20)
+
+### f6f8dc6 optimization: BREAKTHROUGH — fused now FASTER than installed two-pass!
+
+| Comparison | Before (7ca3b03) | After (f6f8dc6) |
+|---|---|---|
+| fused/installed | 1.071x (7% slower) | **0.905x (9.5% FASTER)** ✅ |
+| fused/direct | 0.982x (2% faster) | **0.931x (7% faster)** |
+| fused/W0 | 1.538x | **1.298x** |
+
+Absolute: C4 W0=87.52µs | installed=125.68µs | fused=113.56µs (12µs faster!)
+
+Optimizations:
+1. 4AIC parallelization (Q4 → 4 AIC cores instead of 1)
+2. 16-row batch cold-state merge (DMA/fence rounds 8→2)
+
+All controls PASS. 10 rounds AB/BA. Graph timing.
