@@ -1,11 +1,9 @@
-# 当前任务：补齐两轮小证据，继续写融合prefill
+# 当前任务：框架接入与真实模型精度验证
 
-主分支37bbc60回报Q32–1024读取融合已MEASURED；本分支1c0376b回报Q4写融合111.9µs，
-较同轮原读融合快约1.7%。现有上传摘要缺少完整门禁/配对分项，原12MB文件不用上传。
+用户已收口单算子调优，停止 Q/tiling/写融合扫描。本分支保留 26661f7 已完成证据和算子源码，新增实际 MXLLM worker overlay。
 
-按 [COMPLETED_RUNS_NEXT.md](COMPLETED_RUNS_NEXT.md) 先用纯CPU收集器一次提取已有两轮，
-无需重跑；Q32/128/512已由8ac297e报告完成，勿重复；仅补尚未完成的Q1024，并复用已成功ABI4库。
-原113µs读融合仍保留作每个形状同轮基线，所有精度、缓存字节、partition和graph门禁保持。
+直接执行 [framework_integration/FRAMEWORK_EXECUTION_TASK.md](framework_integration/FRAMEWORK_EXECUTION_TASK.md)，安装说明与范围见 [framework_integration/README.md](framework_integration/README.md)。自行定位实际模型/源码/环境，修复常规适配并提交代码与小型结果，无需用户逐项中转。
 
-候选实现及原命令见 [WRITE_PREPARE_NEXT.md](WRITE_PREPARE_NEXT.md)。
-不能将当前单算子结果称为生产TPOT收益，不能覆盖正在运行的主分支checkout或实验环境。
+顺序完成：隔离安装 → 同权重同量化 OFF / 原生 recent128 / 融合 recent128 → 用户原 GLM 精度任务 → 整理算子团队交接材料。模型生成成功不等于任务精度通过；无融合覆盖不等于融合通过。初版明确为单请求 eager 精度模式，不能称为服务性能完成，默认不关闭 PROLOG_V3。
+
+本地 28 项 CPU 检查通过；实际模型/NPU 验证待内网执行。不重复已完成的单算子扫描，不覆盖原服务和 vendor 包。

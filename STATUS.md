@@ -1,3 +1,15 @@
+# 当前状态：框架精度接入源码已交付，真实模型待内网验收
+
+用户已决定结束单算子摸高并接入框架。当前执行入口为 [framework_integration/FRAMEWORK_EXECUTION_TASK.md](framework_integration/FRAMEWORK_EXECUTION_TASK.md)。
+
+- 已核对 11 组已完成的 Q32–1024 read / Q4–1024 write 证据，均 MEASURED；没有新增本地 NPU 测量。
+- 已实现 opt-in MXLLM 原始 BF16 写点、逐层热环、真实 TopK 分区、compact 原生对照、ABI4 融合调用、模型探针及覆盖率收集。
+- 本地 28 项 CPU 检查与语法检查通过；包括真实归档源码安装边界、恢复/幂等、OFF 原路、原始写点元数据、环形生命周期和失败门禁。
+- 初版为单请求 accuracy_eager；默认保留 PROLOG_V3。若显式做 native_accuracy 精度实验，OFF/ON 均须相同、在权重转换前选择，不以该结果宣称原 PrologV3 服务性能。
+- 模型任务精度、图/多请求/PD/MTP 及生产 PrologV3 真 BF16 输出尚未验收。不将 standalone 改善换算为 TPOT。
+
+以下为历史记录，过时的阶段判断和“production”称呼不代表当前已完成框架部署。
+
 # 当前状态：融合设备smoke已通过，真实C4流水线接线待现场验收
 
 当前执行入口是 [PERF_REPAIR_5407.md](PERF_REPAIR_5407.md)。5a36184的8项设备smoke有效；

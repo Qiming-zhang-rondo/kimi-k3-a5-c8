@@ -1,0 +1,30 @@
+{
+  "status": "HOST_VALIDATED_ONLY",
+  "timestamp_utc": "2026-11-25T03:31:27.709530+00:00",
+  "test_count": 28,
+  "failures": 0,
+  "errors": 0,
+  "command": "python -m unittest discover -s framework_integration/tests -v",
+  "syntax_check": "PASS",
+  "archive_install_check": "READY_READ_ONLY",
+  "mxllm_archive_commit": "3ba7355d79a02eb0e292fae92cfacf583b117816",
+  "vllm_ascend_pin": "760d7ecbb962135fff738726825cffacc74f5d2f",
+  "vllm_pin": "4ba787ec9959e566d3b587a796dff07673324da5",
+  "sdk_compilation": false,
+  "npu_execution": false,
+  "model_accuracy": "NOT_MEASURED",
+  "serving_performance": "NOT_MEASURED",
+  "source_sha256": {
+    "collect_framework_evidence.py": "2172c4388579b34ac705979abcd8894898491331eec484e6f88b64ebd8671ea9",
+    "install_overlay.py": "3579add14b1c1f81f22a319df36b33b7d695f812be07140f6eb0b403fbbbbfda",
+    "run_model_probe.py": "e1b8975f46fdadbb07d31295cf017d683597d8255f29e7f39abf495fd1fcb6bd",
+    "sfa_recent128/__init__.py": "c4faca2a5815add28a0ca457613a43d84580ce3411afc62c48f22d6e983caa5d",
+    "sfa_recent128/contract.py": "c4d8d0596fc6454c97484649380761ba2f3f45509ee6b6d42a6200a4807a3483",
+    "sfa_recent128/hooks.py": "169a56b2a7126548f66729e512a15ea660ed30f954aaa19e0a15fe7515192be2",
+    "sfa_recent128/runtime.py": "952609407c540216771500b966f58a1556bd419e57de378ebfa8401b088ca161",
+    "tests/test_contract.py": "be4f4b2123e0dbe4ade7c628e59ac91e4200784e84015bd5fce0ecf14558bde8",
+    "tests/test_framework_evidence.py": "9175625c6f9363e281faae2fb7d7961a922a2485f84c771fa54acf205709892b",
+    "tests/test_hooks.py": "69c6defc92ee52eadd4364c141a964496be64ed587002a907023b6aff86ac949",
+    "tests/test_install_overlay.py": "4dd2d4e63697e14b8a2e6ea1cea3ca16c3b2eebb57c8c6bbb1895869e4a98d01"
+  }
+}
