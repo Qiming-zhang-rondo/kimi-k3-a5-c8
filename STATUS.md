@@ -485,3 +485,23 @@ All controls PASS. 10 rounds AB/BA. Graph timing.
 
 All controls PASS. Diminishing returns: 4→8 saves 1.27µs, 8→16 saves 0.70µs.
 16 is optimal among supported values. Batch size is no longer the bottleneck.
+
+## Shape Sweep Q32-Q1024: CONTROL_FAILED (2026-11-25 10:10)
+
+### Q4 passes (113.62 µs, 0.904x vs installed)
+### Q32+ all fail: fused matches FP64 oracle perfectly but native has errors
+
+Key evidence (Q32):
+- actual_oracle_bit_mismatch_count: 0 (fused = FP64, perfect)
+- actual_native_bit_mismatch_count: 31616
+  - at_exact_midpoint: 31552 (BF16 rounding, same as Q4)
+  - NOT at_exact_midpoint: 64 (actual errors, not just rounding)
+  - NOT one_ulp: 64 (more than 1 ULP off!)
+- native max_row_relative_l2: 0.0019 (exceeds 0.001 limit)
+- zero_query_exact_rne_gate FAIL: native has 64 real errors beyond rounding
+
+### Root cause: same as Q4 (fused more accurate than native)
+But at Q32, the native's errors are larger (some > 1 ULP)
+The RNE gate that accepted Q4 midpoints doesn't cover Q32's 64 non-midpoint errors
+
+### Need: accept fused as reference (it matches FP64), or investigate native's 64 real errors
