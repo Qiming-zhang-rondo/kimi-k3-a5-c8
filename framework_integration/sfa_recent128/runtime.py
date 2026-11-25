@@ -173,6 +173,8 @@ class Recent128Runtime:
             layer=getattr(self.impl, "layer_name", None), pid=os.getpid(),
             window=self.config.window, ring_capacity=self.config.capacity,
             reader=self.config.reader, counters=dict(self.counts), reasons=dict(self.reasons),
+            single_pass_kernel=(getattr(self.config,"single_pass_kernel","overlay")
+                                if self.single_pass_reader is not None else None),
             fusion_exercised=self.counts["fused_rows"] > 0,
             fusion_status="EXERCISED" if self.counts["fused_rows"] else "NOT_EXERCISED",
             fusion_coverage=self.counts["fused_rows"] / max(self.counts["query_rows"], 1),
@@ -329,6 +331,21 @@ class Recent128Runtime:
         pos=torch.as_tensor(positions,device=query.device,dtype=torch.int64)
         result=self.single_pass_reader.read(query,q_rope,cache,topk,table,q_lengths,k_lengths,
             self.hot,self.rope,tags,pos,self.config.capacity)
+        actual=self.single_pass_reader.last_call_metadata
+        requested=getattr(self.config,"single_pass_kernel","overlay")
+        expected_entry={"overlay":"QsfaSinglePassLaunch","fast_pair":"QsfaSinglePassLaunchFastPair",
+                        "load_tile4":"QsfaSinglePassLaunchLoadTile"}[requested]
+        expected_calls=(heads+63)//64
+        if (actual.get("kernel_variant")!=requested or actual.get("entry")!=expected_entry
+                or actual.get("return_stats") is not False
+                or actual.get("external_merge_calls")!=0
+                or actual.get("topk_partitioned") is not False
+                or actual.get("head_groups")!=expected_calls
+                or self.single_pass_reader.last_attention_calls!=expected_calls):
+            self._error("Single-pass actual reader entry/call contract differs from requested kernel")
+        if requested=="load_tile4" and (actual.get("load_variant")!=4 or
+                actual.get("device_entry")!="QsfaSinglePassLaunchLoadTile32"):
+            self._error("Single-pass load_tile4 did not execute the requested compiled layout")
         metrics=comparison_arrays(result.detach().float().cpu().numpy(),reference,limit=.01)
         if not metrics["passed"]:
             self._error("Single-pass model attention failed full FP64 matching math: "+json.dumps(metrics))
@@ -337,6 +354,8 @@ class Recent128Runtime:
         self.counts["fused_rows"]+=n
         self.counts["fused_kernel_calls"]+=self.single_pass_reader.last_attention_calls
         self.counts["candidate_attention_calls"]+=self.single_pass_reader.last_attention_calls
+        self.counts["single_pass_expected_attention_calls"]+=expected_calls
+        self.counts["single_pass_"+requested+"_calls"]+=self.single_pass_reader.last_attention_calls
         self.counts["full_math_checked_rows"]+=n
         # The mathematical reference is on CPU; validation_attention_calls=0.
         self.counts["validation_attention_calls"]+=0

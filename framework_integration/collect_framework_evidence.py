@@ -11,6 +11,8 @@ def collect(directory, *, require_fusion=True):
     probe_path = root/"probe.json"
     if not probe_path.is_file() or json.loads(probe_path.read_text()).get("status") != "GENERATION_FINISHED":
         return dict(status="FAILED", reason="model generation did not finish", model_accuracy="NOT_MEASURED")
+    probe=json.loads(probe_path.read_text())
+    requested_kernel=probe.get("single_pass_kernel") if probe.get("arm")=="single_pass" else None
     paths = sorted((root/"layers").glob("recent128-*.json"))
     if not paths:
         return dict(status="NOT_EXERCISED", reason="no framework layer evidence", model_accuracy="NOT_MEASURED")
@@ -26,6 +28,31 @@ def collect(directory, *, require_fusion=True):
                                or counts.get("fused_kernel_calls", 0) <= 0):
             problems.append(dict(file=path.name, reason="fusion not exercised in this layer/rank"))
         single_pass=layer.get("reader")=="single_pass"
+        if requested_kernel in ("fast_pair","load_tile4"):
+            call=layer.get("single_pass_last_call") or {}
+            identity=layer.get("library_identity") or {}
+            digest=identity.get("library_sha256", "")
+            variants=identity.get("configuration",{}).get("load_tile_variants",{})
+            geometry=variants.get("4",variants.get(4,{}))
+            expected_entry={"fast_pair":"QsfaSinglePassLaunchFastPair",
+                            "load_tile4":"QsfaSinglePassLaunchLoadTile"}[requested_kernel]
+            if (not single_pass or layer.get("single_pass_kernel")!=requested_kernel
+                    or call.get("kernel_variant")!=requested_kernel
+                    or call.get("entry")!=expected_entry
+                    or (requested_kernel=="load_tile4" and (call.get("load_variant")!=4 or
+                        call.get("device_entry")!="QsfaSinglePassLaunchLoadTile32" or
+                        geometry!={"rows":32,"input_stride_bytes":416,"input_depth":2,"output_depth":1}))
+                    or call.get("external_merge_calls")!=0
+                    or call.get("topk_partitioned") is not False
+                    or call.get("return_stats") is not False
+                    or call.get("candidate_attention_calls")!=call.get("head_groups")
+                    or not isinstance(call.get("head_groups"),int) or call["head_groups"]<1
+                    or counts.get("single_pass_expected_attention_calls")!=counts.get("candidate_attention_calls")
+                    or counts.get("single_pass_"+requested_kernel+"_calls")!=counts.get("candidate_attention_calls")
+                    or not isinstance(digest,str) or len(digest)!=64
+                    or any(c not in "0123456789abcdef" for c in digest)
+                    or identity.get("configuration",{}).get("abi_version")!=1):
+                problems.append(dict(file=path.name,reason="requested "+requested_kernel+" actual entry/library/call coverage missing"))
         if single_pass and (layer.get("control_scope")!="full_FP64_whole_selected_set"
                             or layer.get("control_limit")!=.01
                             or counts.get("query_rows",0)<=0

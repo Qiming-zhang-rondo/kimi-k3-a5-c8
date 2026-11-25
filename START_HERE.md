@@ -1,31 +1,9 @@
-# 当前并行任务：真实模型精度 + 冷热互斥读取
+# 当前只推进V4框架接入和真实模型精度
 
-用户最新要求是直接接框架使用。单遍算子源码已完成；7a2fad回传摘要报告AIC4/W12894.66µs、installed两遍107.45µs、精度PASS。尚未证明赢过所有历史最强，冠军A/B不再是框架接入前置。
+9ffe1e0原始证据确认V4约82.08µs，距同轮C4仅2%；用户下一任务为接框架，先不继续tile扫描。
 
-直接执行 [framework_integration/SINGLE_PASS_FRAMEWORK_TASK.md](framework_integration/SINGLE_PASS_FRAMEWORK_TASK.md)。新增 --arm single_pass 已接到实际MXLLM reader，传原始TopK、完整物理C4 pool、BF16热环和位置tags；每64heads组一次candidate attention，CPU完整FP64数学对照不再调用第二次NPU attention。原写量化/TopK保持，window0原路。先复用本轮已通过的ABI1库，不必为额外性能修改等重编。
+直接执行 [framework_integration/CURRENT_FRAMEWORK_TASK.md](framework_integration/CURRENT_FRAMEWORK_TASK.md)。probe选择load_tile4，runtime/collector核对实际variant、geometry、库SHA和调用覆盖，CPU全数学不调用第二次NPU attention。
 
-本地37项框架CPU检查通过，尚未跑真实模型。内网依次完成隔离安装→真实权重prefill/decode smoke→用户原精度任务OFF/ON，并上传实际库SHA、逐层调用/数学覆盖和任务分数。普通路径/编译/API问题自主解决，不逐项向用户要文件。R64/packed400是当前单遍范围，R0/272B不能错误接入或默默用旧两遍称通过。
+先JSON-only预检实际checkpoint格式。现有kernel仅D512/R64/packed400；GLM-5.3-Flash源码存在R0/272路径，不能靠改shape接入。R64兼容则隔离安装→真实prefill/decode→原精度任务OFF/ON；若确认NoPE272，按任务一次收齐实际NoPE源合同并提交，不让用户逐项中转，不宣称已支持。
 
-这是accuracy_eager测试版，包含CPU参考和head补齐；不能拿它测TPOT或称图/并发/MTP/PD已完成。保留PrologV3默认选择，若显式共同NATIVE精度实验必须OFF/ON同设置且在权重转换前。单遍数学.01门槛与standalone一致，旧ABI4 .001门槛不变。
-
-可选冠军对比脚本 experimental/single_pass/run_champion_ab.py 分别提供prepared_read和write_read同轮AB/BA，旧ABI4最强cold-store路径保留；只有用户后续需要再跑，不阻塞模型精度。singlepass脚本今后自动产生evidence_summary.json，请上传机器生成小证据，不再只手写15行summary。生产适配和算子团队交接以真实模型精度结果为准。
-
-## 用户重新开启读取优化（不阻塞框架任务）
-
-新增同库独立routed入口，热行跳过C4读取和解码。按 [experimental/single_pass/ROUTED_READ_TASK.md](experimental/single_pass/ROUTED_READ_TASK.md) 隔离构建，`--routed-ab` 先精度后Q4同轮graph配对。保留原overlay入口及已有94µs报告，不承诺新延迟。模型接入继续用已验证overlay库，新候选通过前不默认替换。禁止自动重跑历史扫描或让用户逐项中转。
-
-## 最新读取优化：cold-pair快速路径
-
-e6ae40c的同库原始证据确认routed117.64µs，比overlay97.64µs慢20.5%，输出一致。当前有效实现仍用overlay，不能把旧routed称优化成功。用户授权继续实现冷pair直接原生搬运，最新任务为 [experimental/single_pass/FAST_PAIR_TASK.md](experimental/single_pass/FAST_PAIR_TASK.md)。先Q4同库三臂精度/graph配对，`--fast-pair-ab`；保留所有原始结果。80µs只是争取目标，未测前不宣称达到。框架模型精度继续并行，不等待本轮摸高。
-
-## 最新读取候选：热DMA提前入队
-
-452fa69已回传fast-pair91.55µs，比overlay97.60µs快6.2%，数学/graph/排列均通过。保留fast-pair作为当前有效读取实现。用户继续优化，新任务 [experimental/single_pass/EARLY_HOT_TASK.md](experimental/single_pass/EARLY_HOT_TASK.md)：第五独立入口提前发起热DMA，经输入队列同步冷/热完成，省去单独完成事件；本机SDK确认依赖后，`--early-hot-ab`先精度再与fast-pair同轮graph配对。新候选未测前不替换默认，不承诺80µs；框架精度并行继续。
-
-## 当前80µs方向：统计输出2×2，再决定tile
-
-753ad93确认early-hot与fast-pair打平，保留91.7µs fast-pair。新任务 [experimental/single_pass/STATS_AND_TILE_TASK.md](experimental/single_pass/STATS_AND_TILE_TASK.md)：`--stats-ab`直接复用现有库，测original/fast-pair×stats OFF/ON，完整数学/graph及同合同配对。无需重编ASC，不再重复同步换序。加载tile8/16/32是下一步源码方向，尚未实现，32行资源需计入kernel额外98304B cross-core UB。80µs仍为目标，不能提前声称达到；框架模型精度并行继续。
-
-## 立即执行：实际加载tile候选已交付
-
-用户要求下班前直接拿到可测试代码。执行 [experimental/single_pass/LOAD_TILE_TASK.md](experimental/single_pass/LOAD_TILE_TASK.md)：完整8/16/32行布局、五种buffer配置、同库fast-pair基线。`--load-tile-ab`先精度再Q4graph同轮配对。不要再仅改三常量，也不要把281881d故障猜成已确认UB根因；先确认故障设备恢复/选择健康空闲设备，不绕过marker。新候选未测，不承诺80µs。模型精度任务继续并行。
+48项框架宿主检查通过；实际模型、任务分数和生产图/并发/MTP/PD未验证。82µs范围为prepared-read，不是TPOT。普通源码定位/构建问题内网agent自主解决，不再启动历史优化扫描。

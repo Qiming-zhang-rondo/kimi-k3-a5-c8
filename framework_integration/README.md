@@ -1,52 +1,20 @@
-# recent128 框架精度接入候选
+# recent128 V4 框架精度接入
 
-当前优先执行 [SINGLE_PASS_FRAMEWORK_TASK.md](SINGLE_PASS_FRAMEWORK_TASK.md)。新增 `--arm single_pass` 接入ABI1整TopK单遍reader；旧 `--arm fused` 保留为ABI4热读＋冷态归约对照。单遍框架源码已接线，实际模型仍待内网验证。
+当前执行 [CURRENT_FRAMEWORK_TASK.md](CURRENT_FRAMEWORK_TASK.md)。已验证的V4单算子为32行加载、416B输入、输入2份/输出1份buffer，Q4/K8K prepared-read约82.08µs；框架probe现明确选择load_tile4，核对真实导出/geometry与库SHA，不回退旧overlay。
 
-单遍精度模式使用所有行的独立FP64完整softmax数学参考（.01，与standalone一致），不调用NPU冷读/热读来生成候选或参考；旧ABI4的.001 compact-native门槛保持。物理C4 pool完整保留、逻辑页表按原映射传递；CPU参考只取TopK选中页，检查缺失BF16 tags和future索引。当前仅R64/packed400，NoPE0显式拒绝。该测试入口包含CPU参考和head补齐，不代表生产性能。
+实际接线保留原C4量化和写入，在RMSNorm/RoPE之后、MXFP4之前捕获原BF16 KV，写带logical-position tags的分层热环。原TopK整体传给一次attention流水，后续回到框架的输出投影。CPU完整FP64参考检查每个真实query/head，validation NPU attention=0。V4输出stats关闭，库/实际entry/variant和调用次数进入证据。
 
-从单算子进入真实模型验证。策略保持 **C4 冷 KV + 原始 BF16 recent128**，模型原来的 TopK、Hadamard 权重和 MXFP4 量化参数均不改动。
-
-这次交付是实际 MXLLM worker overlay、原生 BF16 写点、attention 替换、融合入口调用及模型 smoke。**尚未在实际模型上运行，不是生产性能交付。** 内网执行任务见 [FRAMEWORK_EXECUTION_TASK.md](FRAMEWORK_EXECUTION_TASK.md)，无需用户逐项搬运依赖和错误。
-
-## 接线
-
-1. 在 MXLLM `patch_sfa_v1_mxfp4._mxfp4_custom_kv_rmsnorm_rope` 的 RMSNorm/RoPE 后、MXFP4 前保存真实 BF16。原生量化与 C4 写入仍由原框架执行。
-2. 每层维护独立、带 logical-position tags 的 BF16 环；容量按 `align_up(128 + max_query_chunk - 1, 128)`，支持分块 prefill 和串行 decode。不会用 C4 反量化值充当 BF16。
-3. 沿用原 TopK，只按每个 query 的位置拆为冷/热两组。热命中数可能为 0..128，原生 BF16 对照按真实数量紧凑调用，避开旧包的 `-1` 尾部填充问题。
-4. 热命中恰好 128 的组调用已经测过的 ABI4 BF16 hot-read + cold-state merge。小于 128 的组走精确原生对照并记录原因。原生 C4 cold attention 仍是独立一次调用。
-5. 每个实际融合输出均与当次 compact 原生两遍结果进行完整比较，沿用 global/worst-row relative L2 ≤ 0.001 的门禁。最后把候选结果交回模型的 `_v_up_proj` / `_finalize_o_proj`。
-
-TP 后 head 数可以小于 64；精度模式以独立 head 的零填充适配原 H64 入口，大于 64 则分组。NoPE 模型的冷端仍是其真实 272B/R0 布局；仅 BF16 hot reader 的 RoPE64 输入为零，保留模型原 softmax scale。这些适配均需现场精度确认，并计入证据；**不能拿这条带检查/补齐的路径宣称原微基准的性能。**
-
-## 初始范围
-
-- `execution="accuracy_eager"`，单机、单活动请求，Q≤1024。
-- 原生 preprocessing，PD / PCP / DCP / MTP / prefix caching 关闭。多请求、spec 回滚、PD 热环传输和图捕获尚未接入。
-- 默认 `window=0`，不分配热环、不加载候选库、不增设备操作。
-- 默认 `preprocess="preserve"`。遇到 PROLOG_V3 不会静默降级：现有接口没有原始 BF16 KV 输出。
-- 若现场确实是 PROLOG_V3，可对 **OFF 和 ON 两臂同时** 显式选择 `preprocess="native_accuracy"`，在权重转换之前选择 NATIVE，仅用于先验证精度。该成绩不代表原 PrologV3 服务路径，也不能用于 TPOT 验收。
-
-## 安装与执行
-
-默认检查只读，应用时保存原始源码和恢复清单。目标必须是隔离的 MXLLM 源码目录。
+**格式边界：已验证kernel仅D512/R64/packed400。** GLM-5.3-Flash相关源码存在NoPE/R0/packed272路径；先用JSON-only预检读取实际checkpoint配置。不兼容会在加载权重前停止，不把272B当400B或用Python补齐冷cache。当前尚不能声称Flash NoPE模型已接通；任务说明要求内网agent自主一次收齐NoPE对应源合同，不让用户反复中转。
 
 ```bash
-python framework_integration/install_overlay.py --mxllm-root /path/to/isolated-mxllm --check
-python framework_integration/install_overlay.py --mxllm-root /path/to/isolated-mxllm \
-  --apply --output /tmp/recent128-framework/install
+python framework_integration/run_model_probe.py --engine-json /path/to/engine.json \
+  --arm single_pass --preflight-only --output /tmp/recent128-model-preflight
 ```
 
-已核对基线：MXLLM `3ba7355d79a02eb0e292fae92cfacf583b117816`，其 vllm-ascend pin 为 `760d7ecbb962135fff738726825cffacc74f5d2f`。若实际源码不同，安装器拒绝盲改；内网 agent 应先核对真实接口，再传其精确 SHA 或修改相应 adapter，不能自动把报错的 SHA 当成认可。
+兼容R64后：隔离安装overlay，OFF/native/V4独立进程真实prompt smoke，再跑原GLM评分任务。完整命令、Prolog共同NATIVE实验要求及NoPE分支交付见当前任务。
 
-从当前真实模型启动参数整理 `engine.json`，保留 checkpoint/TP/权重量化/attention 配置，明确 `enforce_eager=true`、`max_num_seqs=1`、`enable_prefix_caching=false`、`enable_chunked_prefill=true`、`max_num_batched_tokens≤512`。`attention_config.mla_kv_quant_mode` 应为 `mxfp4`。真实输入放在 JSONL 的 `id,prompt` 字段中。
+配置additional_config.sfa_recent128新增single_pass_kernel=overlay/fast_pair/load_tile4。旧配置默认overlay兼容；probe默认load_tile4。window0不分配热环或加载候选库。真实库缺入口/geometry不符会失败，不静默fallback。
 
-```bash
-python framework_integration/run_model_probe.py --engine-json /tmp/recent128-framework/engine.json \
-  --prompts-jsonl /tmp/recent128-framework/prompts.jsonl --mxllm-root /path/to/isolated-mxllm \
-  --library-dir /path/to/verified-direct-build --arm fused --output /tmp/recent128-framework/fused
-python framework_integration/collect_framework_evidence.py /tmp/recent128-framework/fused
-```
+当前仅accuracy_eager、单活动请求、Q<=1024；不支持prefix/PD/PCP/DCP/MTP、图捕获。head补齐、CPU参考和metadata复制属于精度检查，不能用此路径测TPOT。生产Prolog/静态缓冲/并发与PD生命周期需后续适配，真实模型和服务尚未在本机验证。
 
-OFF / native 两臂分别使用 `--arm off` / `--arm native`，独立进程、不同输出目录。需要 NATIVE 精度实验时三臂都加同一个 `--native-accuracy-preprocess`，不要只改 ON。探针仅证明真实模型接线，需要继续运行用户原有 GLM 精度任务。
-
-证据区分 `EXERCISED`、融合覆盖率和任务精度；生成完成或 fallback 全通过都不能替代融合已执行、模型精度已测。仅发送摘要和必要源码到 GitHub，原始内部 prompt、权重和大型日志留在内网。
+历史ABI4热读归约任务保留在FRAMEWORK_EXECUTION_TASK.md；旧94µs单遍接线任务保留在SINGLE_PASS_FRAMEWORK_TASK.md，均不取代当前V4任务。

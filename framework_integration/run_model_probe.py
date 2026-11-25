@@ -19,7 +19,7 @@ def flush_worker_evidence(worker):
 
 
 def engine_options(options, *, arm, source_root, library_dir, diagnostics, max_query_chunk,
-                   native_accuracy_preprocess=False):
+                   native_accuracy_preprocess=False,single_pass_kernel="load_tile4"):
     value = json.loads(json.dumps(options))
     if not value.get("model"):
         raise ValueError("engine JSON must name the actual model checkpoint")
@@ -53,17 +53,25 @@ def engine_options(options, *, arm, source_root, library_dir, diagnostics, max_q
         preprocess="native_accuracy" if native_accuracy_preprocess else "preserve",
         source_root=str(source_root), library_dir=str(library_dir) if library_dir else None,
         diagnostics_path=str(diagnostics))
+    if arm=="single_pass":
+        if single_pass_kernel not in ("overlay","fast_pair","load_tile4"):
+            raise ValueError("single_pass_kernel must be overlay, fast_pair or load_tile4")
+        additional["sfa_recent128"]["single_pass_kernel"]=single_pass_kernel
     return value
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine-json", type=Path, required=True)
-    parser.add_argument("--prompts-jsonl", type=Path, required=True, help="id,prompt JSON objects; use actual model inputs")
-    parser.add_argument("--mxllm-root", type=Path, required=True)
+    parser.add_argument("--prompts-jsonl", type=Path, help="id,prompt JSON objects; required for an actual model run")
+    parser.add_argument("--mxllm-root", type=Path, help="Required for an actual model run")
+    parser.add_argument("--preflight-only",action="store_true",
+        help="Read local checkpoint config.json and report compatibility without importing the model/framework")
     parser.add_argument("--operator-source", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--library-dir", type=Path)
     parser.add_argument("--arm", choices=("off", "native", "fused", "single_pass"), required=True)
+    parser.add_argument("--single-pass-kernel",choices=("overlay","fast_pair","load_tile4"),default="load_tile4",
+        help="Explicit one-attention entry; default load_tile4 requires its real export and verified rows32/stride416/I2/O1 geometry")
     parser.add_argument("--max-query-chunk", type=int, default=512)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--native-accuracy-preprocess", action="store_true",
@@ -74,10 +82,25 @@ def main():
         parser.error("Use a new isolated output directory; existing evidence is never overwritten")
     args.output.mkdir(parents=True)
     options = json.loads(args.engine_json.read_text())
+    from model_preflight import COMPATIBLE,inspect_model_format
+    preflight=inspect_model_format(options)
+    (args.output/"preflight.json").write_text(json.dumps(preflight,ensure_ascii=False,indent=2)+"\n")
+    if args.preflight_only:
+        print(json.dumps(dict(status=preflight["status"],preflight=str(args.output/"preflight.json"))))
+        return 0 if preflight["status"]==COMPATIBLE else 2
+    if args.arm=="single_pass" and preflight["status"]!=COMPATIBLE:
+        failure=dict(status="MODEL_FORMAT_UNSUPPORTED",arm=args.arm,
+            single_pass_kernel=args.single_pass_kernel,model_format_status=preflight["status"],
+            preflight=str(args.output/"preflight.json"),model_accuracy="NOT_MEASURED",
+            scope="Stopped before framework import or model weight loading")
+        (args.output/"probe.json").write_text(json.dumps(failure,ensure_ascii=False,indent=2)+"\n")
+        raise RuntimeError("Single-pass model preflight failed: "+preflight["status"]+". "+preflight["action"])
+    if args.prompts_jsonl is None or args.mxllm_root is None:
+        parser.error("An actual model run requires --prompts-jsonl and --mxllm-root")
     options = engine_options(options, arm=args.arm, source_root=args.operator_source.resolve(),
         library_dir=args.library_dir.resolve() if args.library_dir else None,
         diagnostics=args.output.resolve()/"layers", max_query_chunk=args.max_query_chunk,
-        native_accuracy_preprocess=args.native_accuracy_preprocess)
+        native_accuracy_preprocess=args.native_accuracy_preprocess,single_pass_kernel=args.single_pass_kernel)
     prompts = [json.loads(line) for line in args.prompts_jsonl.read_text().splitlines() if line.strip()]
     if not prompts or any(not isinstance(p.get("prompt"), str) for p in prompts):
         parser.error("Provide nonempty actual text prompts")
@@ -103,10 +126,11 @@ def main():
     worker_reports = llm.collective_rpc(flush_worker_evidence)
     (args.output/"probe.json").write_text(json.dumps(dict(status="GENERATION_FINISHED", arm=args.arm,
         prompt_sha256=fingerprint, prompts=len(prompts), max_tokens=args.max_tokens,
+        single_pass_kernel=args.single_pass_kernel if args.arm=="single_pass" else None,
         scope="real-model wiring smoke; task accuracy and serving performance remain unmeasured",
         installed_mxllm=str(Path(ascend_vllm.__file__).resolve()), worker_reports=worker_reports), indent=2)+"\n")
     # Worker atexit hooks write the final layer counters on orderly process exit.
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

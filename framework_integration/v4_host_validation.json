@@ -1,0 +1,14 @@
+{
+  "status": "HOST_CHECKS_PASS",
+  "framework_host_tests": 48,
+  "requested_kernel": "load_tile4",
+  "actual_public_entry": "QsfaSinglePassLaunchLoadTile",
+  "actual_device_entry": "QsfaSinglePassLaunchLoadTile32",
+  "variant": 4,
+  "geometry": {"rows":32,"input_stride_bytes":416,"input_depth":2,"output_depth":1},
+  "model_preflight": "JSON-only before framework import or weight loading",
+  "real_model_execution": "NOT_RUN",
+  "real_model_accuracy": "NOT_MEASURED",
+  "production_performance": "NOT_MEASURED",
+  "NoPE_272_kernel_support": "NOT_IMPLEMENTED"
+}

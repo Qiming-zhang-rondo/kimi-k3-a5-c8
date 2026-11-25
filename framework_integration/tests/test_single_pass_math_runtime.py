@@ -46,7 +46,9 @@ class SinglePassMathRuntimeTest(unittest.TestCase):
         q=Tensor(np.zeros((1,1,512),np.float32));qr=Tensor(np.zeros((1,1,64),np.float32))
         ids=np.full((1,1,2048),-1,np.int32);ids[0,0,:3]=[0,128,255]
         topk=Tensor(ids);table=Tensor(np.array([[3,1]],np.int32))
-        reader=SimpleNamespace(calls=0,last_attention_calls=1)
+        reader=SimpleNamespace(calls=0,last_attention_calls=1,last_call_metadata=dict(
+            kernel_variant="overlay",entry="QsfaSinglePassLaunch",return_stats=False,
+            external_merge_calls=0,topk_partitioned=False,head_groups=1))
         def read(*args):
             reader.calls+=1
             self.assertIs(args[2],cold)

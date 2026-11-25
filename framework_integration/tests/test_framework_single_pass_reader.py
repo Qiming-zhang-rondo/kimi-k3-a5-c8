@@ -98,6 +98,56 @@ class FrameworkSinglePassReaderTests(unittest.TestCase):
         self.assertEqual(len(self.bridge.preparations),1)
         self.assertEqual(reader.last_attention_calls,2)
 
+    def test_fast_pair_is_explicit_actual_export_with_stats_disabled(self):
+        self.config.single_pass_kernel="fast_pair"
+        self.bridge.configuration=lambda:{"abi_version":1,"buffers_bytes":120,"fast_pair_reader_available":True}
+        reader=reader_module.SinglePassReader(self.config,self.impl)
+        reader.read(*self.inputs())
+        self.assertEqual(self.bridge.calls[0][-4:],(128,False,False,True))
+        self.assertFalse(self.bridge.preparations[0][1][-1])
+        self.assertEqual(reader.last_call_metadata["kernel_variant"],"fast_pair")
+        self.assertEqual(reader.last_call_metadata["entry"],"QsfaSinglePassLaunchFastPair")
+        self.assertFalse(reader.last_call_metadata["return_stats"])
+        self.assertEqual(reader.last_call_metadata["external_merge_calls"],0)
+        self.assertEqual(reader.configuration()["kernel_variant"],"fast_pair")
+
+    def test_missing_fast_pair_export_fails_before_any_overlay_launch(self):
+        self.config.single_pass_kernel="fast_pair"
+        with self.assertRaisesRegex(RuntimeError,"refusing overlay fallback"):
+            reader_module.SinglePassReader(self.config,self.impl)
+        self.assertEqual(self.bridge.calls,[])
+        self.assertEqual(self.bridge.preparations,[])
+
+    def test_load_tile4_verifies_geometry_and_calls_actual_variant4(self):
+        self.config.single_pass_kernel="load_tile4"
+        for key in (4,"4"):
+            self.bridge.configuration=lambda:{"abi_version":1,"buffers_bytes":120,
+                "load_tile_reader_available":True,"load_tile_variants":{key:
+                    dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=1)}}
+            reader=reader_module.SinglePassReader(self.config,self.impl)
+            reader.read(*self.inputs())
+            self.assertEqual(self.bridge.calls[-1][-6:],(128,False,False,False,False,4))
+            self.assertFalse(self.bridge.preparations[-1][1][-1])
+            self.assertEqual(reader.last_call_metadata["kernel_variant"],"load_tile4")
+            self.assertEqual(reader.last_call_metadata["entry"],"QsfaSinglePassLaunchLoadTile")
+            self.assertEqual(reader.last_call_metadata["device_entry"],"QsfaSinglePassLaunchLoadTile32")
+            self.assertEqual(reader.last_call_metadata["load_variant"],4)
+            self.assertEqual(reader.configuration()["load_variant"],4)
+
+    def test_load_tile4_missing_export_or_wrong_geometry_never_launches(self):
+        self.config.single_pass_kernel="load_tile4"
+        for fields in ({},dict(load_tile_reader_available=True),
+                       dict(load_tile_reader_available=True,load_tile_variants={4:
+                           dict(rows=16,input_stride_bytes=416,input_depth=2,output_depth=1)}),
+                       dict(load_tile_reader_available=True,load_tile_variants={4:
+                           dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=True)})):
+            with self.subTest(fields=fields):
+                self.bridge.configuration=lambda:dict(abi_version=1,buffers_bytes=120,**fields)
+                with self.assertRaisesRegex(RuntimeError,"load_tile4"):
+                    reader_module.SinglePassReader(self.config,self.impl)
+        self.assertEqual(self.bridge.calls,[])
+        self.assertEqual(self.bridge.preparations,[])
+
     def test_rope_zero_and_wrong_abi_are_rejected_before_any_launch(self):
         self.impl.qk_rope_head_dim=0
         with self.assertRaisesRegex(RuntimeError,"272-byte"):

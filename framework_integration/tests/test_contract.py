@@ -177,6 +177,13 @@ class Recent128ContractTest(unittest.TestCase):
                       preprocess="native_accuracy")
         cfg = parse_recent128_config({"sfa_recent128": values})
         self.assertEqual(cfg.reader, "single_pass")
+        self.assertEqual(cfg.single_pass_kernel,"overlay")
+        fast = parse_recent128_config({"sfa_recent128":dict(values,single_pass_kernel="fast_pair")})
+        self.assertEqual(fast.single_pass_kernel,"fast_pair")
+        load = parse_recent128_config({"sfa_recent128":dict(values,single_pass_kernel="load_tile4")})
+        self.assertEqual(load.single_pass_kernel,"load_tile4")
+        with self.assertRaisesRegex(ContractError,"single_pass_kernel"):
+            parse_recent128_config({"sfa_recent128":dict(values,single_pass_kernel="early_hot")})
         self.assertEqual(cfg.preprocess, "native_accuracy")
         for name in ("library_dir", "source_root", "diagnostics_path"):
             incomplete = dict(values)

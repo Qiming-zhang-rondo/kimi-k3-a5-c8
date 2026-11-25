@@ -32,6 +32,7 @@ class Recent128Config:
     library_dir: str | None = None
     source_root: str | None = None
     diagnostics_path: str | None = None
+    single_pass_kernel: str = "overlay"
 
     def __post_init__(self):
         window = _integer("window", self.window)
@@ -45,6 +46,8 @@ class Recent128Config:
             raise ContractError("preprocess must be preserve or native_accuracy; the explicit override is offline accuracy only")
         if self.reader not in ("native", "fused_eligible", "fused_required", "single_pass"):
             raise ContractError("reader must be native, fused_eligible, fused_required or single_pass")
+        if self.single_pass_kernel not in ("overlay", "fast_pair", "load_tile4"):
+            raise ContractError("single_pass_kernel must be overlay, fast_pair or load_tile4")
         for name in ("library_dir", "source_root", "diagnostics_path"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -78,7 +81,7 @@ def parse_recent128_config(additional_config=None):
         return Recent128Config()
     if not isinstance(raw, Mapping):
         raise ContractError("additional_config.sfa_recent128 must be a mapping")
-    allowed = {"window", "execution", "preprocess", "max_query_chunk", "reader", "library_dir", "source_root", "diagnostics_path"}
+    allowed = {"window", "execution", "preprocess", "max_query_chunk", "reader", "library_dir", "source_root", "diagnostics_path", "single_pass_kernel"}
     unknown = sorted(set(raw)-allowed)
     if unknown:
         raise ContractError("Unsupported recent128 options; baseline quantization cannot be changed: " + ", ".join(unknown))

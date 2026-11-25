@@ -101,5 +101,47 @@ class FrameworkEvidenceTests(unittest.TestCase):
                           full_math_checked_rows=1,candidate_attention_calls=2,validation_attention_calls=0))
         self.assertEqual(collector.collect(self.root)["status"],"FAILED")
 
+    def test_fast_pair_request_requires_actual_export_identity_and_full_call_counts(self):
+        self.write("probe.json",dict(status="GENERATION_FINISHED",arm="single_pass",single_pass_kernel="fast_pair"))
+        counts=dict(read_calls=2,query_rows=256,fused_rows=256,fused_kernel_calls=2,
+            full_math_checked_rows=256,candidate_attention_calls=2,validation_attention_calls=0,
+            single_pass_expected_attention_calls=2,single_pass_fast_pair_calls=2)
+        call=dict(kernel_variant="fast_pair",entry="QsfaSinglePassLaunchFastPair",return_stats=False,
+            external_merge_calls=0,topk_partitioned=False,head_groups=1,candidate_attention_calls=1)
+        identity=dict(library_sha256="a"*64,configuration=dict(abi_version=1))
+        def write_case(**changes):
+            values=dict(reader="single_pass",single_pass_kernel="fast_pair",counters=counts,
+                control_scope="full_FP64_whole_selected_set",control_limit=.01,
+                single_pass_last_call=call,library_identity=identity)
+            values.update(changes)
+            self.layer(**values)
+        write_case()
+        self.assertEqual(collector.collect(self.root)["status"],"WIRING_VALIDATED")
+        for changes in (dict(single_pass_last_call=dict(call,entry="QsfaSinglePassLaunch")),
+                        dict(library_identity=dict(identity,library_sha256=None)),
+                        dict(counters=dict(counts,single_pass_fast_pair_calls=1))):
+            with self.subTest(changes=changes):
+                write_case(**changes)
+                self.assertEqual(collector.collect(self.root)["status"],"FAILED")
+
+    def test_tile4_request_requires_actual_geometry_and_variant_calls(self):
+        self.write("probe.json",dict(status="GENERATION_FINISHED",arm="single_pass",single_pass_kernel="load_tile4"))
+        counts=dict(read_calls=1,query_rows=4,fused_rows=4,fused_kernel_calls=1,
+            full_math_checked_rows=4,candidate_attention_calls=1,validation_attention_calls=0,
+            single_pass_expected_attention_calls=1,single_pass_load_tile4_calls=1)
+        call=dict(kernel_variant="load_tile4",entry="QsfaSinglePassLaunchLoadTile",load_variant=4,
+            device_entry="QsfaSinglePassLaunchLoadTile32",return_stats=False,
+            external_merge_calls=0,topk_partitioned=False,head_groups=1,candidate_attention_calls=1)
+        geometry=dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=1)
+        def write_case(actual_geometry):
+            self.layer(reader="single_pass",single_pass_kernel="load_tile4",counters=counts,
+                control_scope="full_FP64_whole_selected_set",control_limit=.01,
+                single_pass_last_call=call,library_identity=dict(library_sha256="b"*64,
+                    configuration=dict(abi_version=1,load_tile_variants={"4":actual_geometry})))
+        write_case(geometry)
+        self.assertEqual(collector.collect(self.root)["status"],"WIRING_VALIDATED")
+        write_case(dict(geometry,rows=16))
+        self.assertEqual(collector.collect(self.root)["status"],"FAILED")
+
 
 if __name__=="__main__": unittest.main()
