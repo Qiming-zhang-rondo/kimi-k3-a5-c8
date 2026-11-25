@@ -1,0 +1,31 @@
+{
+  "status": "SOURCE_PROTOTYPE_HOST_CHECKED",
+  "timestamp_utc": "2026-11-25T07:01:51.107449+00:00",
+  "source_snapshot": "2a2beb51b4db2ae02c9c120527cbc04c4e99bbb7",
+  "manifest_sources_verified": 41,
+  "host_tests_passed": 9,
+  "sdk_build": "NOT_RUN",
+  "device_accuracy": "NOT_RUN",
+  "performance": "NOT_MEASURED",
+  "one_attention_per_candidate_call": true,
+  "second_attention_in_candidate": false,
+  "external_partition_in_candidate": false,
+  "external_merge_in_candidate": false,
+  "hot_tokens_also_c4_decoded_before_bf16_overlay": true,
+  "source_sha256": {
+    "experimental/single_pass/A5_EXECUTION_TASK.md": "6becb0196f1323a292a7a2ef016c8f81ddc40c2235732ea0b9e0d25206825a12",
+    "experimental/single_pass/CMakeLists.txt": "8058ed428c20c04a5a87bfc359611e8083127e765b5527dd671e43ad07accf1b",
+    "experimental/single_pass/README.md": "a44fc220b015f31c1cb906c6130ad50527857411da12c7192c0762774d16244e",
+    "experimental/single_pass/arch35/kv_quant_sparse_flash_attention_kernel_mla.h": "baaa8f7dbd801a041910923b8c3f92f38f4ff84b013894526eb700d4cd6e662c",
+    "experimental/single_pass/arch35/kv_quant_sparse_flash_attention_service_vector_mla.h": "f81f18c76c39c5cdbdde48049ac0e59c81856bdca55167d61bdce7c1273d9647",
+    "experimental/single_pass/host_contract.py": "ab2e84802d5a9d45da99ea8ab3e06df740c9ae9d32ee5bb557a92576b916a810",
+    "experimental/single_pass/load_single_pass.py": "31fded7761c07750ca1acbd4691f9ba364e19cd0c55912ad9ab53d847d8c5fa2",
+    "experimental/single_pass/original_c4_wrapper.asc": "2297e20918201978ce7827ce23ac20e582ffae8392cd297b4ad595d588d5f48a",
+    "experimental/single_pass/run_single_pass.py": "88a524c6fd73253094ac2f39ba6cdb670bf0a00af4cf506fe1249b659ff8f31e",
+    "experimental/single_pass/single_pass_api.h": "a43a7f579109d5bae01a1f337daa117ab73af6b0d50ca67b8214df0b1b3aba34",
+    "experimental/single_pass/single_pass_entry.asc": "11868e98207240864e68fda340d27fc619d8bb84454b122c718a3a981acbce67",
+    "experimental/single_pass/single_pass_tiling.h": "a1ee40bf2e54a439de2ad1f620b23e3562f31f0d8bc10e0b29c6c5e73b45e728",
+    "experimental/single_pass/single_pass_wrapper.asc": "ef5e7914ea20864253ad9ea8d45fda872b8f47cbd0804f24dc470afc737669be",
+    "experimental/single_pass/torch_bridge.cpp": "ab02d1a3f4d5a4bed59df30935212eba4869c8189a381a430cbca0c288852a67"
+  }
+}
