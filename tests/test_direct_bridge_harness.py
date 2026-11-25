@@ -14,12 +14,14 @@ import run_direct_ab as harness
 
 
 class Plan:
-    def __init__(self, owner, fused, aic_count):
+    def __init__(self, owner, fused, aic_count, packed_output=False, physical_kv=256):
         self.owner, self.fused = owner, fused
         self.aic_count = aic_count
+        self.packed_output,self.physical_kv=packed_output,physical_kv
 
     def configuration(self):
-        return dict(abi_version=3, merge_tile_rows=16, aic_count=self.aic_count)
+        return dict(abi_version=4,merge_tile_rows=16,aic_count=self.aic_count,
+                    packed_output=self.packed_output,physical_kv=self.physical_kv)
 
     def native_hot(self, *args):
         self.owner.calls.append(("hot", args))
@@ -27,7 +29,7 @@ class Plan:
 
     def fused_hot(self, *args):
         self.owner.calls.append(("fused", args))
-        return ("fused_fp32", "empty", "empty")
+        return ("fused_packed" if self.packed_output else "fused_fp32", "empty", "empty")
 
 
 class Bridge:
@@ -36,17 +38,20 @@ class Bridge:
 
     def prepare(self, *args):
         self.calls.append(("prepare", args))
-        return Plan(self, args[2], args[5])
+        return Plan(self,args[2],args[5],args[6],args[7])
 
 
 class ParentRunner:
     """Model only the inherited writer/partition boundary, with changing cold pointers."""
     def __init__(self, backend, recipe, window, writer):
-        self.base = types.SimpleNamespace(q_nope="query", q_rope="qrope", cu="qlength", scale=.125)
+        queries=int(backend.base.queries) if hasattr(backend,"base") else 4
+        self.base = types.SimpleNamespace(q_nope="query",q_rope="qrope",cu="qlength",scale=.125,queries=queries)
+        self.capacity=((128+queries-2)//128+1)*128
         self.hot_cache, self.hot_rope = "ring", "rope"
         self.ring_table, self.ring_lengths = "table", "kvlength"
         self.metadata, self.events, self.n = {}, [], 0
-        self.merge_output = types.SimpleNamespace(dtype=backend or "torch.float32")
+        dtype=backend if isinstance(backend,str) else getattr(backend,"dtype","torch.float32")
+        self.merge_output = types.SimpleNamespace(dtype=dtype)
 
     def _cold_read(self, parts):
         self.events.append("cold_read")
@@ -143,7 +148,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_fused_uses_every_new_cold_state_and_runtime_partition(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)(None, bridge, fused=True)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, False, 1)))
+        self.assertEqual(bridge.calls[0],("prepare",("query",.125,True,False,False,1,False,256)))
         self.assertEqual(runner.run(write=True), "fused_fp32")
         self.assertEqual(runner.run(write=True), "fused_fp32")
         calls = [args for kind,args in bridge.calls if kind == "fused"]
@@ -156,7 +161,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_twopass_keeps_original_merge_and_requests_native_statistics(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)(None, bridge, fused=False)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, False, True, False, 1)))
+        self.assertEqual(bridge.calls[0],("prepare",("query",.125,False,True,False,1,False,256)))
         self.assertEqual(runner.run(write=True), "triton_merged")
         self.assertEqual(runner.events[-1], ("merge", ("cold_out_1", "cold_max_1", "cold_sum_1"),
                                             ("direct_bf16", "hot_max", "hot_sum")))
@@ -164,14 +169,14 @@ class DirectBridgeHarnessTests(unittest.TestCase):
     def test_native_bf16_cold_selects_bf16_io_without_python_conversion(self):
         bridge = Bridge()
         runner = harness.make_direct_runner_class(ParentRunner)("torch.bfloat16", bridge, fused=True)
-        self.assertEqual(bridge.calls[0], ("prepare", ("query", .125, True, False, True, 1)))
+        self.assertEqual(bridge.calls[0],("prepare",("query",.125,True,False,True,1,False,256)))
         self.assertEqual(runner.metadata["expected_pipeline_output_dtype"], "torch.bfloat16")
         self.assertEqual(runner.metadata["cold_state_cast_kernel_calls"], 0)
         runner.run(write=True)
         self.assertEqual(bridge.calls[-1][1][9], "cold_out_1")
         native_bridge = Bridge()
         harness.make_direct_runner_class(ParentRunner)("torch.bfloat16", native_bridge, fused=False)
-        self.assertFalse(native_bridge.calls[0][1][-2], "Native BF16 hot reader uses its original specialization")
+        self.assertFalse(native_bridge.calls[0][1][4], "Native BF16 hot reader uses its original specialization")
 
     def test_task_count_is_explicit_for_both_direct_arms_and_invalid_count_never_prepares(self):
         cls = harness.make_direct_runner_class(ParentRunner)
@@ -179,14 +184,76 @@ class DirectBridgeHarnessTests(unittest.TestCase):
             for count in (1, 2, 4):
                 bridge = Bridge()
                 runner = cls("torch.bfloat16", bridge, fused=fused, aic_count=count)
-                self.assertEqual(bridge.calls[0][1][-1], count)
+                self.assertEqual(bridge.calls[0][1][5], count)
                 self.assertEqual(runner.metadata["direct_configuration"]["aic_count"], count)
                 self.assertEqual(runner.metadata["direct_aiv_count"], 2*count)
                 self.assertEqual(runner.metadata["direct_configuration"]["merge_tile_rows"], 16)
         bridge = Bridge()
-        with self.assertRaisesRegex(ValueError, "1, 2 or 4"):
+        with self.assertRaisesRegex(ValueError, "1/2/4/8/16"):
             cls(None, bridge, fused=True, aic_count=3)
         self.assertEqual(bridge.calls, [])
+
+    def test_dynamic_queries_pass_actual_ring_capacity_and_packed_choice(self):
+        cls=harness.make_direct_runner_class(ParentRunner)
+        for queries,capacity in ((1,128),(32,256),(128,256),(256,384),(1024,1152)):
+            backend=types.SimpleNamespace(base=types.SimpleNamespace(queries=queries),dtype="torch.bfloat16")
+            count=min(queries,16)
+            bridge=Bridge()
+            runner=cls(backend,bridge,fused=True,aic_count=count,packed_output=True)
+            self.assertEqual(bridge.calls[0][1][-3:],(count,True,capacity))
+            self.assertEqual(runner.run(write=True),"fused_packed")
+        for queries,count in ((1,2),(3,2),(1025,1),(32,3),(32,True)):
+            with self.assertRaises(ValueError): harness.validate_task_count(queries,count)
+
+    def test_summary_artifacts_discard_full_states_but_keep_transient_full_accuracy_input(self):
+        import numpy as np
+        store=harness.ArtifactStore("summary")
+        value=np.arange(32,dtype=np.float32)
+        store["reader_cold_out"]=value
+        self.assertNotIn("reader_cold_out",store)
+        self.assertEqual(store.array_metadata["reader_cold_out"]["shape"],[32])
+        store["arm_write_read"]=value
+        self.assertIs(store["arm_write_read"],value)
+        with tempfile.TemporaryDirectory() as directory:
+            store.save(directory)
+            self.assertFalse((Path(directory)/"outputs.npz").exists())
+        store.release_transient()
+        self.assertFalse(store)
+        full=harness.ArtifactStore("full")
+        full["all_elements"]=value
+        with tempfile.TemporaryDirectory() as directory:
+            full.save(directory)
+            with np.load(Path(directory)/"outputs.npz",allow_pickle=False) as archive:
+                np.testing.assert_array_equal(archive["all_elements"],value)
+
+    def test_optional_packed_arm_requires_all_controls_and_adds_three_pairs(self):
+        names=(*harness.ARMS,"direct_fused_packed")
+        calls={name:object() for name in names}
+        seen=[]
+        def paired(left,right,*_):
+            seen.append((left,right))
+            return {"graph":{"status":"MEASURED"}}
+        with self.assertRaises(harness.ControlFailed):
+            harness.timed_pairs({name:name!="direct_fused_packed" for name in names},calls,None,None,paired)
+        self.assertFalse(seen)
+        results=harness.timed_pairs(dict.fromkeys(names,True),calls,None,None,paired)
+        self.assertEqual(len(results),8)
+        self.assertIn("direct_fused_packed_vs_direct_fused",results)
+        self.assertIn("direct_fused_packed_vs_installed_native_twopass",results)
+
+    def test_zero_query_exact_gate_accepts_variable_q_without_sampling(self):
+        import numpy as np
+        q=32
+        out,stats=(q,64,512),(q,64,1)
+        cold=(np.ones(out,np.float32),np.zeros(stats,np.float32),np.full(stats,1920,np.float32))
+        hot=(np.full(out,1.0625,np.float32),np.zeros(stats,np.float32),np.full(stats,128,np.float32))
+        actual=np.ones(out,np.float32);native=actual.copy();native[-1,-1,-1]=1+1/128
+        kw=dict(cold_dtype="torch.bfloat16",hot_dtype="torch.bfloat16",output_dtype="torch.bfloat16")
+        self.assertTrue(harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kw)["passed"])
+        actual[-1,-1,-1]=1+1/128
+        result=harness.zero_query_exact_rne_gate(cold,hot,actual,native,**kw)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["actual_oracle_bit_mismatch_count"],1)
 
     def test_prepared_reader_stages_do_not_hide_cold_read_inside_hot_only_timer(self):
         class StageParent(ParentRunner):

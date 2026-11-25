@@ -1,15 +1,13 @@
-# 当前任务：继续优化已测通的融合算子
+# 当前任务：大chunk形状与合并批量扫描
 
-7ca3b03已交付四臂graph性能：现有两遍125.57µs、direct两遍136.90µs、
-融合134.36µs。融合仍慢于现有两遍约7.1%，只快于direct两遍约1.8%。
-不能把graph replay里的11µs差异直接归因于Python/C++桥。
+用户最新要求优先覆盖Q32、64、128、256、512、1024，不能以Q4证明通用最优。
+执行 [SHAPE_SWEEP_NEXT.md](SHAPE_SWEEP_NEXT.md)。默认包括Q1/Q4对照、K8K/K32K、
+4/8/16 AIC、BF16合并8/16/32行，先返回大chunk覆盖，再继续调参。
 
-**现在执行 [OPTIMIZE_NEXT.md](OPTIMIZE_NEXT.md)：隔离构建ABI3候选，首测4AIC按query并行
-加16行批量冷态合并；一次运行完成原精度门禁、四臂同轮配对及独立阶段计时。**
-这是新的内核配置，必须用新构建目录；不要沿用ABI2旧.so。
-旧已验证库、结果和baseline量化配方保持原样。
+56ab1fb已实测Q4/core4/rows16融合113.56µs，较同轮installed两遍快9.5%；
+保留此已验证库与结果。本轮动态形状/ABI4和可选packed输出尚待A5验证。
+原始18文件payload不改，精度门槛不变；完整逐元素和逐行检查继续执行。
 
-本地只验证宿主合同、指针/任务转发、CPU设备头模型和harness控制流。
-新配置尚待现场SDK编译和A5验证，不能先标记有性能收益。
-普通构建/API问题由现场代理连续处理并提交实际修复，不让用户逐项中转。
-规则见 [AGENTS.md](AGENTS.md)。
+先完成形状扫描，不扩展冷写融合。脚本从已验证build继承同SDK参数、隔离构建，
+逐组更新summary.csv及best_by_shape.csv，不等全矩阵结束才返回结果。
+设备故障停整个扫描，不reset、不换marker重试。规则见 [AGENTS.md](AGENTS.md)。

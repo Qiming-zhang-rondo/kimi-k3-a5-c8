@@ -5,6 +5,11 @@ set_property(CACHE SFA_MERGE_TILE_ROWS PROPERTY STRINGS 4 8 16)
 if(NOT SFA_MERGE_TILE_ROWS MATCHES "^(4|8|16)$")
     message(FATAL_ERROR "SFA_MERGE_TILE_ROWS must be 4, 8 or 16")
 endif()
+set(SFA_BF16_MERGE_TILE_ROWS "${SFA_MERGE_TILE_ROWS}" CACHE STRING "BF16 cold-state row batch: 4, 8, 16 or 32")
+set_property(CACHE SFA_BF16_MERGE_TILE_ROWS PROPERTY STRINGS 4 8 16 32)
+if(NOT SFA_BF16_MERGE_TILE_ROWS MATCHES "^(4|8|16|32)$")
+    message(FATAL_ERROR "SFA_BF16_MERGE_TILE_ROWS must be 4, 8, 16 or 32; an AIV has at most 32 head rows, so 64 has no distinct work")
+endif()
 # Reject the invalid legacy benchmark before even searching for a toolkit.
 option(SFA_BUILD_PHASE_C "Deprecated unsafe 5407a8e benchmark; never build" OFF)
 if(SFA_BUILD_PHASE_C)
@@ -126,12 +131,14 @@ if(SFA_BUILD_TORCH_DIRECT)
     add_library(sfa_torch_direct SHARED
         sfa_direct_original_wrapper.asc
         sfa_direct_fused_wrapper.asc
-        sfa_direct_fused_bf16_wrapper.asc)
+        sfa_direct_fused_bf16_wrapper.asc
+        sfa_direct_fused_bf16_packed_wrapper.asc)
     configure_sfa(sfa_torch_direct)
     target_compile_definitions(sfa_torch_direct PRIVATE SFA_MERGE_TILE_ROWS=${SFA_MERGE_TILE_ROWS})
+    target_compile_definitions(sfa_torch_direct PRIVATE SFA_BF16_MERGE_TILE_ROWS=${SFA_BF16_MERGE_TILE_ROWS})
     set_target_properties(sfa_torch_direct PROPERTIES POSITION_INDEPENDENT_CODE ON
         UNITY_BUILD OFF)
     target_include_directories(sfa_torch_direct PRIVATE "${SFA_ACL_INCLUDE_DIR}")
     target_link_libraries(sfa_torch_direct PRIVATE m "${SFA_ACL_LIBRARY}" ascendc_runtime)
 endif()
-message(STATUS "SFA explicit-user-scratch fixed contract; SDK=${SFA_SDK_ROOT}; compiler=${CMAKE_ASC_COMPILER}; merge_tile_rows=${SFA_MERGE_TILE_ROWS}")
+message(STATUS "SFA explicit-user-scratch contract; SDK=${SFA_SDK_ROOT}; compiler=${CMAKE_ASC_COMPILER}; fp32_merge_rows=${SFA_MERGE_TILE_ROWS}; bf16_merge_rows=${SFA_BF16_MERGE_TILE_ROWS}")

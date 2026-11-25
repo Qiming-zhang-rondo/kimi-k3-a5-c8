@@ -47,10 +47,30 @@ int main() {
   }
   auto shortParallel=bytes;--shortParallel.userWorkspace;CHECK(!ValidateBufferBytes(shortParallel,n));
  }
- for(uint32_t n:{0u,3u,5u,8u}) {
+ for(uint32_t n:{0u,3u,5u,32u}) {
   CHECK(!IsSupportedAicCount(n)&&WorkspaceBytesForAic(n)==0&&!ValidateBufferBytes(b,n));
   bool rejected=false;try{MakeTiling(softmaxScale,n);}catch(const std::invalid_argument&){rejected=true;}
   CHECK(rejected);
+ }
+ // Dynamic geometry keeps the default smoke contract and exact page mapping.
+ for(uint32_t q:{1u,4u,32u,64u,128u,256u,512u,1024u}) {
+  const uint32_t kv=((q+127+127)/128)*128;
+  for(uint32_t n:{1u,2u,4u,8u,16u}) if(n<=q&&q%n==0) {
+   auto dt=MakeTiling(softmaxScale,n,q,kv);auto db=GetBufferBytes(n,q,kv);
+   CHECK(ValidateTiling(dt,n,q,kv)&&ValidateBufferBytes(db,n,q,kv));
+   CHECK(db.query==size_t(q)*64*512*2&&db.key==size_t(kv)*512*2);
+   CHECK(db.indices==size_t(q)*128*4&&db.blockTable==size_t(kv/128)*4);
+   CHECK(dt.baseParams.qSeqSize==q&&dt.baseParams.seqSize==kv&&dt.baseParams.maxBlockNumPerBatch==kv/128);
+   CHECK(dt.baseParams.actualLenDimsQ==1&&dt.baseParams.actualLenDimsKV==1);
+  }
+  std::vector<int32_t> idx(size_t(q)*128),tab(kv/128);int32_t aq=int32_t(q),ak=int32_t(kv);
+  for(size_t i=0;i<tab.size();++i)tab[i]=i;
+  for(size_t row=0;row<q;++row)for(size_t j=0;j<128;++j)idx[row*128+j]=(row+j)%kv;
+  CHECK(ValidateIndicesAndLengths(idx.data(),idx.size(),tab.data(),tab.size(),&aq,1,&ak,1,q,kv));
+ }
+ for(auto shape:std::vector<std::array<uint32_t,3>>{{0,256,1},{1025,1152,1},{4,127,1},{4,129,1},{4,256,8},{3,256,2}}) {
+  CHECK(!IsSupportedGeometry(shape[0],shape[1],shape[2]));
+  bool reject=false;try{MakeTiling(softmaxScale,shape[2],shape[0],shape[1]);}catch(const std::invalid_argument&){reject=true;}CHECK(reject);
  }
  // Bound every consumed query/head row, sparse-index row and physical paged KV row.
  for(size_t q=0;q<queries;++q) for(size_t h=0;h<heads;++h) {

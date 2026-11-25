@@ -4,6 +4,8 @@
 #pragma once
 
 #include <array>
+#include <vector>
+#include <limits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -44,7 +46,14 @@ inline constexpr std::size_t userWorkspaceBytesPerAic =
 inline constexpr std::size_t userWorkspaceBytes = userWorkspaceBytesPerAic * launchAic;
 inline constexpr bool IsSupportedAicCount(std::uint32_t count)
 {
-    return count == 1 || count == 2 || count == 4;
+    return count == 1 || count == 2 || count == 4 || count == 8 || count == 16;
+}
+inline constexpr bool IsSupportedGeometry(std::uint32_t queryCount, std::uint32_t physicalKeys,
+                                          std::uint32_t aicCount = launchAic)
+{
+    return queryCount >= 1 && queryCount <= 1024 && IsSupportedAicCount(aicCount) &&
+        aicCount <= queryCount && queryCount % aicCount == 0 && physicalKeys >= sparseCompact && physicalKeys % pageSize == 0 &&
+        physicalKeys <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
 }
 inline constexpr std::size_t WorkspaceBytesForAic(std::uint32_t count)
 {
@@ -98,19 +107,21 @@ SFA_FIXED_OFFSET(SparseFlashAttentionInnerSplitParams, mBaseSize, 0);
 SFA_FIXED_OFFSET(SparseFlashAttentionInnerSplitParams, s2BaseSize, 4);
 #undef SFA_FIXED_OFFSET
 
-inline Tiling MakeTiling(float scale = softmaxScale, std::uint32_t aicCount = launchAic)
+inline Tiling MakeTiling(float scale = softmaxScale, std::uint32_t aicCount = launchAic,
+                         std::uint32_t queryCount = queries, std::uint32_t physicalKeys = physicalKv)
 {
-    if (!IsSupportedAicCount(aicCount)) throw std::invalid_argument("Fixed Q4 supports AIC count 1, 2 or 4 only");
+    if (!IsSupportedGeometry(queryCount, physicalKeys, aicCount))
+        throw std::invalid_argument("Require Q1..1024, page-aligned compact128 KV, AIC1/2/4/8/16 <= Q");
     Tiling t{};
     auto& b = t.baseParams;
     // Actual consumers: original arch35 vector::InitCubeVecSharedParams,
     // kernel::ComputeConstexpr and kvcache::{GetSingleCoreParam,ComputeS2LoopInfo}.
     // Semantic cross-check: pinned vllm host::FillTilingBaseParamsMla (354-372).
     b.batchSize = batch;
-    b.seqSize = physicalKv;
-    b.qSeqSize = queries;
+    b.seqSize = physicalKeys;
+    b.qSeqSize = queryCount;
     b.blockSize = pageSize;
-    b.maxBlockNumPerBatch = physicalBlocks;
+    b.maxBlockNumPerBatch = physicalKeys / pageSize;
     b.scaleValue = scale;
     b.nNumOfQInOneGroup = heads / kvHeads; // gSize, NOT n2Size (which is 1).
     b.actualLenDimsQ = 1; // Length ARRAY size, not its value 4.
@@ -123,7 +134,7 @@ inline Tiling MakeTiling(float scale = softmaxScale, std::uint32_t aicCount = la
     b.sparseBlockCount = sparseCompact;
     b.isActualLenDimsNull = 0;
     b.isActualLenDimsKVNull = 0;
-    // InitCalcParamsEach partitions the four query tiles using GetBlockNum().
+    // InitCalcParamsEach partitions the query tiles using GetBlockNum().
     // Each AIC has two AIVs and a disjoint InitMMResBuf scratch reservation.
     t.singleCoreParams.usedCoreNum = aicCount;
     // preTokens/nextTokens are not read from tiling on this sparseMode=0 path.
@@ -134,12 +145,13 @@ inline Tiling MakeTiling(float scale = softmaxScale, std::uint32_t aicCount = la
     return t;
 }
 
-inline bool ValidateTiling(const Tiling& t, std::uint32_t aicCount = launchAic)
+inline bool ValidateTiling(const Tiling& t, std::uint32_t aicCount = launchAic,
+                           std::uint32_t queryCount = queries, std::uint32_t physicalKeys = physicalKv)
 {
     const auto& b = t.baseParams;
-    return IsSupportedAicCount(aicCount) && std::isfinite(b.scaleValue) && b.scaleValue > 0.0F &&
-        b.batchSize == batch && b.seqSize == physicalKv && b.qSeqSize == queries &&
-        b.blockSize == pageSize && b.maxBlockNumPerBatch == physicalBlocks &&
+    return IsSupportedGeometry(queryCount, physicalKeys, aicCount) && std::isfinite(b.scaleValue) && b.scaleValue > 0.0F &&
+        b.batchSize == batch && b.seqSize == physicalKeys && b.qSeqSize == queryCount &&
+        b.blockSize == pageSize && b.maxBlockNumPerBatch == physicalKeys / pageSize &&
         b.nNumOfQInOneGroup == heads / kvHeads && b.actualLenDimsQ == 1 &&
         b.actualLenDimsKV == 1 && b.outputLayout == 1 && b.sparseMode == 0 &&
         b.preTokens == 0 && b.nextTokens == 0 && b.attentionMode == 2 &&
@@ -159,24 +171,27 @@ struct BufferBytes {
     std::size_t indices, blockTable, actualQuery, actualKv, tiling, userWorkspace;
 };
 
-inline constexpr BufferBytes GetBufferBytes(std::uint32_t aicCount = launchAic)
+inline constexpr BufferBytes GetBufferBytes(std::uint32_t aicCount = launchAic,
+                                            std::uint32_t queryCount = queries, std::uint32_t physicalKeys = physicalKv)
 {
     // Original BF16 output only; an FP32 fused candidate requires a distinct
     // output allocation. Key is the MLA latent V too: pass key as value alias.
-    return {queryRows * latentDim * bf16Bytes,
-        std::size_t{physicalKv} * kvHeads * latentDim * bf16Bytes,
-        queryRows * ropeDim * bf16Bytes,
-        std::size_t{physicalKv} * kvHeads * ropeDim * bf16Bytes,
-        queryRows * latentDim * bf16Bytes, queryRows * fp32Bytes,
-        queryRows * fp32Bytes, indexElements * int32Bytes,
-        std::size_t{batch} * physicalBlocks * int32Bytes,
+    const auto rows = std::size_t{queryCount} * heads;
+    return {rows * latentDim * bf16Bytes,
+        std::size_t{physicalKeys} * kvHeads * latentDim * bf16Bytes,
+        rows * ropeDim * bf16Bytes,
+        std::size_t{physicalKeys} * kvHeads * ropeDim * bf16Bytes,
+        rows * latentDim * bf16Bytes, rows * fp32Bytes,
+        rows * fp32Bytes, std::size_t{queryCount} * sparseCompact * int32Bytes,
+        std::size_t{batch} * (physicalKeys / pageSize) * int32Bytes,
         batch * int32Bytes, batch * int32Bytes, sizeof(Tiling), WorkspaceBytesForAic(aicCount)};
 }
 
-inline bool ValidateBufferBytes(const BufferBytes& allocated, std::uint32_t aicCount = launchAic)
+inline bool ValidateBufferBytes(const BufferBytes& allocated, std::uint32_t aicCount = launchAic,
+                                std::uint32_t queryCount = queries, std::uint32_t physicalKeys = physicalKv)
 {
-    const auto need = GetBufferBytes(aicCount);
-    return IsSupportedAicCount(aicCount) && allocated.query >= need.query && allocated.key >= need.key &&
+    const auto need = GetBufferBytes(aicCount, queryCount, physicalKeys);
+    return IsSupportedGeometry(queryCount, physicalKeys, aicCount) && allocated.query >= need.query && allocated.key >= need.key &&
         allocated.queryRope >= need.queryRope && allocated.keyRope >= need.keyRope &&
         allocated.output >= need.output && allocated.softmaxMax >= need.softmaxMax &&
         allocated.softmaxSum >= need.softmaxSum && allocated.indices >= need.indices &&
@@ -189,30 +204,31 @@ inline bool ValidateIndicesAndLengths(
     const std::int32_t* indices, std::size_t indicesCount,
     const std::int32_t* blockTable, std::size_t blockCount,
     const std::int32_t* actualQ, std::size_t actualQCount,
-    const std::int32_t* actualKV, std::size_t actualKVCount)
+    const std::int32_t* actualKV, std::size_t actualKVCount,
+    std::uint32_t queryCount = queries, std::uint32_t physicalKeys = physicalKv)
 {
     // Counts are host ELEMENT counts. Validate host mirrors before any device
     // launch. No synchronization/device read is performed by this function.
-    if (!indices || !blockTable || !actualQ || !actualKV ||
-        indicesCount != indexElements || blockCount != physicalBlocks ||
+    if (!IsSupportedGeometry(queryCount, physicalKeys) || !indices || !blockTable || !actualQ || !actualKV ||
+        indicesCount != std::size_t{queryCount} * sparseCompact || blockCount != physicalKeys / pageSize ||
         actualQCount != batch || actualKVCount != batch ||
-        actualQ[0] != static_cast<std::int32_t>(queries) ||
-        actualKV[0] != static_cast<std::int32_t>(physicalKv)) return false;
+        actualQ[0] != static_cast<std::int32_t>(queryCount) ||
+        actualKV[0] != static_cast<std::int32_t>(physicalKeys)) return false;
     // This fixed probe uses an identity page table; no arbitrary cache mapping.
-    for (std::size_t p = 0; p < physicalBlocks; ++p) {
+    for (std::size_t p = 0; p < physicalKeys / pageSize; ++p) {
         if (blockTable[p] != static_cast<std::int32_t>(p)) return false;
     }
-    for (std::size_t q = 0; q < batch * queries; ++q) {
-        std::array<bool, physicalKv> seen{};
+    for (std::size_t q = 0; q < queryCount; ++q) {
+        std::vector<bool> seen(physicalKeys, false);
         for (std::size_t j = 0; j < sparseCompact; ++j) {
             const auto index = indices[q * sparseCompact + j];
-            if (index < 0 || index >= static_cast<std::int32_t>(physicalKv)) return false;
+            if (index < 0 || index >= static_cast<std::int32_t>(physicalKeys)) return false;
             if (seen[static_cast<std::size_t>(index)]) return false;
             seen[static_cast<std::size_t>(index)] = true;
             const auto block = static_cast<std::size_t>(index) / pageSize;
             const auto slot = static_cast<std::size_t>(blockTable[block]) * pageSize +
                 static_cast<std::size_t>(index) % pageSize;
-            if (slot >= physicalKv) return false;
+            if (slot >= physicalKeys) return false;
         }
     }
     return true;

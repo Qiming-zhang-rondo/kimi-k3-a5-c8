@@ -6,9 +6,14 @@
 实际使用 `load_sfa_direct.py` 和 `sfa_direct_bridge.cpp`，链接现场构建的
 `libsfa_torch_direct.so`。
 
-最新优化入口见 [OPTIMIZE_NEXT.md](../../OPTIMIZE_NEXT.md)。ABI3增加显式
-`aic_count=1/2/4`（默认1）及实际库配置查询；`SFA_MERGE_TILE_ROWS=4/8/16`
-为编译选项，默认4。新候选必须隔离重编，不能复用已测的ABI2设备库。
+最新执行入口见 [SHAPE_SWEEP_NEXT.md](../../SHAPE_SWEEP_NEXT.md)。ABI4支持Q1–1024、
+动态热环及1/2/4/8/16 AIC（核数不大于Q且整除Q）。
+`prepare(query, scale, fused, return_stats=False, bf16_io=False, aic_count=1,
+packed_output=False, physical_kv=256)` 在setup生成实际tiling，timed run不更新tiling。
+physical_kv必须传真实ring_plan容量，不能在Q1024沿用256；默认值仅兼容Q4示例。
+BF16 `SFA_BF16_MERGE_TILE_ROWS`可选4/8/16/32，与FP32的旧4/8/16选项分离。
+原未packed入口保留；packed候选使用独立第四ASC单元及namespace，不替换已验证路径。
+必须隔离重编ABI4，不能复用ABI1/2/3旧库。下文Q4示例为原接入记录。
 
 ## 构建边界
 
@@ -66,8 +71,8 @@ prepare 完成后才能捕图/计时。
 原版输出 BF16；融合按真实冷态选择 BF16输入/输出或 FP32输入/输出，stats始终FP32。
 `bf16_io=True` 仅用于融合，直接从 BF16 cold buffer 搬入，不增加 Python `.float()`/`.to()`
 或独立转换 kernel；最终 BF16 输出为262144字节。默认 `bf16_io=False` 保留原有FP32
-输入/输出实验合同，output为524288字节。融合不返回 combined stats。桥要求设备库ABI3，
-旧ABI1/2库即使尺寸仍为19指针也会拒绝；修改后须重建设备库并启动新的Python进程。
+输入/输出实验合同，Q4 output为524288字节，大Q按实际Q分配。融合不返回 combined stats。
+桥要求设备库ABI4，旧ABI1/2/3库即使尺寸仍为19指针也会拒绝；须隔离重建设备库并启动新的Python进程。
 
 运行方法接收本次 Tensor 对象，读取本次 `data_ptr()`。冷算子每次新分配输出时，不能
 把首次冷态指针固定在 prepare 中。桥使用 query 设备的 `NPUGuard` 和

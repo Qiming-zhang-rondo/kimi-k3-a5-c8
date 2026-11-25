@@ -61,12 +61,13 @@ class DirectApiContractTests(unittest.TestCase):
             (directory / "sfa_direct_api.h").write_bytes((STANDALONE / "sfa_direct_api.h").read_bytes())
             (directory / "probe.h").write_text(PROBE)
             (directory / "sfa_fixed_contract.h").write_text(
-                "#pragma once\nnamespace sfa_fixed {inline constexpr bool IsSupportedAicCount(unsigned n){return n==1||n==2||n==4;}}\n")
+                "#pragma once\nnamespace sfa_fixed {inline constexpr bool IsSupportedAicCount(unsigned n){return n==1||n==2||n==4||n==8||n==16;}}\n")
             definitions = []
             for wrapper, entry, count, fused in (
                 ("sfa_direct_original_wrapper.asc", "sfa_standalone_entry.asc", 14, False),
                 ("sfa_direct_fused_wrapper.asc", "sfa_fusion_entry.asc", 19, True),
                 ("sfa_direct_fused_bf16_wrapper.asc", "sfa_fusion_bf16_entry.asc", 19, True),
+                ("sfa_direct_fused_bf16_packed_wrapper.asc", "sfa_fusion_bf16_packed_entry.asc", 19, True),
             ):
                 source = (STANDALONE / wrapper).read_text()
                 transformed, replacements = re.subn(
@@ -75,7 +76,8 @@ class DirectApiContractTests(unittest.TestCase):
                 self.assertEqual(replacements, 1, "must replace exactly the known ASC launch")
                 self.assertNotIn("<<<", transformed)
                 (directory / (wrapper + ".cpp")).write_text(transformed)
-                symbol = ("sfa_cold_merge_bf16_probe" if "bf16" in wrapper else
+                symbol = ("sfa_cold_merge_bf16_packed_probe" if "packed" in wrapper else
+                          "sfa_cold_merge_bf16_probe" if "bf16" in wrapper else
                           "sfa_cold_merge_probe" if fused else "sfa_arch35_bf16_user_scratch_probe")
                 args = ",".join("uint8_t* p" + str(i) for i in range(count))
                 forwarding = ",".join("p" + str(i) for i in range(count))
@@ -110,29 +112,32 @@ int main() {
   SfaDirectBuffers buffers{};
   for(unsigned i=0;i<19;++i) Probe::expected[i]=sentinel.data()+i;
   SETTERS
-  if(SfaDirectAbiVersion()!=3 || SfaDirectBuffersBytes()!=sizeof(buffers)||SfaDirectMergeTileRows()!=8) return 2;
-  for(uint32_t n:{1u,2u,4u}) {
+  if(SfaDirectAbiVersion()!=4 || SfaDirectBuffersBytes()!=sizeof(buffers)||SfaDirectMergeTileRows()!=8||SfaDirectBf16MergeTileRows()!=32||SfaDirectPackedOutputSupported()!=1) return 2;
+  for(uint32_t n:{1u,2u,4u,8u,16u}) {
    Probe::expectedCount=n;
    if(SfaLaunchOriginal(Probe::expectedStream,&buffers,n)!=0) return 3;
    if(SfaLaunchFused(Probe::expectedStream,&buffers,n)!=0) return 3;
    if(SfaLaunchFusedBf16(Probe::expectedStream,&buffers,n)!=0) return 3;
+   if(SfaLaunchFusedBf16Packed(Probe::expectedStream,&buffers,n)!=0) return 3;
   }
-  for(uint32_t n:{0u,3u,5u,8u,UINT32_MAX}) {
+  for(uint32_t n:{0u,3u,5u,32u,UINT32_MAX}) {
    if(SfaLaunchOriginal(Probe::expectedStream,&buffers,n)!=-1) return 4;
    if(SfaLaunchFused(Probe::expectedStream,&buffers,n)!=-1) return 4;
    if(SfaLaunchFusedBf16(Probe::expectedStream,&buffers,n)!=-1) return 4;
+   if(SfaLaunchFusedBf16Packed(Probe::expectedStream,&buffers,n)!=-1) return 4;
   }
   if(SfaLaunchOriginal(Probe::expectedStream,nullptr,1)!=-1) return 4;
   if(SfaLaunchFused(Probe::expectedStream,nullptr,2)!=-1) return 4;
   if(SfaLaunchFusedBf16(Probe::expectedStream,nullptr,4)!=-1) return 4;
-  if(Probe::originalCalls!=3 || Probe::fusedCalls!=6) return 3;
+  if(SfaLaunchFusedBf16Packed(Probe::expectedStream,nullptr,16)!=-1) return 4;
+  if(Probe::originalCalls!=5 || Probe::fusedCalls!=15) return 3;
   std::cout<<"HOST_DIRECT_API_ROUTING_PASS\n";
  } catch(const std::exception& e) {std::cerr<<e.what();return 1;}
 }
 '''.replace("OFFSETS", offsets).replace("SETTERS", setters)
             (directory / "driver.cpp").write_text(driver)
             binary = directory / "api_host"
-            compiled = subprocess.run([self.compiler, "-std=c++17", "-O0", "-DSFA_MERGE_TILE_ROWS=8", "-I", str(directory),
+            compiled = subprocess.run([self.compiler, "-std=c++17", "-O0", "-DSFA_MERGE_TILE_ROWS=8", "-DSFA_BF16_MERGE_TILE_ROWS=32", "-I", str(directory),
                                        *map(str, definitions), str(directory / "driver.cpp"), "-o", str(binary)],
                                       capture_output=True, text=True, timeout=30)
             self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)

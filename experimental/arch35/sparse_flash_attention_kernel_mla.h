@@ -56,7 +56,11 @@ using namespace AscendC::Impl::Detail;
 using namespace regbaseutil;
 
 #if SFA_MERGE_BF16_IO
-namespace BaseApiBf16ColdIo {
+#ifndef SFA_BF16_VARIANT_NAMESPACE
+#define SFA_BF16_VARIANT_NAMESPACE BaseApiBf16ColdIo
+#endif
+// Default namespace BaseApiBf16ColdIo retains the verified unpacked variant.
+namespace SFA_BF16_VARIANT_NAMESPACE {
 using namespace ::BaseApi;
 #else
 namespace BaseApi {

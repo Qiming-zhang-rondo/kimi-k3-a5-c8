@@ -13,7 +13,7 @@ spec.loader.exec_module(helpers)
 
 
 class Bf16EntryTests(unittest.TestCase):
-    def compile(self, core=None):
+    def compile(self, core=None, packed=False):
         compiler = shutil.which("c++")
         if not compiler:
             self.skipTest("Host C++ compiler unavailable")
@@ -21,18 +21,22 @@ class Bf16EntryTests(unittest.TestCase):
             root = Path(temp)
             (root / "standalone").mkdir()
             (root / "experimental/arch35").mkdir(parents=True)
-            for name in ("sfa_fusion_entry.asc", "sfa_fusion_bf16_entry.asc", "sparse_flash_attention_tiling_data.h"):
+            for name in ("sfa_fusion_entry.asc", "sfa_fusion_bf16_entry.asc", "sfa_fusion_bf16_packed_entry.asc", "sparse_flash_attention_tiling_data.h"):
                 (root / "standalone" / name).write_bytes((ROOT / "standalone" / name).read_bytes())
             (root / "kernel_operator.h").write_text(helpers.OPERATOR)
             kernel = helpers.KERNEL.replace("std::is_same<Out, float>::value",
                                            "std::is_same<Out, AscendC::bfloat16_t>::value")
             kernel += "\nnamespace BaseApiBf16ColdIo = BaseApi; // mock native-service interface only\n"
+            kernel += "\nnamespace BaseApiBf16PackedColdIo = BaseApi; // distinct candidate interface\n"
             if core is None:
                 kernel = '#error "Host scan parsed device-only BF16 header"\n'
             (root / "experimental/arch35/sparse_flash_attention_kernel_mla.h").write_text(kernel)
             driver = helpers.DRIVER if core else helpers.HOST_DRIVER
             driver = driver.replace('"standalone/sfa_fusion_entry.asc"', '"standalone/sfa_fusion_bf16_entry.asc"')
             driver = driver.replace("sfa_cold_merge_probe(", "sfa_cold_merge_bf16_probe(")
+            if packed:
+                driver = driver.replace("sfa_fusion_bf16_entry.asc", "sfa_fusion_bf16_packed_entry.asc")
+                driver = driver.replace("sfa_cold_merge_bf16_probe(", "sfa_cold_merge_bf16_packed_probe(")
             (root / "driver.cpp").write_text(driver)
             flags = ["-D__NPU_ARCH__=3510", "-D" + core + "=1"] if core else ["-D__NPU_ARCH__=0"]
             built = subprocess.run([compiler, "-std=c++17", "-O0", "-DPROBE_EXPECTED_MODE=0", *flags,
@@ -47,6 +51,10 @@ class Bf16EntryTests(unittest.TestCase):
 
     def test_aiv_bf16_types_and_tiling_lifetime(self):
         self.compile("__DAV_C310_VEC__")
+
+    def test_packed_entry_has_distinct_types_on_aic_and_aiv(self):
+        self.compile("__DAV_C310_CUBE__",packed=True)
+        self.compile("__DAV_C310_VEC__",packed=True)
 
     def test_host_isolation_and_distinct_template_symbols(self):
         self.compile()

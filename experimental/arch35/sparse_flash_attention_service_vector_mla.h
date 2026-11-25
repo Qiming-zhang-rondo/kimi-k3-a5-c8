@@ -68,8 +68,12 @@ using namespace AscendC::Impl::Detail;
 using namespace regbaseutil;
 using namespace matmul;
 
+#ifndef SFA_BF16_VARIANT_NAMESPACE
+#define SFA_BF16_VARIANT_NAMESPACE BaseApiBf16ColdIo
+#endif
 #if SFA_MERGE_BF16_IO
-namespace BaseApiBf16ColdIo {
+// Default namespace BaseApiBf16ColdIo keeps the already-validated entry separate.
+namespace SFA_BF16_VARIANT_NAMESPACE {
 using namespace ::BaseApi;
 #else
 namespace BaseApi {
@@ -182,7 +186,7 @@ private:
     const __gm__ uint8_t *coldPresentGm = nullptr;
     const __gm__ uint8_t *hotPresentGm = nullptr;
 #if SFA_MERGE_BF16_IO
-    AscendC::Bf16ColdMerge::ColdMergeDeviceScratch coldMergeScratch;
+    AscendC::SFA_BF16_MERGE_NAMESPACE::ColdMergeDeviceScratch coldMergeScratch;
 #else
     AscendC::ColdMergeDeviceScratch coldMergeScratch;
 #endif
@@ -778,7 +782,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>:
         LocalTensor<float> sumUb = this->softmaxSumBuf[runInfo.multiCoreIdxMod2].template Get<float>();
         static_assert(FaVectorApi::REDUCE_SIZE == 1, "Hot max/sum must be contiguous per flattened row");
 #if SFA_MERGE_BF16_IO
-        AscendC::Bf16ColdMerge::MergeColdStateDevice(vec2ResUb, sumUb, maxUb,
+        AscendC::SFA_BF16_MERGE_NAMESPACE::MergeColdStateDevice(vec2ResUb, sumUb, maxUb,
 #else
         AscendC::MergeColdStateDevice(vec2ResUb, sumUb, maxUb,
 #endif
@@ -802,9 +806,12 @@ __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>::Bmm2DataCopyOut (RunInfo
     int64_t dSizeAligned64 = (int64_t)dTemplateAlign64;
     // Same legal in-place narrowing/layout as the native BF16 reader. Final
     // merge rounding is RNE (CAST_RINT), matching Triton/PyTorch BF16 output;
-    // the earlier native-hot CAST_ROUND remains a separate contract.
+    // the earlier native-hot CAST_ROUND remains a separate contract. In the
+    // packed candidate the final VF already wrote exactly this BF16 layout.
     attenOut.SetAddr(vec2ResUb.address_);
+#if !SFA_MERGE_PACKED_OUTPUT
     Cast(attenOut, vec2ResUb, RoundMode::CAST_RINT, vec2CalcSize);
+#endif
     SetFlag<HardEvent::V_MTE3>(vToMte3AttnOutId);
     WaitFlag<HardEvent::V_MTE3>(vToMte3AttnOutId);
 

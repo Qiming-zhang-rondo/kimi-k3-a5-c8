@@ -66,6 +66,7 @@ struct Tensor {
  bool contiguous=true,grad=false;size_t byteOffset=0;
  bool defined()const{return bool(bytes);}c10::Device device()const{return dev;}
  bool is_contiguous()const{return contiguous;}bool requires_grad()const{return grad;}
+ int64_t dim()const{return shape.size();}int64_t size(int64_t n)const{return shape.at(n);}
  ScalarType scalar_type()const{return type;}IntArrayRef sizes()const{return IntArrayRef(shape);}
  int64_t numel()const{int64_t count=1;for(auto n:shape)count*=n;return count;}
  size_t element_size()const{return Width(type);}
@@ -129,8 +130,8 @@ DRIVER = r'''
 #include <array>
 #include <set>
 namespace Probe {
-inline uint32_t abi=3,descriptorBytes=sizeof(SfaDirectBuffers),lastCount=1;
-inline SfaDirectBuffers last{};inline bool lastFused=false,lastBf16=false;
+inline uint32_t abi=4,descriptorBytes=sizeof(SfaDirectBuffers),lastCount=1;
+inline SfaDirectBuffers last{};inline bool lastFused=false,lastBf16=false,lastPacked=false;
 void Require(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
 void Begin(){flushed=false;records.clear();order.clear();}
 void Launched(void* stream,const SfaDirectBuffers* buffers,bool fused,bool bf16=false){
@@ -150,9 +151,12 @@ void Launched(void* stream,const SfaDirectBuffers* buffers,bool fused,bool bf16=
 extern "C" uint32_t SfaDirectAbiVersion(void){return Probe::abi;}
 extern "C" uint32_t SfaDirectBuffersBytes(void){return Probe::descriptorBytes;}
 extern "C" uint32_t SfaDirectMergeTileRows(void){return 8;}
+extern "C" uint32_t SfaDirectBf16MergeTileRows(void){return 64;}
+extern "C" uint32_t SfaDirectPackedOutputSupported(void){return 1;}
 extern "C" int32_t SfaLaunchOriginal(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastCount=n;Probe::Launched(stream,buffers,false);return 0;}
 extern "C" int32_t SfaLaunchFused(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastCount=n;Probe::Launched(stream,buffers,true);return 0;}
 extern "C" int32_t SfaLaunchFusedBf16(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastCount=n;Probe::Launched(stream,buffers,true,true);return 0;}
+extern "C" int32_t SfaLaunchFusedBf16Packed(void* stream,const SfaDirectBuffers* buffers,uint32_t n){Probe::lastPacked=true;Probe::lastCount=n;Probe::Launched(stream,buffers,true,true);return 0;}
 at::Tensor Make(std::initializer_list<int64_t> shape,at::ScalarType dtype){
  return at::empty(shape,at::TensorOptions().device(c10::Device(c10::DeviceType::PrivateUse1,3)).dtype(dtype));
 }
@@ -173,13 +177,13 @@ void Reject(const std::function<void()>& operation){
  Probe::Require(Probe::launches==before,"invalid arguments launched kernel");
  Probe::Require(!Probe::flushed&&Probe::records.empty(),"rejection happened after stream drain/record");
 }
-void CheckTiling(bool stats){
+void CheckTiling(bool stats,int64_t q=4,int64_t kv=256){
  const auto& t=*reinterpret_cast<const sfa_fixed::Tiling*>(Probe::last.tiling);
  Probe::Require(sizeof(t)==144,"wrong POD bytes");
- Probe::Require(t.baseParams.nNumOfQInOneGroup==64&&t.baseParams.seqSize==256&&
+ Probe::Require(t.baseParams.nNumOfQInOneGroup==64&&t.baseParams.seqSize==kv&&t.baseParams.qSeqSize==q&&
   t.baseParams.sparseBlockCount==128&&t.baseParams.returnSoftmaxLse==stats,"wrong actual tiling values");
  auto original=t;original.baseParams.returnSoftmaxLse=1;
- Probe::Require(sfa_fixed::ValidateTiling(original,Probe::lastCount),"actual prepared POD fails real fixed validator");
+ Probe::Require(sfa_fixed::ValidateTiling(original,Probe::lastCount,q,kv),"actual prepared POD fails real fixed validator");
  Probe::Require(Probe::allocations[Probe::last.workspace]==442368*Probe::lastCount,"scratch allocation differs from actual launch count");
 }
 void Layout(){
@@ -234,7 +238,7 @@ void Invalid(){
  for(double scale:{0.,-1.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN(),
                     std::numeric_limits<double>::max(),std::numeric_limits<double>::denorm_min()})
   Reject([&]{Prepared bad(good.q,scale,false,true);});
- for(uint32_t old:{1u,2u}) {Probe::abi=old;Reject([&]{Prepared bad(good.q,1./24.,false,true);});}Probe::abi=3;
+ for(uint32_t old:{1u,2u,3u}) {Probe::abi=old;Reject([&]{Prepared bad(good.q,1./24.,false,true);});}Probe::abi=4;
  for(int n:{-1,0,3,5,8}) Reject([&]{Prepared bad(good.q,1./24.,true,false,false,n);});
  Probe::descriptorBytes=1;Reject([&]{Prepared bad(good.q,1./24.,false,true);});Probe::descriptorBytes=sizeof(SfaDirectBuffers);
  for(int kind=0;kind<12;++kind){Inputs x;switch(kind){
@@ -257,9 +261,32 @@ void Invalid(){
  Reject([&]{Fused(bf16,xb);}); // Statistics remain FP32 in both modes.
  Probe::Require(Probe::launches==0,"rejected matrix must never launch");
 }
+void Matrix(){
+ for(int64_t q:{1,4,32,64,128,256,512,1024}) {
+  const int64_t kv=((q+127+127)/128)*128;
+  Inputs x;x.q=Make({q,64,512},at::kBFloat16);x.k=Make({kv/128,128,1,512},at::kBFloat16);x.v=x.k;
+  x.idx=Make({q,1,128},at::kInt);x.table=Make({1,kv/128},at::kInt);x.qr=Make({q,64,64},at::kBFloat16);x.kr=Make({kv/128,128,1,64},at::kBFloat16);
+  x.co=Make({q,64,512},at::kBFloat16);x.cm=Make({q,64,1},at::kFloat);x.cs=Make({q,64,1},at::kFloat);x.cp=Make({q},at::kBool);x.hp=Make({q},at::kBool);
+  for(int64_t n:{q==1 ? 1 : q==4 ? 4 : q==32 ? 8 : 16}) {
+   Prepared packed(x.q,1./24.,true,false,true,n,true,kv),native(x.q,1./24.,false,true,false,n,false,kv);
+   const auto cfg=packed.Configuration();
+   Probe::Require(cfg.values.at("queries")==q&&cfg.values.at("physical_kv")==kv&&cfg.values.at("packed_output")==1,"dynamic configuration mismatch");
+   Probe::Require(cfg.values.at("bf16_merge_tile_rows_requested")==64&&cfg.values.at("bf16_merge_tile_rows_effective")==32,"actual row metadata missing");
+   Probe::Begin();Probe::lastPacked=false;Fused(packed,x);CheckTiling(false,q,kv);Probe::Require(Probe::lastPacked,"packed entry not selected");
+   Probe::Begin();Native(native,x);CheckTiling(true,q,kv);
+   Probe::Require(std::get<0>(packed.Outputs()).numel()==q*64*512,"dynamic output size");
+  }
+ }
+ Inputs good;
+ Reject([&]{Prepared bad(good.q,1./24.,true,false,false,1,true);});
+ Reject([&]{Prepared bad(good.q,1./24.,false,false,false,1,true);});
+ for(int64_t kv:{0,127,129,-128})Reject([&]{Prepared bad(good.q,1./24.,true,false,true,1,true,kv);});
+ Prepared fixed(good.q,1./24.,false,true);good.k=Make({3,128,1,512},at::kBFloat16);good.v=good.k;
+ Reject([&]{Native(fixed,good);});
+}
 void Parallel(){
  Inputs x,xb;xb.co=Make({4,64,512},at::kBFloat16);
- auto library=LibraryConfiguration();Probe::Require(library["abi_version"]==3&&library["merge_tile_rows"]==8,"library configuration was guessed");
+ auto library=LibraryConfiguration();Probe::Require(library["abi_version"]==4&&library["merge_tile_rows"]==8,"library configuration was guessed");
  for(uint32_t n:{1u,2u,4u}) {
   Prepared native(x.q,1./24.,false,true,false,n),fused(x.q,1./24.,true,false,false,n),bf16(x.q,1./24.,true,false,true,n);
   for(auto* plan:{&native,&fused,&bf16}) {
@@ -274,7 +301,7 @@ void Parallel(){
 int main(int argc,char** argv){try{
  Probe::Require(argc==2,"choose host test case");const std::string mode=argv[1];
  if(mode=="layout")Layout();else if(mode=="dynamic")Dynamic();else if(mode=="dynamic_bf16")Dynamic(true);
- else if(mode=="reject")Invalid();else if(mode=="parallel")Parallel();else return 2;
+ else if(mode=="reject")Invalid();else if(mode=="parallel")Parallel();else if(mode=="matrix")Matrix();else return 2;
  std::cout<<"HOST_REAL_BRIDGE_"<<mode<<"_PASS\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what();return 1;}}
 '''
@@ -322,6 +349,9 @@ class RealTorchBridgeHostTests(unittest.TestCase):
 
     def test_metadata_tensor_alias_and_abi_errors_reject_before_launch(self):
         self.run_case("reject")
+
+    def test_dynamic_q_ring_geometry_packed_route_and_configuration(self):
+        self.run_case("matrix")
 
     def test_parallel_count_matches_tiling_allocation_launch_and_real_configuration(self):
         self.run_case("parallel")

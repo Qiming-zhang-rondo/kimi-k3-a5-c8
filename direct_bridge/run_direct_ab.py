@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed B1/Q4/K8192/H64 recent128: real native C4 plus direct BF16 hot.
+"""B1/Q1..1024/K8K|32K/H64 recent128: real C4 plus direct BF16 hot.
 
 The pinned payload supplies all quantization, cache writes, partition, references
 and timing. Only the BF16 hot read / merge is replaced. No installed operator,
@@ -15,22 +15,68 @@ import traceback
 
 from pinned_payload import activate_payload
 
-VERSION = "sfa-direct-c4-bf16-ab-v4"
+VERSION = "sfa-direct-c4-bf16-ab-v5"
 ACCEPTANCE_POLICY = ("Native equivalence remains global/worst-row relative L2 <=0.001. "
     "Only fused BF16 zero-query cold1920/hot128 may instead pass a current-run bit-exact "
     "FP64-to-BF16 RNE proof; every difference from native must be an exact midpoint and one BF16 ULP. "
     "The original failed strict comparison is retained. No nonzero-query or FP32 exception.")
 ARMS = ("c4_w0", "installed_native_twopass", "direct_native_twopass", "direct_fused")
-DIRECT_ARMS = ("direct_native_twopass", "direct_fused")
+DIRECT_ARMS = ("direct_native_twopass", "direct_fused", "direct_fused_packed")
 PAIRS = (("c4_w0", "installed_native_twopass"),
          ("c4_w0", "direct_native_twopass"),
          ("c4_w0", "direct_fused"),
          ("installed_native_twopass", "direct_fused"),
          ("direct_native_twopass", "direct_fused"))
+PACKED_PAIRS = (("direct_fused", "direct_fused_packed"),
+                ("installed_native_twopass", "direct_fused_packed"),
+                ("c4_w0", "direct_fused_packed"))
 
 
 class ControlFailed(RuntimeError):
     pass
+
+
+class ArtifactStore(dict):
+    """Full metrics always run; summary mode retains only transient evaluation IO."""
+    def __init__(self, mode="summary"):
+        super().__init__()
+        self.mode, self.array_metadata = mode, {}
+
+    def __setitem__(self, key, value):
+        self.array_metadata[key] = dict(shape=list(getattr(value,"shape",())),
+                                        dtype=str(getattr(value,"dtype","unknown")))
+        if self.mode == "full" or key.endswith("_write_read"):
+            super().__setitem__(key,value)
+
+    def save(self, directory):
+        if self.mode == "full":
+            import numpy as np
+            np.savez_compressed(Path(directory)/"outputs.npz", **self)
+
+    def release_transient(self):
+        if self.mode != "full":
+            self.clear()
+
+
+def failure_examples(actual, reference, maximum=16):
+    """Small locations from a full element comparison, never a sampled gate."""
+    import numpy as np
+    a,r=np.asarray(actual),np.asarray(reference)
+    if a.shape != r.shape:
+        return dict(actual_shape=list(a.shape),reference_shape=list(r.shape))
+    different=(a != r) | ~np.isfinite(a) | ~np.isfinite(r)
+    width=a.shape[-1] if a.ndim else 1
+    flat=different.reshape(-1,width)
+    selected=np.flatnonzero(flat.any(axis=1))[:maximum]
+    examples=[]
+    for row in selected:
+        for column in np.flatnonzero(flat[row])[:maximum-len(examples)]:
+            index=np.unravel_index(int(row)*width+int(column),a.shape)
+            av,rv=float(a[index]),float(r[index])
+            examples.append(dict(index=list(map(int,index)),
+                actual=av if np.isfinite(av) else str(av), reference=rv if np.isfinite(rv) else str(rv)))
+        if len(examples)>=maximum: break
+    return dict(full_element_comparison=True,different_elements=int(different.sum()),examples=examples)
 
 
 def hot_inputs(runner, parts, base=None):
@@ -40,11 +86,20 @@ def hot_inputs(runner, parts, base=None):
             runner.ring_lengths, base.q_rope, runner.hot_rope)
 
 
+def validate_task_count(queries, aic_count):
+    if (type(queries) is not int or not 1 <= queries <= 1024 or type(aic_count) is not int or
+            aic_count not in (1,2,4,8,16) or aic_count > queries or queries % aic_count):
+        raise ValueError("Direct AIC count must be 1/2/4/8/16, <=Q and divide Q (Q in [1,1024])")
+
+
 def make_direct_runner_class(bf16_runner_class):
     class DirectRunner(bf16_runner_class):
-        def __init__(self, backend, bridge, *, fused, writer="hot_store_partition", aic_count=1):
-            if aic_count not in (1, 2, 4):
-                raise ValueError("Direct fixed Q4 work requires 1, 2 or 4 AICs")
+        def __init__(self, backend, bridge, *, fused, writer="hot_store_partition", aic_count=1,
+                     packed_output=False):
+            queries = int(backend.base.queries) if hasattr(backend,"base") else 4
+            validate_task_count(queries,aic_count)
+            if packed_output and not fused:
+                raise ValueError("packed_output is a fused-only variant")
             super().__init__(backend, recipe="baseline", window=128, writer=writer)
             self.direct_fused = fused
             # The pinned parent allocated this from an actual native cold read.
@@ -54,7 +109,8 @@ def make_direct_runner_class(bf16_runner_class):
                 raise ValueError("Native cold/final output must be BF16 or FP32")
             bf16_io = fused and self.expected_output_dtype == "torch.bfloat16"
             self.direct_plan = bridge.prepare(self.base.q_nope, float(self.base.scale),
-                                              fused, not fused, bf16_io, aic_count)
+                                              fused, not fused, bf16_io, aic_count,
+                                              packed_output, int(self.capacity))
             self.direct_last_state = None
             self.metadata.update(
                 direct_bridge=True, direct_fused=fused,
@@ -67,6 +123,7 @@ def make_direct_runner_class(bf16_runner_class):
                 compiled_fused_bf16_io=bf16_io, cold_state_cast_kernel_calls=0,
                 direct_configuration=dict(self.direct_plan.configuration()),
                 direct_aic_count=aic_count, direct_aiv_count=2*aic_count,
+                packed_output=packed_output, direct_physical_kv=int(self.capacity),
                 acceptance_policy=ACCEPTANCE_POLICY,
                 merge="native_hot_epilogue" if fused else "unchanged payload Triton",
                 production_validation="NOT_VALIDATED")
@@ -99,6 +156,8 @@ def strict_compare(actual, reference, services, limit):
     result["passed"] = services["acceptable"](result, limit)
     result["relative_l2_limit"] = limit
     result["worst_row_l2_limit"] = limit
+    if not result["passed"]:
+        result["failure_examples"] = failure_examples(actual,reference)
     return result
 
 
@@ -123,9 +182,11 @@ def state_diagnostics(state, host, bytes_host=None, arrays=None, prefix="state")
             nonfinite_count=int(values.size-finite_values.size),
             min=float(finite_values.min()) if finite_values.size else None,
             max=float(finite_values.max()) if finite_values.size else None)
+        fields[field]["first_values"]=[float(v) if np.isfinite(v) else str(float(v))
+                                      for v in values.reshape(-1)[:8]]
         if arrays is not None:
             arrays[f"{prefix}_{field}"] = values
-            if bytes_host is not None:
+            if bytes_host is not None and (not isinstance(arrays,ArtifactStore) or arrays.mode=="full"):
                 arrays[f"{prefix}_{field}_raw_bytes"] = bytes_host(tensor)
     return fields
 
@@ -151,7 +212,12 @@ def evaluate_output_contract(prepared_tensor, pipeline, matching, bf16_math,
         kernel_vs_unrounded_matching_reference=compare(output, matching),
         pipeline_vs_unrounded_matching_reference=compare(arrays[name+"_write_read"], matching),
         destination_rounding_vs_unrounded_matching_reference=compare(rounded, matching))
+    if not metrics.get("control_passed",True):
+        metrics["failure_examples"] = dict(prepared=failure_examples(output,rounded),
+            pipeline=failure_examples(arrays[name+"_write_read"],rounded))
     arrays[name+"_unrounded_matching_reference"] = matching
+    if isinstance(arrays,ArtifactStore):
+        arrays.release_transient()
     return metrics, output
 
 
@@ -162,11 +228,12 @@ def zero_query_exact_rne_gate(cold, hot, actual, native, *, cold_dtype, hot_dtyp
     co, cm, cs = (np.asarray(value) for value in cold)
     ho, hm, hs = (np.asarray(value) for value in hot)
     actual, native = np.asarray(actual), np.asarray(native)
-    out_shape, stat_shape = (4, 64, 512), (4, 64, 1)
+    queries=int(co.shape[0]) if co.ndim==3 else 0
+    out_shape, stat_shape = (queries,64,512), (queries,64,1)
     result = dict(passed=False, basis="exact_zero_query_BF16_RNE",
         strict_relative_l2_limit_unchanged=.001, states_source="current invocation; no saved-result trust",
         dtype_contract=all(str(dtype) == "torch.bfloat16" for dtype in (cold_dtype,hot_dtype,output_dtype)),
-        shape_contract=all(v.shape == out_shape for v in (co,ho,actual,native)) and
+        shape_contract=1 <= queries <= 1024 and all(v.shape == out_shape for v in (co,ho,actual,native)) and
                        all(v.shape == stat_shape for v in (cm,cs,hm,hs)))
     if not result["dtype_contract"] or not result["shape_contract"]:
         return result
@@ -229,25 +296,30 @@ def readonly_preflight(runner):
     """Untimed value checks required by the bridge's shape-only hot path."""
     import numpy as np
     base = runner.base
-    require((runner.capacity, runner.hot_width) == (256, 128), "Fixed bridge requires ring256/compact128")
-    require(tuple(base.q_nope.shape) == (4, 64, 512), "Query shape mismatch")
+    queries,capacity=int(base.queries),int(runner.plan["capacity"])
+    require(1<=queries<=1024 and base.keys in (8192,32768),"Variable Q/K outside supported experiment")
+    require(runner.capacity==capacity and capacity>=128 and capacity%128==0 and
+            runner.hot_width==128,"Bridge requires the actual page-aligned ring plan and compact128")
+    require(tuple(base.q_nope.shape) == (queries,64,512), "Query shape mismatch")
     require(str(base.q_nope.dtype) == "torch.bfloat16", "BF16 query required")
-    require(tuple(runner.hot_cache.shape) == (2, 128, 1, 512), "One KV head required")
-    require(tuple(runner.hot_rope.shape) == (2, 128, 1, 64), "BF16 RoPE layout mismatch")
-    require(np.array_equal(base.cu.cpu().numpy(), [4]), "Query cumulative length must be [4]")
-    require(np.array_equal(runner.ring_lengths.cpu().numpy(), [256]), "Ring physical length must be [256]")
-    require(np.array_equal(runner.ring_table.cpu().numpy(), [[0, 1]]), "Identity two-page ring table required")
+    require(tuple(runner.hot_cache.shape)==(capacity//128,128,1,512),"One KV head and actual ring pages required")
+    require(tuple(runner.hot_rope.shape)==(capacity//128,128,1,64),"BF16 RoPE layout mismatch")
+    require(np.array_equal(base.cu.cpu().numpy(),[queries]),"Query cumulative length must match actual Q")
+    require(np.array_equal(runner.ring_lengths.cpu().numpy(),[capacity]),"KV length must match physical ring capacity")
+    require(np.array_equal(runner.ring_table.cpu().numpy(),np.arange(capacity//128)[None,:]),
+            "Identity ring page table required")
     parts = runner.partition()
     indices = parts["recent_ring"].cpu().numpy()
-    require(indices.shape == (4, 1, 128) and np.all((indices >= 0) & (indices < 256)),
+    require(indices.shape == (queries,1,128) and np.all((indices>=0)&(indices<capacity)),
             "Direct BF16 hot indices must have 128 valid ring slots per row")
     require(all(len(np.unique(row)) == 128 for row in indices[:, 0]), "Hot indices must be unique")
     require(np.all(parts["old_present"].cpu().numpy()) and
             np.all(parts["recent_present"].cpu().numpy()), "Only nonempty cold/hot dispatch is supported")
-    require(runner.metadata["old_counts"] == [1920]*4 and runner.metadata["hot_counts"] == [128]*4,
+    require(runner.metadata["old_counts"]==[1920]*queries and runner.metadata["hot_counts"]==[128]*queries,
             "Fixed experiment requires selected cold1920/hot128")
-    return dict(passed=True, hot_count=[128]*4, cold_count=[1920]*4,
-                ring_slots=256, compact=True, real_empty_dispatch_validated=False)
+    return dict(passed=True,hot_count=[128]*queries,cold_count=[1920]*queries,
+                queries=queries,global_keys=base.keys,ring_slots=capacity,compact=True,
+                real_empty_dispatch_validated=False)
 
 
 def reader_controls(runner, native_plan, services, arrays=None, label="direct", progress=None):
@@ -271,8 +343,9 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct", 
         prefix = "zero_query" if zero else "nonzero_query"
         # Persist this before any dtype/shape gate so a new installed binding
         # contract is diagnosable without rerunning or casting its output.
+        raw_bytes = None if isinstance(arrays,ArtifactStore) and arrays.mode=="summary" else base.bytes_host
         checks[prefix+"_cold_state"] = state_diagnostics(
-            left, host, base.bytes_host, arrays, f"{label}_{prefix}_cold")
+            left,host,raw_bytes,arrays,f"{label}_{prefix}_cold")
         if progress:
             progress(checks)
         validate_cold_state(left, runner.expected_output_dtype)
@@ -325,9 +398,11 @@ def reader_controls(runner, native_plan, services, arrays=None, label="direct", 
 
 
 def timed_pairs(controls, calls, args, benchmark, pair_benchmark):
-    require(all(controls.get(name) for name in ARMS), "All four arms must pass correctness before any timing")
+    require(set(ARMS).issubset(calls) and all(controls.get(name) for name in calls),
+            "Every active arm, including installed baseline, must pass correctness before any timing")
     result = {}
-    for baseline, candidate in PAIRS:
+    pairs=PAIRS+(PACKED_PAIRS if "direct_fused_packed" in calls else ())
+    for baseline, candidate in pairs:
         result[candidate+"_vs_"+baseline] = pair_benchmark(calls[baseline], calls[candidate], args, benchmark)
         for value in result[candidate+"_vs_"+baseline].values():
             require(value.get("status") == "MEASURED", "Paired timing failed; do not interpret partial pairs")
@@ -342,7 +417,7 @@ def prepared_reader_stages(runners):
     left, right = installed._cold_read(iparts), installed._hot_read(iparts)
     fused_left = fused._cold_read(fparts)
     native_args, fused_args = hot_inputs(native, nparts), hot_inputs(fused, fparts)
-    return {
+    result = {
         "native_c4_cold_read": lambda: installed._cold_read(iparts)[0],
         "installed_bf16_hot_read": lambda: installed._hot_read(iparts)[0],
         "direct_bf16_hot_read": lambda: native.direct_plan.native_hot(*native_args)[0],
@@ -350,6 +425,13 @@ def prepared_reader_stages(runners):
         "direct_fused_hot_read_merge": lambda: fused.direct_plan.fused_hot(
             *fused_args, *fused_left, fparts["old_present"], fparts["recent_present"])[0],
     }
+    if "direct_fused_packed" in runners:
+        packed=runners["direct_fused_packed"]
+        pparts=packed.partition()
+        pleft,pargs=packed._cold_read(pparts),hot_inputs(packed,pparts)
+        result["direct_fused_packed_hot_read_merge"] = lambda: packed.direct_plan.fused_hot(
+            *pargs,*pleft,pparts["old_present"],pparts["recent_present"])[0]
+    return result
 
 
 def load_bridge(library, sdk_root=None, build_directory=None):
@@ -367,15 +449,15 @@ def execute(args, report, persist):
     import numpy as np
     report["payload"] = activate_payload(args.payload_dir)
     from kv_native_twopass import NativeTwoPassBackend
-    from kv_bf16_hot_ab import Bf16HotRunner, merge_reference_for_dtype
+    from kv_bf16_hot_ab import merge_reference_for_dtype
+    from variable_bf16_runner import VariableBf16HotRunner, validate_variable_case
     from kv_window_common import attention_reference, load_case, save_case, synthetic_case
-    from test_kv_bf16_hot_ab_a5 import validate_fixed_case
     from test_kv_hot_fused_a5 import compare, acceptable, evaluate, paired_benchmark, identity
     from kv_window_backend import benchmark
     services = dict(compare=compare, acceptable=acceptable)
-    data = validate_fixed_case(load_case(args.input) if args.input else synthetic_case(
-        batch=1, queries=4, keys=8192, heads=64, dim=512, rope_dim=64,
-        topk=2048, page=128, seed=args.seed))
+    data=validate_variable_case(load_case(args.input) if args.input else synthetic_case(
+        batch=1,queries=args.queries,keys=args.keys,heads=64,dim=512,rope_dim=64,
+        topk=2048,page=128,seed=args.seed),queries=args.queries,keys=args.keys)
     save_case(args.output/"inputs.npz", data)
     report["input_sha256"] = identity(data)
     backend = NativeTwoPassBackend(data, device=args.device)
@@ -383,15 +465,20 @@ def execute(args, report, persist):
     bridge = load_bridge(args.bridge_library, args.sdk_root, args.build_directory)
     report["bridge_build"] = getattr(bridge, "_sfa_build_identity", {})
     report["bridge_configuration"] = dict(bridge.configuration())
-    runner_class = make_direct_runner_class(Bf16HotRunner)
-    installed = Bf16HotRunner(backend, writer=args.writer)
+    runner_class = make_direct_runner_class(VariableBf16HotRunner)
+    installed = VariableBf16HotRunner(backend, writer=args.writer)
     runners = dict(c4_w0=backend.prepare("baseline", 0), installed_native_twopass=installed,
         direct_native_twopass=runner_class(backend, bridge, fused=False, writer=args.writer,
                                          aic_count=args.direct_aic_count),
         direct_fused=runner_class(backend, bridge, fused=True, writer=args.writer,
                                  aic_count=args.direct_aic_count))
+    if args.packed_candidate:
+        runners["direct_fused_packed"]=runner_class(backend,bridge,fused=True,writer=args.writer,
+            aic_count=args.direct_aic_count,packed_output=True)
     report["implementations"] = {name: runner.metadata for name, runner in runners.items()}
-    arrays, outputs, passed = {}, {}, {}
+    arrays,outputs,passed=ArtifactStore(args.artifacts),{},{}
+    report["artifacts"] = dict(mode=args.artifacts,full_element_and_row_accuracy=True,
+        repeated_full_npz_writes=args.artifacts=="full",array_metadata=arrays.array_metadata)
     report["controls"] = {}
     # This unchanged installed two-pass path is both the independent accuracy
     # reference and the mandatory current performance baseline. Direct native
@@ -410,7 +497,7 @@ def execute(args, report, persist):
     cold = runners["c4_w0"].decoded_kv()
     matching = {"c4_w0": attention_reference(data, kv_c4=cold)}
     mixed = attention_reference(data, kv_c4=cold, window=128, hot_kv=data["kv"])
-    matching.update(installed_native_twopass=mixed, direct_native_twopass=mixed, direct_fused=mixed)
+    matching.update({name:mixed for name in runners if name!="c4_w0"})
     native_plan = runners["direct_native_twopass"].direct_plan
     calls = {name: (lambda runner=runner: runner.run(write=True, dynamic=True))
              for name, runner in runners.items()}
@@ -423,17 +510,17 @@ def execute(args, report, persist):
                 require(checks[label]["passed"], name+" "+label+" failed")
             def reader_progress(partial):
                 checks["reader"] = partial
-                np.savez_compressed(args.output/"outputs.npz", **arrays)
+                arrays.save(args.output)
                 persist()
             checks["reader"] = reader_controls(runner, native_plan, services, arrays, name, reader_progress)
-            np.savez_compressed(args.output/"outputs.npz", **arrays)
+            arrays.save(args.output)
             persist()
             require(checks["reader"]["passed"], name+" direct hot/native-state comparison failed")
         prepared_tensor = runner.call()
         metrics, output = evaluate_output_contract(prepared_tensor, calls[name], matching[name], bf16_math,
             args, backend, arrays, name, evaluate, merge_reference_for_dtype, compare)
         checks.update(metrics)
-        np.savez_compressed(args.output/"outputs.npz", **arrays)
+        arrays.save(args.output)
         persist()
         require(metrics["control_passed"], name+" matching mathematical reference failed")
         outputs[name] = output
@@ -445,9 +532,15 @@ def execute(args, report, persist):
             require(checks["pipeline_vs_installed_native_twopass"]["passed"], name+" strict installed two-pass mismatch")
         passed[name] = True
         persist()
-    report["controls"]["fused_vs_direct_native_twopass"] = strict_compare(
-        outputs["direct_fused"], outputs["direct_native_twopass"], services, .001)
-    require(report["controls"]["fused_vs_direct_native_twopass"]["passed"], "Strict direct two-pass comparison failed")
+    for name in runners:
+        if name.startswith("direct_fused"):
+            key=name+"_vs_direct_native_twopass"
+            report["controls"][key]=strict_compare(outputs[name],outputs["direct_native_twopass"],services,.001)
+            require(report["controls"][key]["passed"],name+" strict direct two-pass comparison failed")
+    if "direct_fused_packed" in outputs:
+        report["controls"]["packed_vs_unpacked"]=strict_compare(
+            outputs["direct_fused_packed"],outputs["direct_fused"],services,.001)
+        require(report["controls"]["packed_vs_unpacked"]["passed"],"Packed/unpacked output mismatch")
     if args.timing == "graph":
         report["graph_capture_controls"] = {}
         for name, runner in runners.items():
@@ -455,7 +548,7 @@ def execute(args, report, persist):
             report["graph_capture_controls"][name] = graph_replay_control(
                 calls[name], buffers, backend.base.torch, backend.host, services)
             persist()
-    np.savez_compressed(args.output/"outputs.npz", **arrays)
+    arrays.save(args.output)
     report["timings"] = ({} if args.timing == "none" else
                          timed_pairs(passed, calls, args, benchmark, paired_benchmark))
     persist()
@@ -484,9 +577,14 @@ def parser():
     p.add_argument("--input", type=Path)
     p.add_argument("--device", required=True, help="Explicit NPU device already checked idle; no implicit device 0")
     p.add_argument("--writer", choices=("native", "hot_store_partition"), default="hot_store_partition")
-    p.add_argument("--direct-aic-count", type=int, choices=(1, 2, 4), default=1,
+    p.add_argument("--queries",type=int,default=4,help="Trailing query chunk, 1..1024")
+    p.add_argument("--keys",type=int,choices=(8192,32768),default=8192)
+    p.add_argument("--direct-aic-count", type=int, choices=(1,2,4,8,16), default=1,
                    help="Direct hot task count; changes native and fused arms together, never installed baseline")
     p.add_argument("--stages", action="store_true", help="Add independent prepared reader-stage diagnostics after complete pipeline timing")
+    p.add_argument("--packed-candidate",action="store_true",help="Add optional fifth packed-output fusion arm")
+    p.add_argument("--artifacts",choices=("summary","full"),default="summary",
+                   help="Summary retains full precision metrics/bad positions without repeatedly compressing all large arrays")
     p.add_argument("--timing", choices=("none", "eager", "graph"), default="graph")
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--iterations", type=int, default=100)
@@ -498,6 +596,7 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    validate_task_count(args.queries,args.direct_aic_count)
     if args.warmup < 0 or min(args.iterations, args.repeats) < 1:
         raise ValueError("Nonnegative warmup and positive iterations/repeats required")
     # Deliberately not user-relaxable. Native equivalence and mathematical

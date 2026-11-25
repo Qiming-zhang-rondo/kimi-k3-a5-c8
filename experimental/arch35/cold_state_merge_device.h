@@ -2,6 +2,8 @@
 // Contract: TND, N2=1, H=64, D=512, contiguous FP32 cold statistics.
 // Default cold/output storage remains FP32. SFA_MERGE_BF16_IO=1 is a separate
 // compiled variant with BF16 cold storage and final BF16 output; math stays FP32.
+// SFA_MERGE_PACKED_OUTPUT=1 additionally narrows the final register result to
+// BF16 in this VF. It is an isolated compile candidate, disabled by default.
 // hotOutput contains the FINAL normalized FP32 hot result; this epilogue preserves
 // the original native BF16 CAST_ROUND before merging, then leaves FP32 in UB.
 // A call covers head rows of ONE token: flatOffset/H == (flatOffset+rows-1)/H.
@@ -24,11 +26,31 @@
 #if SFA_MERGE_TILE_ROWS != 4 && SFA_MERGE_TILE_ROWS != 8 && SFA_MERGE_TILE_ROWS != 16
 #error "SFA_MERGE_TILE_ROWS must be 4, 8 or 16"
 #endif
+#ifndef SFA_BF16_MERGE_TILE_ROWS
+#define SFA_BF16_MERGE_TILE_ROWS SFA_MERGE_TILE_ROWS
+#endif
+#if SFA_BF16_MERGE_TILE_ROWS != 4 && SFA_BF16_MERGE_TILE_ROWS != 8 && \
+    SFA_BF16_MERGE_TILE_ROWS != 16 && SFA_BF16_MERGE_TILE_ROWS != 32
+#error "SFA_BF16_MERGE_TILE_ROWS must be 4, 8, 16 or 32; 64 has no distinct work in this kernel"
+#endif
+#ifndef SFA_MERGE_PACKED_OUTPUT
+#define SFA_MERGE_PACKED_OUTPUT 0
+#endif
+#if SFA_MERGE_PACKED_OUTPUT != 0 && SFA_MERGE_PACKED_OUTPUT != 1
+#error "SFA_MERGE_PACKED_OUTPUT must be 0 or 1"
+#endif
+#if SFA_MERGE_PACKED_OUTPUT && !SFA_MERGE_BF16_IO
+#error "SFA_MERGE_PACKED_OUTPUT requires the separate BF16 IO entry"
+#endif
+#ifndef SFA_BF16_MERGE_NAMESPACE
+#define SFA_BF16_MERGE_NAMESPACE Bf16ColdMerge
+#endif
 namespace AscendC {
 #if SFA_MERGE_BF16_IO
 // The two IO variants coexist in one shared library. Give every differing
 // inline/helper symbol a distinct name rather than relying on weak coalescing.
-namespace Bf16ColdMerge {
+// Default namespace Bf16ColdMerge is retained; packed uses a separate override.
+namespace SFA_BF16_MERGE_NAMESPACE {
 #endif
 
 #if defined(__DAV_C310_CUBE__)
@@ -54,9 +76,18 @@ using ColdOutputType = float;
 #endif
 
 struct ColdMergeDeviceScratch {
-    // Default 4 retains the validated path. Larger tiles amortize GM transfers
-    // and MTE2/V handshakes without changing any row's arithmetic or rounding.
-    static constexpr uint32_t ROWS = SFA_MERGE_TILE_ROWS;
+    // More query tokens add query tasks, not heads within this AIV. This
+    // kernel's H64/CV_RATIO2 geometry has at most 32 head rows per AIV. A request
+    // for 64 must be marked DEGENERATE_ALIAS_OF32 by the matrix launcher and
+    // skipped; it is rejected above instead of creating duplicate measurements.
+#if SFA_MERGE_BF16_IO
+    static constexpr uint32_t REQUESTED_ROWS = SFA_BF16_MERGE_TILE_ROWS;
+    static constexpr uint32_t MAX_ROWS_PER_AIV = 32;
+    static constexpr uint32_t ROWS = REQUESTED_ROWS;
+#else
+    static constexpr uint32_t REQUESTED_ROWS = SFA_MERGE_TILE_ROWS;
+    static constexpr uint32_t ROWS = REQUESTED_ROWS;
+#endif
     static constexpr uint32_t DIM = 512;
     static constexpr uint32_t STATS_STRIDE = (ROWS + 7U) / 8U * 8U;
     TBuf<> coldBuffer;
@@ -80,11 +111,21 @@ constexpr MicroAPI::CastTrait HOT_TO_BF16 = {
 constexpr MicroAPI::CastTrait BF16_TO_FLOAT = {
     MicroAPI::RegLayout::ZERO, MicroAPI::SatMode::UNKNOWN,
     MicroAPI::MaskMergeMode::ZEROING, RoundMode::UNKNOWN};
+#if SFA_MERGE_PACKED_OUTPUT
+// Exact API/trait pair from deps/ascendc_common/op_kernel/load_store_utils.h
+// (castTraitB322B16 and StoreOneTensorForDtypeT). NO_SAT preserves NaN/Inf.
+constexpr MicroAPI::CastTrait FINAL_TO_BF16 = {
+    MicroAPI::RegLayout::ZERO, MicroAPI::SatMode::NO_SAT,
+    MicroAPI::MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
+#endif
 
 template <bool COLD_PRESENT, bool HOT_PRESENT>
 __simd_vf__ inline void MergeRowsVF(
     __ubuf__ float *hotOutput, __ubuf__ float *hotSum, __ubuf__ float *hotMax,
     __ubuf__ ColdOutputType *coldOutput, __ubuf__ float *coldSum, __ubuf__ float *coldMax,
+#if SFA_MERGE_PACKED_OUTPUT
+    __ubuf__ bfloat16_t *packedOutput,
+#endif
     const uint16_t rows, const uint16_t hotStride, const float nanValue)
 {
     using namespace MicroAPI;
@@ -96,6 +137,9 @@ __simd_vf__ inline void MergeRowsVF(
     RegTensor<bfloat16_t> hotBf16;
 #if SFA_MERGE_BF16_IO
     RegTensor<bfloat16_t> coldBf16;
+#endif
+#if SFA_MERGE_PACKED_OUTPUT
+    RegTensor<bfloat16_t> finalBf16;
 #endif
     Duplicate(zero, 0.0F);
     Duplicate(one, 1.0F);
@@ -178,8 +222,14 @@ __simd_vf__ inline void MergeRowsVF(
                 Duplicate(result, 0.0F);
             }
             Select(result, result, nan, validMask);
+#if SFA_MERGE_PACKED_OUTPUT
+            Cast<bfloat16_t, float, FINAL_TO_BF16>(finalBf16, result, all);
+            DataCopy<bfloat16_t, MicroAPI::StoreDist::DIST_PACK_B32>(
+                packedOutput + row * hotStride + column, finalBf16, all);
+#else
             StoreAlign<float, StoreDist::DIST_NORM_B32>(
                 hotOutput + row * hotStride + column, result, all);
+#endif
         }
     }
 }
@@ -241,9 +291,17 @@ __aicore__ inline void MergeMode(
             hotSumAddress, hotMaxAddress,
             (__ubuf__ ColdOutputType *)cold.GetPhyAddr(),
             (__ubuf__ float *)stats.GetPhyAddr() + ColdMergeDeviceScratch::STATS_STRIDE,
-            (__ubuf__ float *)stats.GetPhyAddr(), count, static_cast<uint16_t>(ubStride), nanBits.value);
+            (__ubuf__ float *)stats.GetPhyAddr(),
+#if SFA_MERGE_PACKED_OUTPUT
+            // Source is FP32 and advances by 4-byte elements; destination is
+            // packed BF16 and advances by 2-byte elements from the ORIGINAL UB
+            // base. Reinterpreting the tile's source pointer would double this
+            // offset and overwrite future unprocessed hot rows at start >=16.
+            (__ubuf__ bfloat16_t *)hotOutput.GetPhyAddr() + start * ubStride,
+#endif
+            count, static_cast<uint16_t>(ubStride), nanBits.value);
     }
-    // Caller must retain the existing V->MTE3 dependency before the FP32 store.
+    // Caller retains its V->MTE3 dependency before copying FP32 or packed BF16.
     PipeBarrier<PIPE_V>();
 }
 } // namespace ColdMergeDeviceDetail
@@ -283,7 +341,7 @@ __aicore__ inline void MergeColdStateDevice(
 }
 #endif // __DAV_C310_CUBE__: AIV implementation / AIC declarations only.
 #if SFA_MERGE_BF16_IO
-} // namespace Bf16ColdMerge
+} // namespace SFA_BF16_MERGE_NAMESPACE (default Bf16ColdMerge)
 #endif
 } // namespace AscendC
 #endif

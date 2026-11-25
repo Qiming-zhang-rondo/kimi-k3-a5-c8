@@ -43,18 +43,30 @@ pybind11::dict LibraryConfiguration()
     pybind11::dict result;
     result["abi_version"] = SfaDirectAbiVersion();
     result["merge_tile_rows"] = SfaDirectMergeTileRows();
+    result["fp32_merge_tile_rows"] = SfaDirectMergeTileRows();
+    result["bf16_merge_tile_rows"] = SfaDirectBf16MergeTileRows();
+    result["bf16_merge_tile_rows_requested"] = SfaDirectBf16MergeTileRows();
+    const auto bf16Rows = SfaDirectBf16MergeTileRows();
+    result["bf16_merge_tile_rows_effective"] = bf16Rows > 32 ? 32 : bf16Rows;
+    result["packed_output_supported"] = SfaDirectPackedOutputSupported() == 1;
     return result;
 }
 
 class Prepared {
 public:
     Prepared(const at::Tensor &query, double scale, bool fused, bool returnStats, bool bf16Io = false,
-             int64_t aicCount = 1)
-        : device_(query.device()), fused_(fused), returnStats_(returnStats), bf16Io_(bf16Io), aicCount_(aicCount)
+             int64_t aicCount = 1, bool packedOutput = false, int64_t physicalKeys = 256)
+        : device_(query.device()), fused_(fused), returnStats_(returnStats), bf16Io_(bf16Io), packedOutput_(packedOutput), aicCount_(aicCount)
     {
         TORCH_CHECK(device_.type() == c10::DeviceType::PrivateUse1,
                     "An Ascend NPU query tensor is required");
-        CheckTensor(query, device_, {4,64,512}, at::kBFloat16, "query");
+        TORCH_CHECK(query.defined() && query.dim() == 3, "Query must have TND rank 3");
+        queryCount_ = query.size(0);
+        TORCH_CHECK(queryCount_ >= 1 && queryCount_ <= 1024 && physicalKeys >= 128 &&
+                    physicalKeys <= INT32_MAX && physicalKeys % 128 == 0,
+                    "Require Q1..1024 and page-aligned physical_kv >= 128");
+        physicalKv_ = physicalKeys;
+        CheckTensor(query, device_, {queryCount_,64,512}, at::kBFloat16, "query");
         TORCH_CHECK(std::isfinite(scale) && scale > 0 &&
                     std::isfinite(static_cast<float>(scale)) && static_cast<float>(scale) > 0,
                     "Scale must remain finite and positive in FP32");
@@ -62,20 +74,24 @@ public:
                     "The fused direct entry returns final output only; no combined stats ABI");
         TORCH_CHECK(!bf16Io || fused,
                     "bf16_io selects fused BF16 cold/output; native_hot already has its original BF16 contract");
-        TORCH_CHECK(aicCount == 1 || aicCount == 2 || aicCount == 4,
-                    "Fixed Q4 supports aic_count=1, 2 or 4 only");
-        TORCH_CHECK(SfaDirectAbiVersion() == 3 && SfaDirectBuffersBytes() == sizeof(SfaDirectBuffers),
+        TORCH_CHECK(aicCount >= 1 && aicCount <= 16 &&
+                    sfa_fixed::IsSupportedGeometry(queryCount_, physicalKv_, aicCount),
+                    "Require aic_count=1/2/4/8/16 <= Q and Q divisible by aic_count");
+        TORCH_CHECK(!packedOutput || (fused && bf16Io),
+                    "packed_output requires fused BF16 cold/output mode");
+        TORCH_CHECK(SfaDirectAbiVersion() == 4 && SfaDirectBuffersBytes() == sizeof(SfaDirectBuffers),
                     "Compiled direct-library ABI does not match this bridge; rebuild the exact sources");
+        TORCH_CHECK(SfaDirectPackedOutputSupported() == 1, "ABI4 library missing packed-output entry");
         c10_npu::NPUGuard guard(device_);
-        output_ = at::empty({4,64,512}, query.options().dtype(fused && !bf16Io ? at::kFloat : at::kBFloat16));
+        output_ = at::empty({queryCount_,64,512}, query.options().dtype(fused && !bf16Io ? at::kFloat : at::kBFloat16));
         // Keep valid full-size pointers even when the entry is not returning stats.
-        maximum_ = at::empty({4,64,1}, query.options().dtype(at::kFloat));
+        maximum_ = at::empty({queryCount_,64,1}, query.options().dtype(at::kFloat));
         sum_ = at::empty_like(maximum_);
         empty_ = at::empty({0}, query.options().dtype(at::kFloat));
         scratch_ = at::empty({static_cast<int64_t>(sfa_fixed::WorkspaceBytesForAic(aicCount_))},
                               query.options().dtype(at::kByte));
-        auto tiling = sfa_fixed::MakeTiling(static_cast<float>(scale), aicCount_);
-        TORCH_CHECK(sfa_fixed::ValidateTiling(tiling, aicCount_), "Fixed original POD validation failed");
+        auto tiling = sfa_fixed::MakeTiling(static_cast<float>(scale), aicCount_, queryCount_, physicalKv_);
+        TORCH_CHECK(sfa_fixed::ValidateTiling(tiling, aicCount_, queryCount_, physicalKv_), "Fixed original POD validation failed");
         tiling.baseParams.returnSoftmaxLse = returnStats ? 1 : 0;
         auto host = at::empty({static_cast<int64_t>(sizeof(tiling))},
                                at::TensorOptions().device(at::kCPU).dtype(at::kByte));
@@ -116,11 +132,11 @@ public:
         auto arguments = HotArguments(query,key,value,indices,table,queryLengths,kvLengths,queryRope,keyRope);
         // Preserve the ACTUAL native cold-output contract. The selected ASC
         // entry loads BF16 or FP32 directly; no timed Python/Torch cast occurs.
-        CheckTensor(coldOutput,device_,{4,64,512},bf16Io_ ? at::kBFloat16 : at::kFloat,"cold_output");
-        CheckTensor(coldMax,device_,{4,64,1},at::kFloat,"cold_max");
-        CheckTensor(coldSum,device_,{4,64,1},at::kFloat,"cold_sum");
-        CheckTensor(coldPresent,device_,{4},at::kBool,"cold_present");
-        CheckTensor(hotPresent,device_,{4},at::kBool,"hot_present");
+        CheckTensor(coldOutput,device_,{queryCount_,64,512},bf16Io_ ? at::kBFloat16 : at::kFloat,"cold_output");
+        CheckTensor(coldMax,device_,{queryCount_,64,1},at::kFloat,"cold_max");
+        CheckTensor(coldSum,device_,{queryCount_,64,1},at::kFloat,"cold_sum");
+        CheckTensor(coldPresent,device_,{queryCount_},at::kBool,"cold_present");
+        CheckTensor(hotPresent,device_,{queryCount_},at::kBool,"hot_present");
         arguments.coldOutput=Address(coldOutput);
         arguments.coldMax=Address(coldMax);
         arguments.coldSum=Address(coldSum);
@@ -133,7 +149,9 @@ public:
         void *raw = stream.stream();
         Record(stream,{query,key,value,indices,table,queryLengths,kvLengths,queryRope,keyRope,
                        coldOutput,coldMax,coldSum,coldPresent,hotPresent});
-        if (bf16Io_) {
+        if (packedOutput_) {
+            TORCH_CHECK(SfaLaunchFusedBf16Packed(raw, &arguments, aicCount_) == 0, "Packed BF16 direct launch rejected its count/descriptor");
+        } else if (bf16Io_) {
             TORCH_CHECK(SfaLaunchFusedBf16(raw, &arguments, aicCount_) == 0, "BF16 direct launch rejected its count/descriptor");
         } else {
             TORCH_CHECK(SfaLaunchFused(raw, &arguments, aicCount_) == 0, "FP32 direct launch rejected its count/descriptor");
@@ -152,6 +170,9 @@ public:
         result["aic_count"] = aicCount_;
         result["aiv_count"] = 2 * aicCount_;
         result["workspace_bytes"] = scratch_.numel();
+        result["queries"] = queryCount_;
+        result["physical_kv"] = physicalKv_;
+        result["packed_output"] = packedOutput_;
         return result;
     }
 
@@ -162,18 +183,18 @@ private:
                                  const at::Tensor &kvLengths, const at::Tensor &queryRope,
                                  const at::Tensor &keyRope) const
     {
-        CheckTensor(query,device_,{4,64,512},at::kBFloat16,"query");
-        CheckTensor(key,device_,{2,128,1,512},at::kBFloat16,"key");
-        CheckTensor(value,device_,{2,128,1,512},at::kBFloat16,"value");
+        CheckTensor(query,device_,{queryCount_,64,512},at::kBFloat16,"query");
+        CheckTensor(key,device_,{physicalKv_/128,128,1,512},at::kBFloat16,"key");
+        CheckTensor(value,device_,{physicalKv_/128,128,1,512},at::kBFloat16,"value");
         TORCH_CHECK(key.data_ptr() == value.data_ptr(), "The fixed MLA value must alias the latent key cache");
-        CheckTensor(indices,device_,{4,1,128},at::kInt,"compact_indices");
-        CheckTensor(table,device_,{1,2},at::kInt,"identity_block_table");
+        CheckTensor(indices,device_,{queryCount_,1,128},at::kInt,"compact_indices");
+        CheckTensor(table,device_,{1,physicalKv_/128},at::kInt,"identity_block_table");
         CheckTensor(queryLengths,device_,{1},at::kInt,"query_lengths");
         CheckTensor(kvLengths,device_,{1},at::kInt,"kv_lengths");
-        CheckTensor(queryRope,device_,{4,64,64},at::kBFloat16,"query_rope");
-        CheckTensor(keyRope,device_,{2,128,1,64},at::kBFloat16,"key_rope");
+        CheckTensor(queryRope,device_,{queryCount_,64,64},at::kBFloat16,"query_rope");
+        CheckTensor(keyRope,device_,{physicalKv_/128,128,1,64},at::kBFloat16,"key_rope");
         // Before timing, the harness must validate the actual device VALUES:
-        // lengths=4/256, identity table, unique in-range compact128 for each
+        // lengths=prepared Q/physical_kv, identity table, unique compact128 for each
         // query and valid nonempty hot work. This bridge never reads them on CPU.
         SfaDirectBuffers result{};
         result.query=Address(query); result.key=Address(key); result.value=Address(value);
@@ -212,7 +233,8 @@ private:
     }
 
     c10::Device device_;
-    bool fused_, returnStats_, bf16Io_;
+    bool fused_, returnStats_, bf16Io_, packedOutput_;
+    int64_t queryCount_, physicalKv_;
     uint32_t aicCount_;
     at::Tensor output_, maximum_, sum_, empty_, scratch_, tiling_;
 };
@@ -226,9 +248,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module)
         .def("outputs",&Prepared::Outputs)
         .def("configuration",&Prepared::Configuration);
     module.def("configuration",&LibraryConfiguration);
-    module.def("prepare",[](const at::Tensor &query,double scale,bool fused,bool returnStats,bool bf16Io,int64_t aicCount) {
+    module.def("prepare",[](const at::Tensor &query,double scale,bool fused,bool returnStats,bool bf16Io,int64_t aicCount,bool packedOutput,int64_t physicalKv) {
         TORCH_CHECK(query.defined(), "Query must be defined");
-        return std::make_shared<Prepared>(query,scale,fused,returnStats,bf16Io,aicCount);
+        return std::make_shared<Prepared>(query,scale,fused,returnStats,bf16Io,aicCount,packedOutput,physicalKv);
     },pybind11::arg("query"),pybind11::arg("scale"),pybind11::arg("fused"),
-      pybind11::arg("return_stats")=false,pybind11::arg("bf16_io")=false,pybind11::arg("aic_count")=1);
+      pybind11::arg("return_stats")=false,pybind11::arg("bf16_io")=false,pybind11::arg("aic_count")=1,
+      pybind11::arg("packed_output")=false,pybind11::arg("physical_kv")=256);
 }

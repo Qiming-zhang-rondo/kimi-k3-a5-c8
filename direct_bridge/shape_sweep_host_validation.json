@@ -1,0 +1,58 @@
+{
+  "status": "HOST_VALIDATED_A5_PENDING",
+  "scope": "Dynamic shape/interface and CPU-model coverage only; no new device result",
+  "baseline_evidence_commit": "56ab1fb21ede6aa06bcd9a7dbb6680de1b8e2ca9",
+  "direct_abi": 4,
+  "queries": [
+    1,
+    4,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
+  "keys": [
+    8192,
+    32768
+  ],
+  "bf16_rows": [
+    8,
+    16,
+    32
+  ],
+  "aic_counts": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "targeted_checks": {
+    "dynamic_cpp_and_c_api": {
+      "passed": 12,
+      "initial_cmake_skips": 2,
+      "cmake_skips_later_executed_pass": 2
+    },
+    "harness_and_variable_shape": {
+      "passed": 20
+    },
+    "matrix_orchestration": {
+      "passed": 5
+    },
+    "entry_and_cmake_guards": {
+      "passed": 6
+    },
+    "merge_cpu_models": {
+      "packed_initial_passed": 8,
+      "tile32_final_passed": 3
+    }
+  },
+  "limitations": [
+    "New ABI4 requires isolated matching SDK build.",
+    "Large-Q precision/graph/performance not yet run here.",
+    "All128-hot-hit controlled selection; no production serving claim.",
+    "rows64 has no distinct work under fixed H64/two-AIV geometry and is explicitly skipped."
+  ]
+}

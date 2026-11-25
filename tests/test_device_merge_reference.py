@@ -32,7 +32,7 @@ STUB = r'''
 namespace AscendC {
 enum class HardEvent {MTE2_V, V_MTE2};
 enum class CMPMODE {GE, LE, EQ};
-enum class RoundMode {CAST_ROUND, UNKNOWN};
+enum class RoundMode {CAST_ROUND, CAST_RINT, UNKNOWN};
 enum class MemType {VEC_STORE, VEC_LOAD};
 constexpr int PIPE_V=1;
 using TEventID=int;
@@ -82,9 +82,9 @@ inline uint16_t toBf(float x) {
 }
 inline float fromBf(uint16_t b) {uint32_t u=uint32_t(b)<<16;float f;std::memcpy(&f,&u,4);return f;}
 namespace MicroAPI {
-enum class RegLayout {ZERO}; enum class SatMode {SAT,UNKNOWN};
+enum class RegLayout {ZERO}; enum class SatMode {SAT,NO_SAT,UNKNOWN};
 enum class MaskMergeMode {ZEROING}; enum class MaskPattern {ALL};
-enum class LoadDist {DIST_NORM,DIST_BRC_B32,DIST_UNPACK_B16}; enum class StoreDist {DIST_NORM_B32};
+enum class LoadDist {DIST_NORM,DIST_BRC_B32,DIST_UNPACK_B16}; enum class StoreDist {DIST_NORM_B32,DIST_PACK_B32};
 struct CastTrait {RegLayout layout;SatMode sat;MaskMergeMode mask;RoundMode round;};
 template<class T> struct RegTensor {std::array<T,128> x{};};
 struct MaskReg {std::array<bool,64> x{};};
@@ -100,6 +100,10 @@ template<class T,LoadDist L=LoadDist::DIST_NORM> void LoadAlign(RegTensor<T>& v,
 }
 template<class T,StoreDist> void StoreAlign(T* p,RegTensor<T>& v,MaskReg& m) {
  for(int i=0;i<64;++i) if(m.x[i]) p[i]=v.x[i];
+}
+template<class T,StoreDist D> void DataCopy(T* p,RegTensor<T>& v,MaskReg& m) {
+ static_assert(D==StoreDist::DIST_PACK_B32,"only real BF16 packing distribution is modeled");
+ for(int i=0;i<64;++i) if(m.x[i]) p[i]=v.x[2*i];
 }
 template<class T,CMPMODE C> void Compares(MaskReg& out,RegTensor<T>& a,T b,MaskReg& mask) {
  for(int i=0;i<64;++i) out.x[i]=mask.x[i] && (C==CMPMODE::GE?a.x[i]>=b:C==CMPMODE::LE?a.x[i]<=b:a.x[i]==b);
@@ -132,7 +136,7 @@ DRIVER = r'''
 #include "cold_state_merge_device.h"
 using namespace AscendC;
 #if SFA_MERGE_BF16_IO
-using namespace AscendC::Bf16ColdMerge;
+using namespace AscendC::SFA_BF16_MERGE_NAMESPACE;
 #endif
 void read(std::vector<float>& v) {std::cin.read(reinterpret_cast<char*>(v.data()),v.size()*4);}
 int main(int argc,char** argv) {
@@ -183,12 +187,19 @@ class DeviceMergeReferenceTest(unittest.TestCase):
     tile_rows = 4
 
     @staticmethod
-    def compile_driver(compiler, root, bf16_io, tile_rows):
+    def compile_driver(compiler, root, bf16_io, tile_rows, packed_output=0, merge_namespace=None,
+                       bf16_tile_rows=None):
         (root / "kernel_operator.h").write_text(STUB)
         (root / "driver.cpp").write_text(DRIVER)
         exe = root / "driver"
-        subprocess.run([compiler, "-std=c++17", "-O0", "-ffp-contract=off",
+        namespace_flags = (["-DSFA_BF16_MERGE_NAMESPACE=" + merge_namespace]
+                           if merge_namespace else [])
+        bf16_tile_flags = (["-DSFA_BF16_MERGE_TILE_ROWS=" + str(bf16_tile_rows)]
+                          if bf16_tile_rows is not None else [])
+        subprocess.run([compiler, "-std=c++17", "-O0", "-ffp-contract=off", *namespace_flags,
+                        *bf16_tile_flags,
                         "-DSFA_MERGE_BF16_IO=" + str(int(bf16_io)),
+                        "-DSFA_MERGE_PACKED_OUTPUT=" + str(int(packed_output)),
                         "-DSFA_MERGE_TILE_ROWS=" + str(tile_rows), "-I", str(root),
                         "-I", str(HEADER.parent), str(root / "driver.cpp"), "-o", str(exe)],
                        check=True, capture_output=True, text=True)
@@ -344,7 +355,7 @@ class DeviceMergeReferenceTest(unittest.TestCase):
             self.assertNotIn(forbidden,text)
         self.assertIn("column += 64",text)
         self.assertIn("CAST_ROUND",text)
-        self.assertNotIn("CAST_RINT",text)
+        self.assertIn("#if SFA_MERGE_PACKED_OUTPUT", text)
         self.assertIn("NOT yet compiled or measured with the A5 SDK",text)
 
     def test_cube_parse_requires_no_vector_api_or_runtime_fallback(self):
@@ -378,6 +389,26 @@ class DeviceMergeBf16ReferenceTest(DeviceMergeReferenceTest):
     """Execute the distinct BF16-input header variant with typed 2-byte DMA."""
     bf16_io = True
 
+    def test_bf16_32_uses_true_32_row_scratch_and_degenerate_64_is_rejected(self):
+        old_exe, old_rows = self.exe, self.tile_rows
+        try:
+            for requested in (32,):
+                with tempfile.TemporaryDirectory(prefix="sfa-bf16-wide-tile-") as tmp:
+                    self.exe = self.compile_driver(self.compiler, Path(tmp), True, 16,
+                                                   bf16_tile_rows=requested)
+                    self.tile_rows = 32
+                    for rows in (1, 7, 16, 17, 31, 32):
+                        with self.subTest(requested=requested, effective=32, rows=rows):
+                            self.assert_matches(self.case(rows=rows, offset=64, stride=544))
+                    for cp,hp in ((0,0),(0,1),(1,0)):
+                        self.assert_matches(self.case(rows=32, offset=64, cp=cp, hp=hp))
+            with tempfile.TemporaryDirectory(prefix="sfa-bf16-degenerate-tile-") as tmp:
+                with self.assertRaises(subprocess.CalledProcessError) as rejected:
+                    self.compile_driver(self.compiler, Path(tmp), True, 16, bf16_tile_rows=64)
+                self.assertIn("64 has no distinct work", rejected.exception.stderr)
+        finally:
+            self.exe, self.tile_rows = old_exe, old_rows
+
     def test_final_bf16_rne_halfway_contract_and_actual_fp32_merge(self):
         c = self.case(rows=1, offset=63, stride=512)
         c["hs"] = [1.]
@@ -406,7 +437,9 @@ class DeviceMergeBf16ReferenceTest(DeviceMergeReferenceTest):
         self.assertIn("using ColdOutputType = bfloat16_t", helper)
         service = HEADER.with_name("sparse_flash_attention_service_vector_mla.h").read_text()
         self.assertIn("namespace BaseApiBf16ColdIo", service)
-        self.assertIn("AscendC::Bf16ColdMerge::MergeColdStateDevice", service)
+        self.assertIn("#define SFA_BF16_MERGE_NAMESPACE Bf16ColdMerge", helper)
+        self.assertIn("#define SFA_BF16_VARIANT_NAMESPACE BaseApiBf16ColdIo", service)
+        self.assertIn("AscendC::SFA_BF16_MERGE_NAMESPACE::MergeColdStateDevice", service)
         with tempfile.TemporaryDirectory(prefix="sfa-bf16-cube-parse-") as tmp:
             root = Path(tmp)
             (root / "kernel_operator.h").write_text('''#pragma once

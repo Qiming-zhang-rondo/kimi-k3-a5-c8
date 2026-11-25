@@ -40,14 +40,17 @@ extern "C" {
 
 // stream is the caller's current aclrtStream, represented as an opaque pointer.
 // buffers and all fields used by the selected kernel must be nonnull and valid.
-// ABI 3: aicCount=1/2/4 must match usedCoreNum and 442368*aicCount scratch.
+// ABI 4: aicCount=1/2/4/8/16 <= Q must match usedCoreNum and 442368*aicCount scratch.
 // Each AIC dispatches two AIVs. Return 0 after asynchronous submission, -1
 // for an unsupported count or null descriptor without launching anything.
-// Allocation lifetimes belong to the caller's stream. ABI 2 must be rebuilt.
+// Allocation lifetimes belong to the caller's stream. ABI 3 and earlier must be rebuilt.
 SFA_DIRECT_EXPORT int32_t SfaLaunchOriginal(void *stream, const SfaDirectBuffers *buffers, uint32_t aicCount);
 SFA_DIRECT_EXPORT int32_t SfaLaunchFused(void *stream, const SfaDirectBuffers *buffers, uint32_t aicCount);
 // BF16 cold output and BF16 final output; max/sum and internal arithmetic FP32.
 SFA_DIRECT_EXPORT int32_t SfaLaunchFusedBf16(void *stream, const SfaDirectBuffers *buffers, uint32_t aicCount);
+SFA_DIRECT_EXPORT int32_t SfaLaunchFusedBf16Packed(void *stream, const SfaDirectBuffers *buffers, uint32_t aicCount);
+SFA_DIRECT_EXPORT uint32_t SfaDirectBf16MergeTileRows(void);
+SFA_DIRECT_EXPORT uint32_t SfaDirectPackedOutputSupported(void);
 SFA_DIRECT_EXPORT uint32_t SfaDirectAbiVersion(void);
 SFA_DIRECT_EXPORT uint32_t SfaDirectBuffersBytes(void);
 SFA_DIRECT_EXPORT uint32_t SfaDirectMergeTileRows(void);
