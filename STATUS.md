@@ -505,3 +505,21 @@ But at Q32, the native's errors are larger (some > 1 ULP)
 The RNE gate that accepted Q4 midpoints doesn't cover Q32's 64 non-midpoint errors
 
 ### Need: accept fused as reference (it matches FP64), or investigate native's 64 real errors
+
+## Q32-Q1024 ALL MEASURED with independent RNE gate (2026-11-25 10:35)
+
+New gate (31affe8) accepts fused=FP64 oracle directly. All shapes PASS.
+
+| Q | W0 µs | installed µs | fused µs | fused/inst | fused/W0 |
+|---|---|---|---|---|---|
+| 4 | 87 | 126 | 114 | 0.904x | 1.30x |
+| 32 | 91 | 176 | 123 | 0.702x | 1.36x |
+| 64 | 159 | 303 | 201 | 0.665x | 1.27x |
+| 128 | 296 | 585 | 376 | 0.643x | 1.27x |
+| 256 | 570 | 1144 | 717 | 0.627x | 1.26x |
+| 512 | 1126 | 2304 | 1402 | 0.607x | 1.25x |
+| 1024 | 2403 | 4663 | 2804 | 0.601x | 1.17x |
+
+KEY: fused advantage GROWS with Q (9.6% at Q4 → 39.9% at Q1024)!
+Scaling: fused 24.7x for 256x Q increase vs installed 37.1x.
+Full results on 178 local at /tmp/sfa-zero-exact-v6/
