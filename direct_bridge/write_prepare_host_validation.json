@@ -1,0 +1,27 @@
+{
+  "status": "HOST_VALIDATED_A5_PENDING",
+  "base_commit": "c2873ee61b6bcffddde1a13d6a083473fcb90b31",
+  "branch": "sfa-write-prepare",
+  "change": "Keep native MXFP4 quantize and packed bytes; fuse cold-byte scatter into BF16 hot store/two-scan partition.",
+  "tests": {
+    "command": "PYTHONPATH=tests python -m unittest test_cold_store_prepare test_cold_store_runner test_direct_bridge_harness -v",
+    "passed": 29,
+    "failed": 0,
+    "scope": "4 actual-kernel-body/metadata CPU tests; 4 writer/control/graph-poison tests; 21 harness tests. First 28 executed together, final added partition gate executed separately."
+  },
+  "timed_path": {
+    "native_quantize_unchanged": true,
+    "packed_cat_unchanged": true,
+    "cold_index_copy_calls": 0,
+    "combined_prepare_launches": 1,
+    "current_packed_pointer_each_call": true,
+    "no_timed_cpu_reads": true
+  },
+  "controls": [
+    "whole-cache byte comparison against original native cold writer and CPU hot scatter",
+    "poison all partition outputs and invoke the new producer",
+    "full-pipeline graph must restore touched cold/hot/RoPE slots and all partition outputs",
+    "all current math and graph output gates"
+  ],
+  "device_results": "Not run on this machine; no latency/speedup claim."
+}

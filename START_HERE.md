@@ -1,13 +1,12 @@
-# 当前任务：大chunk形状与合并批量扫描
+# 独立候选分支：冷缓存scatter并入热环prepare
 
-用户最新要求优先覆盖Q32、64、128、256、512、1024，不能以Q4证明通用最优。
-执行 [SHAPE_SWEEP_NEXT.md](SHAPE_SWEEP_NEXT.md)。默认包括Q1/Q4对照、K8K/K32K、
-4/8/16 AIC、BF16合并8/16/32行，先返回大chunk覆盖，再继续调参。
+本分支 `sfa-write-prepare` 基于c2873ee，供正在进行的大形状扫描完成后单独测试。
+主分支 `sfa-cold-merge` 的形状扫描和当前113µs实现保持原样，不切换正在运行的checkout。
 
-56ab1fb已实测Q4/core4/rows16融合113.56µs，较同轮installed两遍快9.5%；
-保留此已验证库与结果。本轮动态形状/ABI4和可选packed输出尚待A5验证。
-原始18文件payload不改，精度门槛不变；完整逐元素和逐行检查继续执行。
+新增候选见 [WRITE_PREPARE_NEXT.md](WRITE_PREPARE_NEXT.md)：
+原生C4量化和cat打包不变，将packed冷字节scatter并入既有BF16热写与two_scan分区，
+减少一次独立index_copy_调用。开关默认关闭，保留同轮direct_fused当前实现作基线。
+新增完整缓存字节/整数分区/写槽图重放门禁，通过后才计时。
 
-先完成形状扫描，不扩展冷写融合。脚本从已验证build继承同SDK参数、隔离构建，
-逐组更新summary.csv及best_by_shape.csv，不等全矩阵结束才返回结果。
-设备故障停整个扫描，不reset、不换marker重试。规则见 [AGENTS.md](AGENTS.md)。
+这是Python/Triton改动，未改AscendC库及ABI；可复用形状扫描已成功的ABI4设备库。
+29项针对宿主检查通过；新Triton设备编译/A5正确性/性能均未验证，不能先算提速。

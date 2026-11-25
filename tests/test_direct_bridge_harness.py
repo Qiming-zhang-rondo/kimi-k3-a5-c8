@@ -241,6 +241,19 @@ class DirectBridgeHarnessTests(unittest.TestCase):
         self.assertIn("direct_fused_packed_vs_direct_fused",results)
         self.assertIn("direct_fused_packed_vs_installed_native_twopass",results)
 
+    def test_cold_store_candidate_is_opt_in_and_paired_against_current_fusion(self):
+        names=(*harness.ARMS,"direct_fused_cold_store")
+        calls={name:object() for name in names};seen=[]
+        def paired(left,right,*_):
+            seen.append((left,right));return {"graph":{"status":"MEASURED"}}
+        with self.assertRaises(harness.ControlFailed):
+            harness.timed_pairs({name:name!="direct_fused_cold_store" for name in names},calls,None,None,paired)
+        self.assertEqual(seen,[])
+        result=harness.timed_pairs(dict.fromkeys(names,True),calls,None,None,paired)
+        self.assertEqual(len(result),8)
+        self.assertIn((calls["direct_fused"],calls["direct_fused_cold_store"]),seen)
+        self.assertIn("direct_fused_cold_store_vs_installed_native_twopass",result)
+
     def test_zero_query_exact_gate_accepts_variable_q_without_sampling(self):
         import numpy as np
         q=32
@@ -389,6 +402,7 @@ class DirectBridgeHarnessTests(unittest.TestCase):
         self.assertEqual(args.timing, "graph")
         self.assertEqual(args.writer, "hot_store_partition")
         self.assertEqual(args.direct_aic_count, 1)
+        self.assertFalse(args.cold_store_candidate)
         self.assertNotIn("control_l2", vars(args))
 
 

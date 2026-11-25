@@ -15,13 +15,13 @@ import traceback
 
 from pinned_payload import activate_payload
 
-VERSION = "sfa-direct-c4-bf16-ab-v5"
+VERSION = "sfa-direct-c4-bf16-ab-v5-write-candidate"
 ACCEPTANCE_POLICY = ("Native equivalence remains global/worst-row relative L2 <=0.001. "
     "Only fused BF16 zero-query cold1920/hot128 may instead pass a current-run bit-exact "
     "FP64-to-BF16 RNE proof; every difference from native must be an exact midpoint and one BF16 ULP. "
     "The original failed strict comparison is retained. No nonzero-query or FP32 exception.")
 ARMS = ("c4_w0", "installed_native_twopass", "direct_native_twopass", "direct_fused")
-DIRECT_ARMS = ("direct_native_twopass", "direct_fused", "direct_fused_packed")
+DIRECT_ARMS = ("direct_native_twopass", "direct_fused", "direct_fused_packed", "direct_fused_cold_store")
 PAIRS = (("c4_w0", "installed_native_twopass"),
          ("c4_w0", "direct_native_twopass"),
          ("c4_w0", "direct_fused"),
@@ -30,6 +30,9 @@ PAIRS = (("c4_w0", "installed_native_twopass"),
 PACKED_PAIRS = (("direct_fused", "direct_fused_packed"),
                 ("installed_native_twopass", "direct_fused_packed"),
                 ("c4_w0", "direct_fused_packed"))
+WRITE_PAIRS = (("direct_fused", "direct_fused_cold_store"),
+               ("installed_native_twopass", "direct_fused_cold_store"),
+               ("c4_w0", "direct_fused_cold_store"))
 
 
 class ControlFailed(RuntimeError):
@@ -401,7 +404,8 @@ def timed_pairs(controls, calls, args, benchmark, pair_benchmark):
     require(set(ARMS).issubset(calls) and all(controls.get(name) for name in calls),
             "Every active arm, including installed baseline, must pass correctness before any timing")
     result = {}
-    pairs=PAIRS+(PACKED_PAIRS if "direct_fused_packed" in calls else ())
+    pairs=(PAIRS+(PACKED_PAIRS if "direct_fused_packed" in calls else ())+
+           (WRITE_PAIRS if "direct_fused_cold_store" in calls else ()))
     for baseline, candidate in pairs:
         result[candidate+"_vs_"+baseline] = pair_benchmark(calls[baseline], calls[candidate], args, benchmark)
         for value in result[candidate+"_vs_"+baseline].values():
@@ -431,6 +435,9 @@ def prepared_reader_stages(runners):
         pleft,pargs=packed._cold_read(pparts),hot_inputs(packed,pparts)
         result["direct_fused_packed_hot_read_merge"] = lambda: packed.direct_plan.fused_hot(
             *pargs,*pleft,pparts["old_present"],pparts["recent_present"])[0]
+    if "direct_fused_cold_store" in runners:
+        result["original_quantize_and_cache_writes"] = fused._write
+        result["candidate_quantize_and_combined_prepare"] = runners["direct_fused_cold_store"]._write
     return result
 
 
@@ -475,6 +482,11 @@ def execute(args, report, persist):
     if args.packed_candidate:
         runners["direct_fused_packed"]=runner_class(backend,bridge,fused=True,writer=args.writer,
             aic_count=args.direct_aic_count,packed_output=True)
+    if args.cold_store_candidate:
+        from cold_store_runner import make_cold_store_runner_class
+        candidate_class=make_cold_store_runner_class(runner_class)
+        runners["direct_fused_cold_store"]=candidate_class(backend,bridge,fused=True,
+            writer=args.writer,aic_count=args.direct_aic_count,packed_output=False)
     report["implementations"] = {name: runner.metadata for name, runner in runners.items()}
     arrays,outputs,passed=ArtifactStore(args.artifacts),{},{}
     report["artifacts"] = dict(mode=args.artifacts,full_element_and_row_accuracy=True,
@@ -548,6 +560,12 @@ def execute(args, report, persist):
             report["graph_capture_controls"][name] = graph_replay_control(
                 calls[name], buffers, backend.base.torch, backend.host, services)
             persist()
+        if "direct_fused_cold_store" in runners:
+            from cold_store_runner import writer_graph_control
+            check=writer_graph_control(runners["direct_fused_cold_store"],calls["direct_fused_cold_store"])
+            report["graph_capture_controls"]["cold_store_captured_bytes_and_partition"]=check
+            persist()
+            require(check["passed"],"Cold store graph did not restore poisoned write slots/partition")
     arrays.save(args.output)
     report["timings"] = ({} if args.timing == "none" else
                          timed_pairs(passed, calls, args, benchmark, paired_benchmark))
@@ -555,6 +573,7 @@ def execute(args, report, persist):
     if args.stages and args.timing != "none":
         report["stage_scope"] = ("Independent prepared reader stages after full-pipeline pairs; "
             "real C4 cold states and fixed partitions prepared outside these stage timers; "
+            "optional writer stages include native quantize+pack and all per-step cache writes/partition; "
             "not full pipeline latency and not additive")
         report["stage_timings"] = {}
         for stage, call in prepared_reader_stages(runners).items():
@@ -583,6 +602,8 @@ def parser():
                    help="Direct hot task count; changes native and fused arms together, never installed baseline")
     p.add_argument("--stages", action="store_true", help="Add independent prepared reader-stage diagnostics after complete pipeline timing")
     p.add_argument("--packed-candidate",action="store_true",help="Add optional fifth packed-output fusion arm")
+    p.add_argument("--cold-store-candidate",action="store_true",
+                   help="Add native quantize plus combined cold-byte scatter/BF16 hot store/partition candidate")
     p.add_argument("--artifacts",choices=("summary","full"),default="summary",
                    help="Summary retains full precision metrics/bad positions without repeatedly compressing all large arrays")
     p.add_argument("--timing", choices=("none", "eager", "graph"), default="graph")
@@ -597,6 +618,8 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     validate_task_count(args.queries,args.direct_aic_count)
+    if args.cold_store_candidate and args.writer!="hot_store_partition":
+        raise ValueError("--cold-store-candidate requires --writer hot_store_partition")
     if args.warmup < 0 or min(args.iterations, args.repeats) < 1:
         raise ValueError("Nonnegative warmup and positive iterations/repeats required")
     # Deliberately not user-relaxable. Native equivalence and mathematical
