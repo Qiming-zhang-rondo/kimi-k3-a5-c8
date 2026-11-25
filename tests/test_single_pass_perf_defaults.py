@@ -31,7 +31,9 @@ class PerfDefaultsTest(unittest.TestCase):
             timings=dict(original_c4_direct=dict(graph=dict(status="ERROR",rounds=rounds))),
             all_accuracy_controls_passed=False,
             routed_pattern_controls=dict(alternating_prefix=dict(passed=False,
-                checks=dict(routed_vs_overlay=dict(relative_l2=.02,passed=False)))))
+                checks=dict(routed_vs_overlay=dict(relative_l2=.02,passed=False)))),
+            early_hot_refresh_controls=dict(passed=False,completed_iterations=3,
+                rounds=[dict(iteration=2,passed=False,relative_l2=.03)]))
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/"results.json";path.write_text(json.dumps(data))
             result=m.collect(path)
@@ -41,6 +43,7 @@ class PerfDefaultsTest(unittest.TestCase):
         self.assertEqual(result["timings"]["original_c4_direct"]["graph"]["rounds"],rounds)
         self.assertIsNone(result["launch_geometry"])
         self.assertEqual(result["routed_pattern_controls"],data["routed_pattern_controls"])
+        self.assertEqual(result["early_hot_refresh_controls"],data["early_hot_refresh_controls"])
         self.assertEqual(m.portable(dict(bad=float("nan"),high=float("inf"))),dict(bad="nan",high="inf"))
 
 

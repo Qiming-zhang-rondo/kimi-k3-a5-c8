@@ -34,7 +34,7 @@ if(NOT ACL_INCLUDE OR NOT ACL_LIBRARY)
     message(FATAL_ERROR "No matched ACL headers/library in SFA_SDK_ROOT")
 endif()
 add_library(qsfa_recent128_direct SHARED single_pass_wrapper.asc original_c4_wrapper.asc
-    routed_single_pass_wrapper.asc fast_pair_single_pass_wrapper.asc)
+    routed_single_pass_wrapper.asc fast_pair_single_pass_wrapper.asc early_hot_single_pass_wrapper.asc)
 set_target_properties(qsfa_recent128_direct PROPERTIES POSITION_INDEPENDENT_CODE ON UNITY_BUILD OFF)
 target_compile_options(qsfa_recent128_direct PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>

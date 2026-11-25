@@ -17,3 +17,7 @@
 ## 最新读取优化：cold-pair快速路径
 
 e6ae40c的同库原始证据确认routed117.64µs，比overlay97.64µs慢20.5%，输出一致。当前有效实现仍用overlay，不能把旧routed称优化成功。用户授权继续实现冷pair直接原生搬运，最新任务为 [experimental/single_pass/FAST_PAIR_TASK.md](experimental/single_pass/FAST_PAIR_TASK.md)。先Q4同库三臂精度/graph配对，`--fast-pair-ab`；保留所有原始结果。80µs只是争取目标，未测前不宣称达到。框架模型精度继续并行，不等待本轮摸高。
+
+## 最新读取候选：热DMA提前入队
+
+452fa69已回传fast-pair91.55µs，比overlay97.60µs快6.2%，数学/graph/排列均通过。保留fast-pair作为当前有效读取实现。用户继续优化，新任务 [experimental/single_pass/EARLY_HOT_TASK.md](experimental/single_pass/EARLY_HOT_TASK.md)：第五独立入口提前发起热DMA，经输入队列同步冷/热完成，省去单独完成事件；本机SDK确认依赖后，`--early-hot-ab`先精度再与fast-pair同轮graph配对。新候选未测前不替换默认，不承诺80µs；框架精度并行继续。

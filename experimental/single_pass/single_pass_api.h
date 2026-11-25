@@ -38,6 +38,9 @@ QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchRouted(void *stream, const S
 // Additive fast-pair routing variant; descriptor layout remains ABI1.
 QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchFastPair(void *stream, const SinglePassBuffers *buffers,
     uint32_t aicCount, uint32_t ringCapacity, uint32_t window);
+// Additive early-hot scheduling variant; descriptor layout remains ABI1.
+QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchEarlyHot(void *stream, const SinglePassBuffers *buffers,
+    uint32_t aicCount, uint32_t ringCapacity, uint32_t window);
 // Independent original native C4 kernel, compiled in a separate ASC TU.
 QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchCold(void *stream, const SinglePassBuffers *buffers,
     uint32_t aicCount, uint32_t ringCapacity, uint32_t window);

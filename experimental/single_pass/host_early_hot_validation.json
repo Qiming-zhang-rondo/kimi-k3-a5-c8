@@ -1,0 +1,23 @@
+{
+  "candidate": "early hot DMA joined by existing VECIN queue",
+  "status": "HOST_CHECKS_PASS",
+  "single_pass_tests": 15,
+  "mathematical_contract_tests": 7,
+  "framework_regression_tests": 37,
+  "loader_memory_scenarios": 132,
+  "actual_pipeline_ordering_scenarios": 72,
+  "preserved_champion": "452fa69 fast-pair reported 91.55us prepared read",
+  "new_candidate_contract": [
+    "Hot DMA issued before input queue join",
+    "V-to-MTE2 output-buffer reuse handoff retained",
+    "Input MTE2-to-V followed by output V-to-MTE3 replaces separate completion event",
+    "Cold-only allocation and queue order retained",
+    "No additional UB allocation or attention invocation",
+    "Eight untimed alternating-hot-value comparisons scheduled on A5"
+  ],
+  "sdk_event_semantics": "REQUIRES_ON_MACHINE_CONFIRMATION",
+  "device_compilation": "NOT_RUN",
+  "device_accuracy": "NOT_RUN",
+  "paired_performance": "NOT_MEASURED",
+  "default_reader": "unchanged overlay; independent candidates opt-in"
+}

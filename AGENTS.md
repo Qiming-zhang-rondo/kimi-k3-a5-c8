@@ -1,7 +1,7 @@
 # 本分支执行规则
 
 当前并行推进框架接入/真实模型精度，以及用户重新要求的冷热互斥读取候选优化。
-启动入口为 `START_HERE.md`；框架任务为 `framework_integration/SINGLE_PASS_FRAMEWORK_TASK.md`；读取优化为 `experimental/single_pass/FAST_PAIR_TASK.md`，两者不互相阻塞。
+启动入口为 `START_HERE.md`；框架任务为 `framework_integration/SINGLE_PASS_FRAMEWORK_TASK.md`；读取优化为 `experimental/single_pass/EARLY_HOT_TASK.md`，两者不互相阻塞。
 保留以下执行约束；旧 POST_COMPILE/历史优化扫描仅作为参考，不再自动继续扫描。
 
 - 内网代理拥有实际机器环境，负责在当地自主搜索依赖、修复构建、执行验证并提交证据。

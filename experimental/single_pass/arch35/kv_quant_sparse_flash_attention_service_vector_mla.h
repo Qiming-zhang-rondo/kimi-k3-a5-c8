@@ -21,6 +21,9 @@
 #ifndef QSFA_RECENT_ROUTE_FAST_PAIR
 #define QSFA_RECENT_ROUTE_FAST_PAIR 0
 #endif
+#ifndef QSFA_RECENT_EARLY_HOT
+#define QSFA_RECENT_EARLY_HOT 0
+#endif
 
 // Experimental single-pass Recent128 candidate, derived from the matched C4 source
 // exported at 42178380e76cbe3b10605e2c10cf17c0135b8a0e. Not SDK/device validated.
@@ -116,7 +119,9 @@ public:
         recentTagsGm.SetGlobalBuffer((__gm__ int64_t *)ringTags);
         recentPositionsGm.SetGlobalBuffer((__gm__ int64_t *)queryPositions);
         recentVToMte2 = GetTPipePtr()->AllocEventID<HardEvent::V_MTE2>();
+#if !QSFA_RECENT_EARLY_HOT
         recentMte2ToMte3 = GetTPipePtr()->AllocEventID<HardEvent::MTE2_MTE3>();
+#endif
     }
 
     // 初始化LocalTensor
@@ -1236,10 +1241,30 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessSparseK
             stage0InQue.FreeTensor(kvInUb);
             return;
         }
+#if QSFA_RECENT_EARLY_HOT
+        LocalTensor<Q_T> kvDequantOutUb;
+        const bool hasEarlyHot = recentRouteActive && recentHotMask != 0;
+        if (hasEarlyHot) {
+            kvDequantOutUb = stage0OutQue.AllocTensor<Q_T>();
+            // Keep V->MTE2 for output-buffer reuse. Issue hot DMA BEFORE
+            // the VECIN queue's MTE2->V join, alongside the cold transfers.
+            ReadRecentHotRows(kvDequantOutUb, dealRow);
+        }
+#endif
         stage0InQue.EnQue(kvInUb);
         kvInUb = stage0InQue.DeQue<KV_T>();
 
         // 2、dequant by vf
+#if QSFA_RECENT_EARLY_HOT
+        if (!hasEarlyHot) {
+            // Cold-only tiles retain the original allocation/queue order.
+            kvDequantOutUb = stage0OutQue.AllocTensor<Q_T>();
+        }
+        DequantKvRouted(kvDequantOutUb, kvInUb, dealRow, constInfo);
+        // Both cold and hot MTE2 writes completed at input DeQue above.
+        // The normal output V->MTE3 queue join below completes the transitive
+        // MTE2->V->MTE3 dependency. No second MTE2->MTE3 event is needed.
+#else
         LocalTensor<Q_T> kvDequantOutUb = stage0OutQue.AllocTensor<Q_T>();
 #if QSFA_RECENT_ROUTE_HOT
         // Hot DMA writes only hot NZ rows; masked VF/Rope writes only cold
@@ -1252,6 +1277,7 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessSparseK
         if (recentEnabled) {
             OverlayRecentHotRows(kvDequantOutUb, dealRow, runInfo, constInfo);
         }
+#endif
 #endif
         stage0InQue.FreeTensor(kvInUb);
         stage0OutQue.EnQue(kvDequantOutUb);

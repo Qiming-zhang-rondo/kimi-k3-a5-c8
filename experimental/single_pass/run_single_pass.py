@@ -32,14 +32,16 @@ def select_aic_count(queries, requested=None):
     return requested
 
 
-def plan_modes(routed_ab=False,fast_pair_ab=False):
+def plan_modes(routed_ab=False,fast_pair_ab=False,early_hot_ab=False):
     """Explicit entries share one ABI/library; never load competing symbol sets."""
-    modes=dict(original_c4_direct=(0,True,False,False),single_pass_w0=(0,False,False,False),
-               single_pass_w128=(128,False,False,False))
-    if routed_ab or fast_pair_ab:
-        modes["single_pass_w128_routed"]=(128,False,True,False)
-    if fast_pair_ab:
-        modes["single_pass_w128_fast_pair"]=(128,False,False,True)
+    modes=dict(original_c4_direct=(0,True,False,False,False),single_pass_w0=(0,False,False,False,False),
+               single_pass_w128=(128,False,False,False,False))
+    if routed_ab or fast_pair_ab or early_hot_ab:
+        modes["single_pass_w128_routed"]=(128,False,True,False,False)
+    if fast_pair_ab or early_hot_ab:
+        modes["single_pass_w128_fast_pair"]=(128,False,False,True,False)
+    if early_hot_ab:
+        modes["single_pass_w128_early_hot"]=(128,False,False,False,True)
     return modes
 
 
@@ -85,7 +87,8 @@ def execute(args,report,persist):
     from kv_window_backend import benchmark
     from run_direct_ab import graph_replay_control
     from load_single_pass import load_single_pass
-    use_routed=args.routed_ab or args.fast_pair_ab
+    use_fast_pair=args.fast_pair_ab or args.early_hot_ab
+    use_routed=args.routed_ab or use_fast_pair
 
     data=validate_variable_case(synthetic_case(batch=1,queries=args.queries,keys=args.keys,
         heads=64,dim=512,rope_dim=64,topk=2048,page=128,seed=args.seed),
@@ -125,14 +128,18 @@ def execute(args,report,persist):
     if use_routed:
         require(report["bridge_configuration"].get("routed_reader_available") is True,
                 "--routed-ab requires the rebuilt library with QsfaSinglePassLaunchRouted")
-    if args.fast_pair_ab:
+    if use_fast_pair:
         require(report["bridge_configuration"].get("fast_pair_reader_available") is True,
                 "--fast-pair-ab requires the rebuilt library with QsfaSinglePassLaunchFastPair")
+    if args.early_hot_ab:
+        require(report["bridge_configuration"].get("early_hot_reader_available") is True,
+                "--early-hot-ab requires the rebuilt library with QsfaSinglePassLaunchEarlyHot")
     report["launch_geometry"]=dict(queries=args.queries,aic_count=args.aic_count,
         aiv_count=2*args.aic_count,query_tiles_per_aic=args.queries//args.aic_count,
         aic_selection="auto" if args.aic_auto else "explicit")
-    modes=plan_modes(args.routed_ab,args.fast_pair_ab)
-    report["reader_entries"]={name:dict(window=mode[0],original_c4=mode[1],routed=mode[2],fast_pair=mode[3])
+    modes=plan_modes(args.routed_ab,args.fast_pair_ab,args.early_hot_ab)
+    report["reader_entries"]={name:dict(window=mode[0],original_c4=mode[1],routed=mode[2],
+                                      fast_pair=mode[3],early_hot=mode[4])
                               for name,mode in modes.items()}
     plans={name:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
                               base.scale,args.return_stats) for name in modes}
@@ -187,8 +194,10 @@ def execute(args,report,persist):
         report["cross_checks"]["single_pass_w128_vs_twopass_diagnostic"]["acceptance_gate"]=False
         if use_routed:
             variant_names=["single_pass_w128_routed"]
-            if args.fast_pair_ab:
+            if use_fast_pair:
                 variant_names.append("single_pass_w128_fast_pair")
+            if args.early_hot_ab:
+                variant_names.append("single_pass_w128_early_hot")
             for name in variant_names:
                 check=compare(outputs[name],outputs["single_pass_w128"])
                 check.update(passed=acceptable(check,.001),tolerance=.001,acceptance_gate=True)
@@ -205,9 +214,12 @@ def execute(args,report,persist):
                 permuted_inputs=list(inputs)
                 permuted_inputs[2]=base.tensor(pattern_ids[:,None,:],torch.int32)
                 pattern_outputs={}
-                pattern_modes=dict(overlay=(128,False,False,False),routed=(128,False,True,False))
-                if args.fast_pair_ab:
-                    pattern_modes["fast_pair"]=(128,False,False,True)
+                pattern_modes=dict(overlay=(128,False,False,False,False),
+                                   routed=(128,False,True,False,False))
+                if use_fast_pair:
+                    pattern_modes["fast_pair"]=(128,False,False,True,False)
+                if args.early_hot_ab:
+                    pattern_modes["early_hot"]=(128,False,False,False,True)
                 pattern_plans={arm:bridge.prepare(base.query,args.keys,runner.capacity,args.aic_count,
                                                  base.scale,args.return_stats)
                                for arm in pattern_modes}
@@ -232,6 +244,35 @@ def execute(args,report,persist):
                 report["routed_pattern_controls"][pattern]=result
                 passed=passed and result["passed"]
                 persist()
+        if args.early_hot_ab:
+            # Untimed refresh stress: both readers must consume the current
+            # BF16 ring on every invocation, not a stale DMA/previous tile.
+            # Eight sign flips restore the original values before timing.
+            # Do not add finally-based NPU restoration: any device exception
+            # must propagate immediately to the outer fault-stop handler.
+            require(runner.hot_cache.dtype==torch.bfloat16 and runner.hot_rope.dtype==torch.bfloat16,
+                    "Early-hot refresh control requires BF16 latent and RoPE rings")
+            refresh=dict(scope="untimed fast-pair vs early-hot on alternating BF16 hot latent/RoPE values; not compared to old mathematical output",
+                         expected_iterations=8,completed_iterations=0,
+                         hot_values_restored=False,checks=[])
+            report["early_hot_refresh_controls"]=refresh
+            persist()
+            for iteration in range(8):
+                runner.hot_cache.mul_(-1)
+                runner.hot_rope.mul_(-1)
+                fast_output=backend.host(plans["single_pass_w128_fast_pair"].run(
+                    *inputs,128,False,False,True,False)[0]).copy()
+                early_output=backend.host(plans["single_pass_w128_early_hot"].run(
+                    *inputs,128,False,False,False,True)[0]).copy()
+                metric=compare(early_output,fast_output)
+                metric.update(iteration=iteration,hot_sign=-1 if iteration%2==0 else 1,
+                              passed=acceptable(metric,.001),tolerance=.001)
+                refresh["checks"].append(metric)
+                refresh["completed_iterations"]=iteration+1
+                refresh["hot_values_restored"]=bool((iteration+1)%2==0)
+                persist()
+            refresh["passed"]=all(check["passed"] for check in refresh["checks"])
+            passed=passed and refresh["passed"]
         np.savez_compressed(args.output/"outputs.npz",**arrays)
         report["all_accuracy_controls_passed"]=bool(passed)
         persist()
@@ -260,13 +301,20 @@ def execute(args,report,persist):
                 require(all(item.get("status")=="MEASURED" for item in
                             report["timings"]["single_pass_w128_routed_vs_overlay"].values()),
                         "Routed/overlay paired measurement failed; partial timing is not MEASURED")
-            if args.fast_pair_ab:
+            if use_fast_pair:
                 for label,baseline in (("overlay","single_pass_w128"),("routed","single_pass_w128_routed")):
                     key="single_pass_w128_fast_pair_vs_"+label
                     report["timings"][key]=paired_benchmark(
                         calls[baseline],calls["single_pass_w128_fast_pair"],args,benchmark)
                     require(all(item.get("status")=="MEASURED" for item in report["timings"][key].values()),
                             "Fast-pair paired measurement failed; partial timing is not MEASURED")
+            if args.early_hot_ab:
+                for label,baseline in (("overlay","single_pass_w128"),("fast_pair","single_pass_w128_fast_pair")):
+                    key="single_pass_w128_early_hot_vs_"+label
+                    report["timings"][key]=paired_benchmark(
+                        calls[baseline],calls["single_pass_w128_early_hot"],args,benchmark)
+                    require(all(item.get("status")=="MEASURED" for item in report["timings"][key].values()),
+                            "Early-hot paired measurement failed; partial timing is not MEASURED")
     report["status"]="VALIDATED_ONLY" if args.timing=="none" else "MEASURED"
     report["performance_scope"]="NOT_MEASURED" if args.timing=="none" else "paired prepared read only; no writes, no serving claim"
 
@@ -289,6 +337,8 @@ def parser():
         help="Also validate and pair the distinct precision-routed entry against preserved overlay")
     p.add_argument("--fast-pair-ab",action="store_true",
         help="Also validate/pair fast-pair routing against both preserved overlay and prior routed entries")
+    p.add_argument("--early-hot-ab",action="store_true",
+        help="Also validate/pair early-hot scheduling against current fast-pair and preserved overlay")
     p.add_argument("--timing",choices=("none","eager","graph"),default="none")
     p.add_argument("--warmup",type=int,default=20)
     p.add_argument("--iterations",type=int,default=100)
@@ -312,7 +362,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run; recover the device first")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-single-pass-a5-v1.3-fast-pair-ab",status="STARTED",
+    report=dict(version="qsfa-recent128-single-pass-a5-v1.4-early-hot-ab",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         candidate_contract="one direct ASC attention launch, original unsplit TopK; no cold attention call, partition or external merge",
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")

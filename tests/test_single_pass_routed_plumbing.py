@@ -24,12 +24,13 @@ class FakePlan:
 class RoutedPlumbingTest(unittest.TestCase):
     def test_default_keeps_original_and_overlay_only(self):
         modes=RUNNER.plan_modes()
-        self.assertEqual(modes,dict(original_c4_direct=(0,True,False,False),
-            single_pass_w0=(0,False,False,False),single_pass_w128=(128,False,False,False)))
+        self.assertEqual(modes,dict(original_c4_direct=(0,True,False,False,False),
+            single_pass_w0=(0,False,False,False,False),single_pass_w128=(128,False,False,False,False)))
         args=RUNNER.parser().parse_args(["--payload-dir","payload","--library","lib.so",
             "--output","out","--device","npu:0"])
         self.assertFalse(args.routed_ab)
         self.assertFalse(args.fast_pair_ab)
+        self.assertFalse(args.early_hot_ab)
 
     def test_ab_calls_bind_distinct_plans_modes_and_shared_inputs(self):
         modes=RUNNER.plan_modes(True)
@@ -41,19 +42,32 @@ class RoutedPlumbingTest(unittest.TestCase):
         for name in reversed(list(calls)):
             self.assertEqual(calls[name](),name)
             self.assertEqual(plans[name].calls,[inputs+modes[name]])
-        self.assertEqual(modes["single_pass_w128"],(128,False,False,False))
-        self.assertEqual(modes["single_pass_w128_routed"],(128,False,True,False))
+        self.assertEqual(modes["single_pass_w128"],(128,False,False,False,False))
+        self.assertEqual(modes["single_pass_w128_routed"],(128,False,True,False,False))
         self.assertEqual(RUNNER.plan_modes(),{k:v for k,v in modes.items() if not v[2]})
 
     def test_fast_pair_adds_distinct_entry_without_replacing_previous_routed(self):
         modes=RUNNER.plan_modes(fast_pair_ab=True)
         self.assertEqual({k:v for k,v in modes.items() if not v[3]},RUNNER.plan_modes(True))
-        self.assertEqual(modes["single_pass_w128_fast_pair"],(128,False,False,True))
+        self.assertEqual(modes["single_pass_w128_fast_pair"],(128,False,False,True,False))
         plans={name:FakePlan(name) for name in modes}
         inputs=tuple(object() for _ in range(10))
         calls=RUNNER.plan_calls(plans,inputs,modes)
         for name in reversed(list(calls)):
             self.assertEqual(calls[name](),name)
+            self.assertEqual(plans[name].calls,[inputs+modes[name]])
+        for mode in modes.values():
+            self.assertLessEqual(sum(mode[1:]),1)
+
+    def test_early_hot_adds_distinct_entry_and_keeps_all_previous_controls(self):
+        modes=RUNNER.plan_modes(early_hot_ab=True)
+        self.assertEqual({k:v for k,v in modes.items() if not v[4]},
+                         RUNNER.plan_modes(fast_pair_ab=True))
+        self.assertEqual(modes["single_pass_w128_early_hot"],(128,False,False,False,True))
+        plans={name:FakePlan(name) for name in modes}
+        inputs=tuple(object() for _ in range(10))
+        for name,call in reversed(list(RUNNER.plan_calls(plans,inputs,modes).items())):
+            self.assertEqual(call(),name)
             self.assertEqual(plans[name].calls,[inputs+modes[name]])
         for mode in modes.values():
             self.assertLessEqual(sum(mode[1:]),1)
