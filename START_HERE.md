@@ -1,3 +1,13 @@
+# 当前先执行：原生 C4 reader 源码定位与推送
+
+用户最新要求：让内网 agent 尝试推送匹配版本的原生 MXFP4 C4 kernel/host tiling 源码，供外部实现冷 C4 + 热 BF16 的单次 attention。
+
+先完成 [framework_integration/C4_SOURCE_EXPORT_TASK.md](framework_integration/C4_SOURCE_EXPORT_TASK.md)。自行定位实际调用链、最小源码依赖和构建来源，按任务要求尝试提交；本轮不重跑微基准、不停止业务、不修改现有算子。目标仓库公开，仅上传允许外发的源码；若明确受限，提交不含受限代码的接口与来源摘要。不要把普通文件查找继续转给用户。
+
+完成短交接后继续下面的框架精度任务，保留已验证基线。
+
+---
+
 # 当前任务：框架接入与真实模型精度验证
 
 用户已收口单算子调优，停止 Q/tiling/写融合扫描。本分支保留 26661f7 已完成证据和算子源码，新增实际 MXLLM worker overlay。
