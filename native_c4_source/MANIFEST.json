@@ -1,0 +1,211 @@
+{
+  "files": [
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/CopyInL1.h",
+      "bytes": 30673,
+      "sha256": "5d68e3350acea50f478c07424dd0951dbae0431e67b1aa503e385761e6885ef8"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/FixpipeOut.h",
+      "bytes": 4296,
+      "sha256": "779ab8805af8940eb223ab67a829912b5d6cb9c07de0597e2117fba6c8222753"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_aligned128_no_update_sfa.h",
+      "bytes": 7945,
+      "sha256": "2c370f86b171baf77553e1ff50a20347dac9d891b2b968be852b3c7fd8ecbc61"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_aligned128_update_sfa.h",
+      "bytes": 8578,
+      "sha256": "fee4d20dbe4ae452c9e7862b2807dbc786b0a2e845f56a0d261e6c59d6973052"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_unaligned128_no_update_sfa.h",
+      "bytes": 8847,
+      "sha256": "bd5210bff75fa7374282996756ddd1e046fd9e02b47e97f76c521f1bf5d3f1d0"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_unaligned128_update_sfa.h",
+      "bytes": 9435,
+      "sha256": "f3a68255b7296248aaae40940f61860ce652e000a1c7c5fca803cef29ab9aee2"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_unaligned64_no_update_sfa.h",
+      "bytes": 7191,
+      "sha256": "971c750f70cfcb0f264973bd937efaa585babca2790f41a04393adc858268dc6"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_unaligned64_update_sfa.h",
+      "bytes": 7799,
+      "sha256": "22cf69f5717198762e2f1f5415e52978c27e36e1a566cb5c320de81a0948f47a"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_basic_block_utils.h",
+      "bytes": 4385,
+      "sha256": "8b709ac6c81b65afcfa1003170d6a9485c322c971f9de574821f857367968799"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_flashupdate_new.h",
+      "bytes": 36539,
+      "sha256": "4c060d86b6c0d5b8c5f2e9353a0e5dbcfdad01e516b022ff743d84b5ce2e78db"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h",
+      "bytes": 8834,
+      "sha256": "ae9cd3c129cbfda4d2005a4e09e4c3388fc47dc009ccc0d2384fe2f0fc074e1c"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/buffer.h",
+      "bytes": 12674,
+      "sha256": "3ccfc6a15dfc9c47783ac3aed603ea068a1b0000bbab91adb3c9124ab7f4393b"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/buffer_manager.h",
+      "bytes": 2210,
+      "sha256": "a56577c7b80c936ea2b2e438f04b28961317784c586ea9480cc3794aab27aa45"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/buffer_mix_core.h",
+      "bytes": 8061,
+      "sha256": "3a65a88b68e4bff245c05452a6565bb3880d1e4ef18968126a4db4a846b66c6a"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/buffers_policy.h",
+      "bytes": 12777,
+      "sha256": "824eba6c456e916881282153688f9a26c7e40cd7cc73cb10baecaaa8bdfecd88"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/matmul.h",
+      "bytes": 72744,
+      "sha256": "32f1f4b732e21a79ff2fce42a4fbad32b5545bb02b6cc1bf1e6bea5cbfa8af73"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/memcopy/fa_gm_tensor.h",
+      "bytes": 1185,
+      "sha256": "a75bb22ad795e0951f0575c10f7c52c18b7652bd1ae08ff8daec295d1b7c04bb"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/memcopy/fa_l1_tensor.h",
+      "bytes": 1180,
+      "sha256": "8329abd208b924199df9792e5349503d24df55f405af04a08b25d98e37d19fd4"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/memcopy/gm_coord.h",
+      "bytes": 914,
+      "sha256": "078a9bd9d24211c1656de9d061ca90c50d159d25a2aaad1c9b8777d376281b88"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/memcopy/gm_layout.h",
+      "bytes": 15435,
+      "sha256": "b2852611e0340268140522ed28aa44b3125f13b02985255af838dcac392dbe76"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/memcopy/offset_calculator_v2.h",
+      "bytes": 35012,
+      "sha256": "912fc90ca06dcbc4c6156cbda007933a614e16db89e5fcc57510b3c39977c50d"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/memcopy/parser.h",
+      "bytes": 4349,
+      "sha256": "6227023d06fe456cb9a48ab86f5e03579b4fbb4786951aa7e594c8a1b3911eb1"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/common/op_kernel/offset_calculator.h",
+      "bytes": 1099,
+      "sha256": "5fe1fb9986fc42d51b63d5a253bc586c93df58f8b3a54c68d1afe9ed77d69297"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/kv_quant_sparse_flash_attention_common_arch35.h",
+      "bytes": 5307,
+      "sha256": "c37cbeaf90e04bdb1be7eca0953193810844e53f6381a01b3cbdc3cd2066e55b"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/kv_quant_sparse_flash_attention_kernel_mla.h",
+      "bytes": 30338,
+      "sha256": "13d9533ad42c43cd1a169926ec2ca7f8ac5295b675041b81af434f94ca953ddf"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/kv_quant_sparse_flash_attention_kvcache.h",
+      "bytes": 11736,
+      "sha256": "b746e87faa46d85c08d9bb85c0894870f0135b9dac841bb8455009429010bcf6"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/kv_quant_sparse_flash_attention_service_cube_mla.h",
+      "bytes": 19304,
+      "sha256": "0a9e0bc18b1674c2bc190cbbac0b1fa9100767cebca6944030621ffd54828af8"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/kv_quant_sparse_flash_attention_service_vector_mla.h",
+      "bytes": 68609,
+      "sha256": "fcaca4b032d5c214bd56dd84b360ae4259b445419abf470167e7b29a1f166f70"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/arch35/util_regbase.h",
+      "bytes": 9279,
+      "sha256": "9f82b832da0f148296c51f55d2191e7d32d1208d63f36add085d27dc29870418"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/dynamic/kv_quant_sparse_flash_attention.py",
+      "bytes": 17284,
+      "sha256": "1bed9a1484afb06d0a225dcda369656cdda50d97c8b3f9b3adb6f311be3343c9"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention.cpp",
+      "bytes": 10178,
+      "sha256": "f1d30b01df584aa2fa800f58eb55d4cd6ce834be76529464f86523e3f18aaf30"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_common.h",
+      "bytes": 7926,
+      "sha256": "821719d9cf64d3a58a5b3cd94c67dc0d4f00c711afd3afaf0d2a6cc7b4769ce2"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_kernel_mla.h",
+      "bytes": 47701,
+      "sha256": "f1bda9e57c04e32396e40217028c4925aea9b579567257943e6d4cc593e8b06c"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_service_cube_mla.h",
+      "bytes": 48642,
+      "sha256": "e5b62b883f8e19a4efe70eafd2f75d01e7edfde0140e1dfebb116169b4da5134"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_service_vector_mla.h",
+      "bytes": 74024,
+      "sha256": "8054b9f3ed942d796097c864eaa5eef7d9f15595c80b6f03d258618a6345a42d"
+    },
+    {
+      "path": "ascendc/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_template_tiling_key.h",
+      "bytes": 3525,
+      "sha256": "f61baa9dda4c48b6da5c7cb4b746f53f789abe559e7531bee8b36b1b4821220a"
+    },
+    {
+      "path": "ascendc/sparse_flash_attention/arch35/util_regbase.h",
+      "bytes": 9279,
+      "sha256": "9f82b832da0f148296c51f55d2191e7d32d1208d63f36add085d27dc29870418"
+    },
+    {
+      "path": "op_api/include/aclnn_kv_quant_sparse_flash_attention.h",
+      "bytes": 2607,
+      "sha256": "baaf450d4de13ae964aecf0b1e7cc872cf46580db2d6bae91f79a7270c04de2a"
+    },
+    {
+      "path": "op_api/include/aclnnop/aclnn_kv_quant_sparse_flash_attention.h",
+      "bytes": 2607,
+      "sha256": "baaf450d4de13ae964aecf0b1e7cc872cf46580db2d6bae91f79a7270c04de2a"
+    },
+    {
+      "path": "op_impl/ai_core/tbe/kernel/config/ascend950/kv_quant_sparse_flash_attention.json",
+      "bytes": 33939,
+      "sha256": "b4b810f9cdcb38a72dbcebcdf96db92cbf3103088184319607b3bf6b41401691"
+    },
+    {
+      "path": "op_proto/inc/kv_quant_sparse_flash_attention_proto.h",
+      "bytes": 1501,
+      "sha256": "fedddbb4de5879233783f0bf667f9c7a29fbd824dce02befd86cdedabeb95edb"
+    }
+  ],
+  "total_files": 41,
+  "total_bytes": 705948
+}
