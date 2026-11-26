@@ -30,7 +30,7 @@
     "hot_window_overhead": "1.9%",
     "format": {
       "cold": "MXFP4 C4 400B per token",
-      "hot": "BF16 576B",
+      "hot": "BF16 576 elements = 1152B per token",
       "d_total": 576
     }
   },
@@ -38,8 +38,15 @@
     "note": "Absolute times NOT directly comparable. D=512 vs 576, FP4 E2M1 vs MXFP4",
     "hot_window_overhead_ours": "1.9%",
     "hot_window_overhead_dsl": "2.2%",
-    "our_advantage": "Format-compatible with production C4 MXFP4 400B, BF16 hot for higher precision, drop-in replacement",
-    "dsl_limitation": "Different KV format FP4 E2M1 320B, requires format migration, FP8 hot for lower precision"
+    "our_advantage": "Retains the tested R64/packed400 MXFP4 cache format and original BF16 hot data; full framework compatibility still requires validation",
+    "dsl_limitation": "Different packed cache and Q/RoPE contract; requires an explicit adapter, not a drop-in replacement"
   },
-  "timing_comparable_flag": "DSL itself reports timing_comparable_to_yesterdays_D576: false"
+  "timing_comparable_flag": "DSL itself reports timing_comparable_to_yesterdays_D576: false",
+  "review": {
+    "evidence_level": "reported_summary_only",
+    "missing_raw_evidence": ["matching-reference controls", "original paired rounds", "hot_counts", "native binary identity/hit report", "actual core scheduling"],
+    "rank_by_hot_overhead_supported": false,
+    "reason": "1.9% vs 2.2% is not a same-round, same-contract ranking; absolute latency difference deserves investigation",
+    "format_correction": "576 BF16 elements occupy 1152 bytes, not 576 bytes"
+  }
 }
