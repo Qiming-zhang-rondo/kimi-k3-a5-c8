@@ -1,0 +1,12 @@
+{
+  status: MEASURED,
+  experiment: dsl_recent128,
+  config: {topk: 512, window: 128, d: 512, timing: graph},
+  w0_us: 24.542,
+  w128_us: 25.611,
+  paired_ratio: 1.0339,
+  hot_selected_per_query: [4, 8, 9, 11],
+  fp4_w0_l2_vs_bf16: 0.1150869,
+  fp4_fp8_w128_l2_vs_bf16: 0.1143425,
+  note: DSL recent128: hot window adds only 3.4%, improves accuracy
+}
