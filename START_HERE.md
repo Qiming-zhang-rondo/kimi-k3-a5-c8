@@ -1,9 +1,10 @@
-# 当前只推进V4框架接入和真实模型精度
+# 当前新实验：保留MXFP4格式，尝试V4 KV-split
 
-9ffe1e0原始证据确认V4约82.08µs，距同轮C4仅2%；用户下一任务为接框架，先不继续tile扫描。
+用户于2026-11-26明确要求“你试一下”。执行
+[experimental/single_pass/KV_SPLIT_TASK.md](experimental/single_pass/KV_SPLIT_TASK.md)。
+本次已有真实候选代码：V4相同加载几何、TopK按列切1/2/4片，FP32 partial状态，
+同stream独立AIV归约；W0/W128和原V4同库对照。宿主检查通过不代表SDK/A5编译或性能。
+先隔离构建、Q4数值门禁、再graph同轮配对；不升级CANN/vendor、不覆盖原82µs已验证产物。
 
-直接执行 [framework_integration/CURRENT_FRAMEWORK_TASK.md](framework_integration/CURRENT_FRAMEWORK_TASK.md)。probe选择load_tile4，runtime/collector核对实际variant、geometry、库SHA和调用覆盖，CPU全数学不调用第二次NPU attention。
-
-先JSON-only预检实际checkpoint格式。现有kernel仅D512/R64/packed400；GLM-5.3-Flash源码存在R0/272路径，不能靠改shape接入。R64兼容则隔离安装→真实prefill/decode→原精度任务OFF/ON；若确认NoPE272，按任务一次收齐实际NoPE源合同并提交，不让用户逐项中转，不宣称已支持。
-
-48项框架宿主检查通过；实际模型、任务分数和生产图/并发/MTP/PD未验证。82µs范围为prepared-read，不是TPOT。普通源码定位/构建问题内网agent自主解决，不再启动历史优化扫描。
+原框架接入继续按 [framework_integration/CURRENT_FRAMEWORK_TASK.md](framework_integration/CURRENT_FRAMEWORK_TASK.md)。
+先预检模型格式；当前R64/packed400不能重解释为NoPE272。KV-split结果也不能替代真实模型评分或TPOT。

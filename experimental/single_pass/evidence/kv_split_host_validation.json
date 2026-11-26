@@ -1,0 +1,28 @@
+{
+  "status": "HOST_VALIDATED_ONLY",
+  "device_compiled": false,
+  "npu_executed": false,
+  "performance_measured": false,
+  "legacy_abi_bytes": 72,
+  "kv_split_abi_bytes": 112,
+  "buffer_descriptor_pointers": 15,
+  "host_tests": {
+    "test_single_pass_suite": 21,
+    "test_kv_split_suite": 23,
+    "total": 44,
+    "all_passed": true
+  },
+  "checks": [
+    "C++17 actual POD/C API declarations and workspace offsets with UBSan",
+    "actual device task/gather/FP32 copy-out function bodies with UBSan",
+    "actual late-stats empty-row ordering regression",
+    "actual reduction VF/controller bodies with UBSan and full-attention reference",
+    "FP32 math, original TopK, padded/empty pieces and graph/timing gate host contracts",
+    "Python syntax check"
+  ],
+  "limitations": [
+    "No CANN SDK compilation on this Mac",
+    "No A5 correctness or latency result",
+    "Q4 original baseline vs split1/2/4 must be measured on same library including reduction"
+  ]
+}

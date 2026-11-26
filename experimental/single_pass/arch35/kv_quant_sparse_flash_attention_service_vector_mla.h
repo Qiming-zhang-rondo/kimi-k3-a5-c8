@@ -24,6 +24,9 @@
 #ifndef QSFA_RECENT_EARLY_HOT
 #define QSFA_RECENT_EARLY_HOT 0
 #endif
+#ifndef QSFA_RECENT_KV_SPLIT
+#define QSFA_RECENT_KV_SPLIT 0
+#endif
 #include "../load_tile_config.h"
 
 // Experimental single-pass Recent128 candidate, derived from the matched C4 source
@@ -83,6 +86,9 @@ public:
         if ASCEND_IS_AIV {
             tilingData = tiling;
             tPipe = pipe;
+#if QSFA_RECENT_KV_SPLIT
+            kvSplitTaskId = static_cast<uint32_t>(aicIdx);
+#endif
             if (actualSeqLengths != nullptr) {
                 actualSeqLengthsKVGm.SetGlobalBuffer((__gm__ int32_t *)actualSeqLengths);
             }
@@ -127,6 +133,35 @@ public:
 
     // 初始化LocalTensor
     __aicore__ inline void InitLocalBuffer(TPipe *pipe, ConstInfo &constInfo);
+#if QSFA_RECENT_KV_SPLIT
+    // New split entry owns this workspace; it is not the old one-byte ABI1
+    // placeholder. Host validates Q*S tasks and every byte offset beforehand.
+    __aicore__ inline void InitKvSplitWorkspace(__gm__ uint8_t *workspace)
+    {
+        const auto &split = tilingData->splitParams;
+        kvSplitCount = split.splitCount;
+        kvSplitColumns = tilingData->baseParams.sparseBlockCount / kvSplitCount;
+        kvSplitColumnBegin = (kvSplitTaskId % kvSplitCount) * kvSplitColumns;
+        kvSplitOutputGm.SetGlobalBuffer(
+            (__gm__ float *)(workspace + split.partialOutputOffsetBytes));
+        softmaxMaxGm.SetGlobalBuffer(
+            (__gm__ float *)(workspace + split.partialMaximumOffsetBytes));
+        softmaxSumGm.SetGlobalBuffer(
+            (__gm__ float *)(workspace + split.partialSumOffsetBytes));
+    }
+
+    __aicore__ inline void InitEmptyKvSplit(const ConstInfo &constInfo)
+    {
+        const uint64_t row = static_cast<uint64_t>(kvSplitTaskId) * s1BaseSize +
+            constInfo.subBlockIdx * (s1BaseSize / CV_RATIO);
+        matmul::InitOutput<float>(kvSplitOutputGm[row * dVTemplateType],
+            (s1BaseSize / CV_RATIO) * dVTemplateType, 0.0f);
+        // Empty pieces have zero mass. The independent reducer must gate by
+        // sum>0 before taking exponent differences; max=0 matches native stats.
+        matmul::InitOutput<float>(softmaxMaxGm[row], s1BaseSize / CV_RATIO, 0.0f);
+        matmul::InitOutput<float>(softmaxSumGm[row], s1BaseSize / CV_RATIO, 0.0f);
+    }
+#endif
     // 初始化attentionOutGM
     __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxMax,
         __gm__ uint8_t *softmaxSum, ConstInfo &constInfo);
@@ -229,6 +264,13 @@ private:
     GlobalTensor<int32_t> actualSeqLengthsKVGm;
     GlobalTensor<float> softmaxMaxGm;
     GlobalTensor<float> softmaxSumGm;
+#if QSFA_RECENT_KV_SPLIT
+    uint32_t kvSplitTaskId = 0;
+    uint32_t kvSplitCount = 1;
+    uint32_t kvSplitColumns = 0;
+    uint32_t kvSplitColumnBegin = 0;
+    GlobalTensor<float> kvSplitOutputGm;
+#endif
 
     TBuf<> commonTBuf; // common的复用空间
     TBuf<> lseBuf;
@@ -268,17 +310,30 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void Recent128QSFAVectorService<TEMPL
 
     int64_t qsfaCmpS2LoopCnt = runInfo.s2LoopCount;
     int64_t qsfaTopkIdx = s2IdxInBase + qsfaCmpS2LoopCnt * constInfo.s2BaseSize;
+#if QSFA_RECENT_KV_SPLIT
+    // A split selects COLUMNS of the original TopK row, never offsets the
+    // token IDs themselves. Keep sparseBlockCount as the full row stride.
+    qsfaTopkIdx += kvSplitColumnBegin;
+#endif
 
     if (unlikely(qsfaTopkIdx >= constInfo.sparseBlockCount)) {
         token0Idx = -1;
     } else {
-        token0Idx = SparseIndicesGm.GetValue(topkBS1Idx + qsfaTopkIdx) + runInfo.s2StartIdx;
+        token0Idx = SparseIndicesGm.GetValue(topkBS1Idx + qsfaTopkIdx)
+#if !QSFA_RECENT_KV_SPLIT
+            + runInfo.s2StartIdx
+#endif
+            ;
     }
     qsfaTopkIdx += 1;
     if (unlikely((qsfaTopkIdx >= constInfo.sparseBlockCount) || (s2IdxInBase + 1 >= sparseS2End))) {
         token1Idx = -1;
     } else {
-        token1Idx = SparseIndicesGm.GetValue(topkBS1Idx + qsfaTopkIdx) + runInfo.s2StartIdx;
+        token1Idx = SparseIndicesGm.GetValue(topkBS1Idx + qsfaTopkIdx)
+#if !QSFA_RECENT_KV_SPLIT
+            + runInfo.s2StartIdx
+#endif
+            ;
     }
 }
 
@@ -301,6 +356,10 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline int64_t Recent128QSFAVectorService<TE
     // using sparseBlockCount causes chunkEnd=128 but only 66 rows have valid
     // KV data; rows 66..127 read stale/uninitialised L1 data → NaN in softmax.
     int64_t chunkEnd = Min(chunkStart + constInfo.s2BaseSize, runInfo.s2EndIdx);
+#if QSFA_RECENT_KV_SPLIT
+    chunkStart += kvSplitColumnBegin;
+    chunkEnd += kvSplitColumnBegin;
+#endif
     if (chunkEnd <= chunkStart) {
         return 0;
     }
@@ -1337,9 +1396,11 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessVec1(
     if (runInfo.s2LoopCount != 0) {
         SFAUpdateExpSumAndExpMax<T>(sumUb, maxUb, qsfaExpUb, sumUb, maxUb, apiTmpBuffer, runInfo.halfMRealSize);
     }
+#if !QSFA_RECENT_KV_SPLIT
     if (constInfo.returnSoftmaxLse && runInfo.s2LoopCount == runInfo.s2LoopLimit) {
         CopyFALseToGm(runInfo, constInfo);
     }
+#endif
 }
 
 TEMPLATES_DEF_NO_DEFAULT
@@ -1438,6 +1499,14 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::ProcessVec2(
         CleanNaNAttnOut(vec2ResUb, runInfo.vec2MRealSize, qsfaDTemplateAlign64, qsfaDTemplateAlign64);
 
         this->CopyOutAttentionOut(runInfo, constInfo, vec2ResUb, 0, qsfaVec2CalcSize);
+#if QSFA_RECENT_KV_SPLIT
+        // CopyFALseToGm canonicalizes an empty max/sum IN PLACE. Keep the
+        // original sentinel until ZeroInvalidAttnOut has zeroed any 0/0 or
+        // stale-V contribution above. Only the independent reduction consumes
+        // the canonicalized (max=0,sum=0) FP32 state after this kernel finishes.
+        // Output DMA reads stage2OutBuf; stats DMA reads the separate lseBuf.
+        this->CopyFALseToGm(runInfo, constInfo);
+#endif
     }
     SetFlag<HardEvent::MTE3_V>(mte3ToVId[0]);
 }
@@ -1447,6 +1516,20 @@ template <typename VEC2_RES_T>
 __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::Bmm2DataCopyOut (RunInfo &runInfo, ConstInfo &constInfo,
     LocalTensor<VEC2_RES_T> &vec2ResUb, int64_t vec2S1Idx, int64_t qsfaVec2CalcSize)
 {
+#if QSFA_RECENT_KV_SPLIT
+    static_assert(std::is_same<VEC2_RES_T, float>::value,
+        "KV-split partial output must remain FP32 before final reduction");
+    const uint64_t row = static_cast<uint64_t>(kvSplitTaskId) * s1BaseSize +
+        constInfo.subBlockIdx * (s1BaseSize / CV_RATIO);
+    SetFlag<HardEvent::V_MTE3>(vToMte3Id[0]);
+    WaitFlag<HardEvent::V_MTE3>(vToMte3Id[0]);
+    DataCopyExtParams copy;
+    copy.blockLen = constInfo.dSizeV * sizeof(float);
+    copy.srcStride = (qsfaDTemplateAlign64 - constInfo.dSizeV) * sizeof(float) / BUFFER_SIZE_BYTE_32B;
+    copy.dstStride = 0;
+    copy.blockCount = runInfo.vec2MRealSize;
+    DataCopyPad(kvSplitOutputGm[row * dVTemplateType], vec2ResUb, copy);
+#else
     LocalTensor<OUTPUT_T> attenOut;
     int64_t dSizeAligned64 = (int64_t)qsfaDTemplateAlign64;
 
@@ -1462,6 +1545,7 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::Bmm2DataCopyOu
     dataCopyParams.blockCount = runInfo.vec2MRealSize;
 
     DataCopyPad(this->attentionOutGm[runInfo.attentionOutOffset], attenOut, dataCopyParams);
+#endif
 }
 
 TEMPLATES_DEF_NO_DEFAULT
@@ -1562,7 +1646,12 @@ __aicore__ inline void Recent128QSFAVectorService<TEMPLATE_ARGS>::CopyFALseToGm(
 
     size_t alignedSize = (sizeof(float) * runInfo.halfMRealSize + 31) / 32 * 32 / sizeof(float);
 
+#if QSFA_RECENT_KV_SPLIT
+    const uint64_t lseOffset = static_cast<uint64_t>(kvSplitTaskId) * s1BaseSize +
+        constInfo.subBlockIdx * (s1BaseSize / CV_RATIO);
+#else
     int64_t lseOffset = runInfo.softmaxLseOffset;
+#endif
     DataCopyExtParams dataCopyParams;
     dataCopyParams.blockCount = 1;
     dataCopyParams.blockLen = sizeof(float) * runInfo.halfMRealSize;
@@ -1729,6 +1818,10 @@ public:
     __aicore__ inline Recent128QSFAVectorServiceDummy() {};
     __aicore__ inline void InitRecentHot(__gm__ uint8_t *, __gm__ uint8_t *,
         __gm__ uint8_t *, __gm__ uint8_t *, int64_t, int64_t) {}
+#if QSFA_RECENT_KV_SPLIT
+    __aicore__ inline void InitKvSplitWorkspace(__gm__ uint8_t *) {}
+    __aicore__ inline void InitEmptyKvSplit(const ConstInfo &) {}
+#endif
     __aicore__ inline void CleanOutput(__gm__ uint8_t *attentionOut, __gm__ uint8_t *softmaxMax,
         __gm__ uint8_t *softmaxSum, ConstInfo &constInfo) {}
     __aicore__ inline void InitGlobalBuffer(__gm__ uint8_t *key, __gm__ uint8_t *value, __gm__ uint8_t *sparseIndices,

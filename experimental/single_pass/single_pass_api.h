@@ -47,6 +47,17 @@ QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchLoadTile(void *stream, const
 // Independent original native C4 kernel, compiled in a separate ASC TU.
 QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchCold(void *stream, const SinglePassBuffers *buffers,
     uint32_t aicCount, uint32_t ringCapacity, uint32_t window);
+// New entry consumes standalone SplitTiling ABI2/112B, not ABI1/72B.
+// Same pointer descriptor; workspace is real FP32 partial storage.
+QSFA_SINGLE_PASS_EXPORT uint32_t QsfaSinglePassKvSplitAbiVersion(void);
+QSFA_SINGLE_PASS_EXPORT uint32_t QsfaSinglePassKvSplitTilingBytes(void);
+QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchKvSplit(void *stream,
+    const SinglePassBuffers *buffers, uint32_t aicCount, uint32_t ringCapacity,
+    uint32_t window, uint32_t queries, uint32_t splitCount, uint32_t returnStats);
+QSFA_SINGLE_PASS_EXPORT int32_t QsfaSinglePassLaunchKvSplitReduce(void *stream,
+    uint8_t *partialOutput, uint8_t *partialMaximum, uint8_t *partialSum,
+    uint8_t *output, uint8_t *maximum, uint8_t *sum, uint32_t queries,
+    uint32_t splitCount, uint32_t vectorBlocks, uint32_t returnStats);
 #ifdef __cplusplus
 }
 #endif

@@ -27,7 +27,8 @@ def load_single_pass(library, *, sdk_root=None, build_directory=None, verbose=Fa
     if library.name!="libqsfa_recent128_direct.so" or not library.is_file() or not library.stat().st_size:
         raise ValueError("Pass the explicitly built nonempty libqsfa_recent128_direct.so")
     directory=Path(__file__).resolve().parent
-    files=[directory/name for name in ("torch_bridge.cpp","single_pass_api.h","single_pass_tiling.h")]
+    files=[directory/name for name in ("torch_bridge.cpp","single_pass_api.h","single_pass_tiling.h",
+        "kv_split_tiling.h","kv_split_bridge.inc")]
     if any(not path.is_file() for path in files):
         raise ValueError("Single-pass bridge source/API/tiling headers are incomplete")
     previous=sys.path[:]

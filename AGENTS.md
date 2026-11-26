@@ -1,8 +1,10 @@
 # 本分支执行规则
 
-当前用户已转入V4框架接入与真实模型精度；不再继续单算子摸高。
-启动入口为 `START_HERE.md`；执行 `framework_integration/CURRENT_FRAMEWORK_TASK.md`。
-先预检真实模型格式：R64跑模型，NoPE272一次收齐精确源合同后适配，不能把当前内核误称支持。
+用户于2026-11-26明确要求尝试V4的KV-split；当前独立实验按
+`experimental/single_pass/KV_SPLIT_TASK.md` 构建验证，保留现有MXFP4+BF16缓存。
+启动入口为 `START_HERE.md`。不把宿主检查当A5结果，不预报40–50µs。
+原框架/真实模型任务仍在 `framework_integration/CURRENT_FRAMEWORK_TASK.md`；
+现有kernel仅R64/packed400，NoPE272须精确源合同后适配，不能误称已支持。
 
 - 内网代理拥有实际机器环境，负责在当地自主搜索依赖、修复构建、执行验证并提交证据。
 - 外部 Codex 负责源代码实现/审查、本地可执行测试及从 GitHub 检查返回结果。

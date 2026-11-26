@@ -39,6 +39,24 @@ struct alignas(8) Tiling {
     Base baseParams;
     SingleCore singleCoreParams;
 };
+// Additive ABI2 for the isolated KV-split entry. Existing Tiling stays 72B.
+// Offsets are byte offsets into caller-owned FP32 partial workspace.
+struct alignas(8) SplitParams {
+    std::uint32_t abiVersion;
+    std::uint32_t splitCount;
+    std::uint64_t partialOutputOffsetBytes;
+    std::uint64_t partialMaximumOffsetBytes;
+    std::uint64_t partialSumOffsetBytes;
+    std::uint64_t workspaceBytes;
+};
+struct alignas(8) SplitTiling {
+    Base baseParams;
+    SingleCore singleCoreParams;
+    SplitParams splitParams;
+};
+static_assert(sizeof(SplitParams) == 40 && sizeof(SplitTiling) == 112);
+static_assert(offsetof(SplitTiling, splitParams) == 72);
+static_assert(std::is_standard_layout<SplitTiling>::value && std::is_trivially_copyable<SplitTiling>::value);
 static_assert(std::is_standard_layout<Tiling>::value && std::is_trivially_copyable<Tiling>::value);
 static_assert(sizeof(Base) == 64 && alignof(Base) == 8);
 static_assert(sizeof(SingleCore) == 8 && sizeof(Tiling) == 72 && alignof(Tiling) == 8);
@@ -55,7 +73,11 @@ inline constexpr std::size_t userWorkspaceAllocationBytes = 1;
 
 // The pinned real kernel refers to this type name. Its fields now belong to
 // the explicitly new ABI above; both host and kernel MUST rebuild together.
+#if defined(QSFA_RECENT_KV_SPLIT) && QSFA_RECENT_KV_SPLIT
+using KvQuantSparseFlashAttentionTilingDataMla = recent128_single_pass::SplitTiling;
+#else
 using KvQuantSparseFlashAttentionTilingDataMla = recent128_single_pass::Tiling;
+#endif
 
 #if !defined(__NPU_ARCH__) || __NPU_ARCH__ == 0
 #include <cmath>

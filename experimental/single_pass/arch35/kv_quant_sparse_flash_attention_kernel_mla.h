@@ -125,6 +125,11 @@ private:
 
     GlobalTensor<int32_t> actualSeqLengthsQGm;
     uint32_t usedCoreNum = 0U;
+#if QSFA_RECENT_KV_SPLIT
+    uint32_t kvSplitCount = 1;
+    uint32_t kvSplitColumnBegin = 0;
+    uint32_t kvSplitColumns = 0;
+#endif
 
     /* workspace 空间 */
     BuffersPolicy3buff<BufferType::GM, SyncType::CROSS_CORE_SYNC_BACKWARD> v0ResGmBuffers;
@@ -182,6 +187,13 @@ __aicore__ inline void Recent128KvQuantSparseFlashAttentionMla<CubeBlockType, Ve
         constInfo.returnSoftmaxLse = this->sharedParams.returnSoftmaxLse;
     }
     vecBlock.CleanOutput(attentionOut, softmaxMax, softmaxSum, constInfo);
+#if QSFA_RECENT_KV_SPLIT
+    if ASCEND_IS_AIV {
+        // CleanOutput binds final outputs first; redirect only this candidate's
+        // partial states to the independently described FP32 workspace.
+        vecBlock.InitKvSplitWorkspace(workspace);
+    }
+#endif
     /* cube侧不依赖sharedParams的scalar前置 */
     InitMMResBuf(workspace);
     if ASCEND_IS_AIC {
@@ -205,6 +217,25 @@ __aicore__ inline void Recent128KvQuantSparseFlashAttentionMla<CubeBlockType, Ve
 template <typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void Recent128KvQuantSparseFlashAttentionMla<CubeBlockType, VecBlockType>::InitCalcParamsEach()
 {
+#if QSFA_RECENT_KV_SPLIT
+    // New host contract: exactly Q*S AIC tasks, ordered [query,split]. Cube
+    // receives Q and usedCoreNum through the existing sharedParams exchange,
+    // so it need not load a GM tiling pointer or extend the SSBUF protocol.
+    maxS2LoopCnt = 0;
+    kvSplitCount = usedCoreNum / constInfo.s1Size;
+    kvSplitColumns = constInfo.sparseBlockCount / kvSplitCount;
+    kvSplitColumnBegin = (aicIdx % kvSplitCount) * kvSplitColumns;
+    if (aicIdx >= usedCoreNum) {
+        return;
+    }
+    const uint32_t query = static_cast<uint32_t>(aicIdx) / kvSplitCount;
+    constInfo.bN2Start = 0;
+    constInfo.bN2End = 0;
+    constInfo.gS1Start = query;
+    constInfo.gS1End = query;
+    constInfo.s2Start = 0;
+    constInfo.s2End = 0;
+#else
     // 计算总的基本块
     maxS2LoopCnt = 0; // 所有核中最大累计s2Loop
     uint32_t qsfaTotalBaseNum = 0;
@@ -296,6 +327,7 @@ __aicore__ inline void Recent128KvQuantSparseFlashAttentionMla<CubeBlockType, Ve
         }
         return;
     }
+#endif
 }
 
 template <typename CubeBlockType, typename VecBlockType>
@@ -584,8 +616,26 @@ __aicore__ inline void Recent128KvQuantSparseFlashAttentionMla<CubeBlockType, Ve
                     runParam, this->constInfo, gS1Index, this->actualSeqQlenAddr);
                 bool s2NoNeedCalc =
                     ComputeS2LoopInfo<TEMPLATE_INTF_ARGS>(runParam, this->constInfo);
+#if QSFA_RECENT_KV_SPLIT
+                // BMM loop coordinates are local to the piece. Vector gather
+                // separately adds kvSplitColumnBegin to the TopK COLUMN.
+                const int64_t available = s2NoNeedCalc ? 0 :
+                    runParam.s2LineEndIdx - kvSplitColumnBegin;
+                const int64_t pieceLength = available > 0 ?
+                    Min(available, static_cast<int64_t>(kvSplitColumns)) : 0;
+                runParam.s2LineStartIdx = 0;
+                runParam.s2LineEndIdx = pieceLength;
+                runParam.kvLoopEndIdx = (pieceLength + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
+                runParam.s2LoopEndIdx = runParam.kvLoopEndIdx;
+                s2NoNeedCalc = s2NoNeedCalc || pieceLength == 0;
+#endif
                 // s1和s2有任意一个不需要算, 则continue, 如果是当前核最后一次循环，则补充计算taskIdx+2的部分
                 if (s1NoNeedCalc || s2NoNeedCalc) {
+#if QSFA_RECENT_KV_SPLIT
+                    if ASCEND_IS_AIV {
+                        vecBlock.InitEmptyKvSplit(constInfo);
+                    }
+#endif
                     continue;
                 }
                 if constexpr (IS_SPLIT_G) {

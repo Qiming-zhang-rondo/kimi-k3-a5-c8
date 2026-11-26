@@ -38,6 +38,10 @@ add_library(qsfa_recent128_direct SHARED single_pass_wrapper.asc original_c4_wra
     load_tile8_single_pass_wrapper.asc load_stride416_single_pass_wrapper.asc
     load_out1_single_pass_wrapper.asc load_tile32_single_pass_wrapper.asc
     load_tile32_in1_single_pass_wrapper.asc load_tile_dispatch.cpp)
+option(QSFA_BUILD_KV_SPLIT "Build isolated KV-split ABI2 candidate alongside unchanged V4" ON)
+if(QSFA_BUILD_KV_SPLIT)
+    target_sources(qsfa_recent128_direct PRIVATE kv_split_attention_wrapper.asc kv_split_reduce.asc)
+endif()
 set_target_properties(qsfa_recent128_direct PROPERTIES POSITION_INDEPENDENT_CODE ON UNITY_BUILD OFF)
 target_compile_options(qsfa_recent128_direct PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>
@@ -51,4 +55,4 @@ foreach(suffix "" "/include" "/include/basic_api" "/include/adv_api" "/include/i
     endif()
 endforeach()
 target_link_libraries(qsfa_recent128_direct PRIVATE m "${ACL_LIBRARY}" ascendc_runtime)
-message(STATUS "Standalone ABI1; separate overlay/routed entries with unchanged native C4 control; no device validation claimed")
+message(STATUS "Legacy ABI1 preserved; optional KV-split ABI2/112B; no device validation claimed")

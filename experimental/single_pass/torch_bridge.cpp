@@ -1,5 +1,6 @@
-// Thin Torch host bridge. Only the separate ASC shared library launches a
-// kernel: there is no Python/ACLNN C4 reader, second attention, or LSE merge.
+// Thin Torch host bridge. Legacy paths launch one attention. The additive
+// KV-split path launches one attention plus one FP32 partial-state reduction;
+// no installed ACLNN C4 reader or Python output merge is used.
 #include <torch/extension.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
@@ -12,6 +13,7 @@
 #include <type_traits>
 #include "single_pass_api.h"
 #include "single_pass_tiling.h"
+#include "kv_split_tiling.h"
 
 // The additive routed export is optional for older measured ABI1 libraries.
 // Linux weak references keep framework/default-overlay runs compatible; only
@@ -21,6 +23,10 @@
 #pragma weak QsfaSinglePassLaunchFastPair
 #pragma weak QsfaSinglePassLaunchEarlyHot
 #pragma weak QsfaSinglePassLaunchLoadTile
+#pragma weak QsfaSinglePassLaunchKvSplit
+#pragma weak QsfaSinglePassLaunchKvSplitReduce
+#pragma weak QsfaSinglePassKvSplitAbiVersion
+#pragma weak QsfaSinglePassKvSplitTilingBytes
 #endif
 
 namespace {
@@ -65,6 +71,17 @@ pybind11::dict Configuration() {
     addVariant(3,16,416,2,1); addVariant(4,32,416,2,1); addVariant(5,32,416,1,1);
     out["load_tile_variants"]=variants;
     out["default_reader"]="overlay";
+    const bool splitAvailable=QsfaSinglePassLaunchKvSplit != nullptr &&
+        QsfaSinglePassLaunchKvSplitReduce != nullptr &&
+        QsfaSinglePassKvSplitAbiVersion != nullptr && QsfaSinglePassKvSplitTilingBytes != nullptr;
+    out["kv_split_reader_available"]=splitAvailable;
+    out["kv_split_reader_entry"]="QsfaSinglePassLaunchKvSplit";
+    out["kv_split_attention_launches"]=1;
+    out["kv_split_reduction_launches"]=1;
+    if (splitAvailable) {
+        out["kv_split_abi_version"]=QsfaSinglePassKvSplitAbiVersion();
+        out["kv_split_tiling_bytes"]=QsfaSinglePassKvSplitTilingBytes();
+    }
     return out;
 }
 
@@ -172,10 +189,24 @@ private:
     bool stats_;
     at::Tensor output_,maximum_,sum_,workspace_,tiling_,empty_;
 };
+#include "kv_split_bridge.inc"
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,module) {
     module.def("configuration",&Configuration);
+    pybind11::class_<KvSplitPrepared,std::shared_ptr<KvSplitPrepared>>(module,"KvSplitPlan")
+        .def("run",&KvSplitPrepared::Run,pybind11::arg("query"),pybind11::arg("cold"),
+            pybind11::arg("indices"),pybind11::arg("block_table"),pybind11::arg("actual_query"),
+            pybind11::arg("actual_kv"),pybind11::arg("hot_latent"),pybind11::arg("hot_rope"),
+            pybind11::arg("ring_tags"),pybind11::arg("query_positions"),pybind11::arg("window")=128)
+        .def("outputs",&KvSplitPrepared::Outputs)
+        .def("partial_outputs",&KvSplitPrepared::Partials);
+    module.def("prepare_kv_split",[](const at::Tensor &query,int64_t keys,int64_t capacity,
+                                    int64_t splits,double scale,bool stats) {
+        TORCH_CHECK(query.defined() && query.dim()==3,"Query must be defined rank3");
+        return std::make_shared<KvSplitPrepared>(query,keys,capacity,splits,scale,stats);
+    },pybind11::arg("query"),pybind11::arg("keys"),pybind11::arg("ring_capacity"),
+      pybind11::arg("split_count"),pybind11::arg("scale"),pybind11::arg("return_stats")=false);
     pybind11::class_<Prepared,std::shared_ptr<Prepared>>(module,"Prepared")
         .def("run",&Prepared::Run,pybind11::arg("query"),pybind11::arg("cold"),
             pybind11::arg("indices"),pybind11::arg("block_table"),pybind11::arg("actual_query"),
