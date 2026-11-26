@@ -1,0 +1,498 @@
+{
+  "version": "dsl-fp4-fp8-recent128-v1",
+  "args": {
+    "device": "npu:0",
+    "dsl_root": null,
+    "probe_only": false,
+    "self_test": false,
+    "queries": 4,
+    "keys": 8192,
+    "topk": 2048,
+    "window": 128,
+    "page": 128,
+    "selection": "uniform",
+    "seed": 20261126,
+    "sink": 0.0,
+    "timing": "graph",
+    "warmup": 20,
+    "iterations": 100,
+    "repeats": 10,
+    "tolerance": 0.01,
+    "output": "/tmp/dsl-k2048-perf"
+  },
+  "environment": {
+    "python": "3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:05:09) [GCC 11.2.0]",
+    "platform": "Linux-6.6.0-72.0.0.76.r1893_126.hce3.aarch64-aarch64-with-glibc2.38",
+    "ascend_home_path": "/usr/local/Ascend/ascend-toolkit/latest",
+    "numpy": "1.26.4",
+    "torch": "2.10.0",
+    "torch-npu": "2.10.0.post7",
+    "cannbot-dsl": null,
+    "cannbot-arena-net": null,
+    "cannbot-arena-net-ops": "0.1.0",
+    "cann-ops-transformer": "1.0.0",
+    "cann-ops-transformer-dsl": null,
+    "device": "Ascend950DT_9582"
+  },
+  "status": "MEASURED",
+  "stage": "complete",
+  "scope": "one prepared attention call; excludes cache writes, partition and metadata",
+  "reference_sources": {
+    "ops": "477e8d2cf7673cbe2a6ab1b8f3cd6f635ee0e637",
+    "dsl": "c36d3a2e8a60710cf49d1d09b0b126241dcb6530"
+  },
+  "contract": {
+    "q": "BF16 [T,64,512]=448 latent+64 RoPE",
+    "cold": "FP4 E2M1/group16/BF16 scale; 320B",
+    "hot": "FP8 E4M3FN/group32/BF16 scale; 544B",
+    "all_coordinates_quantized": true,
+    "original_topk_unchanged": true,
+    "sink_semantics": "sink contributes exp(sink) to denominator; zero adds 1",
+    "timing_comparable_to_yesterdays_D576": false
+  },
+  "native_binary_policy": {
+    "mode": "require",
+    "report_path": "/tmp/dsl-k2048-perf/native_binary_report.json",
+    "jit_fallback_allowed": false
+  },
+  "implementation": {
+    "attention": {
+      "module": "ops.mixed_quant_sparse_flash_mla",
+      "path": "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/ops/mixed_quant_sparse_flash_mla.py",
+      "sha256": "10fd7228807a224d4a296acdc07e9872bcdf34443a8d72b61f3be494c867c079",
+      "signature": "(q, *, ori_kv=None, cmp_kv=None, ori_sparse_indices=None, cmp_sparse_indices=None, ori_block_table=None, cmp_block_table=None, cu_seqlens_q=None, seqused_q=None, seqused_ori_kv=None, seqused_cmp_kv=None, ori_topk_length=None, cmp_topk_length=None, sinks=None, metadata=None, quant_mode, softmax_scale=None, layout_q='TND', layout_kv='PA_BBND', return_softmax_lse=False, out, lse)"
+    },
+    "metadata": {
+      "module": "ops.mixed_quant_sparse_flash_mla_metadata",
+      "path": "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/ops/mixed_quant_sparse_flash_mla_metadata.py",
+      "sha256": "c6865e920a64d4998b69d16f0a9d64f616d341dcef28252dace1585510843cba",
+      "signature": "(ori_topk_length, cmp_topk_length, *, cu_seqlens_q=None, seqused_q=None, seqused_ori_kv=None, seqused_cmp_kv=None, batch_size=None, max_seqlen_q=None, max_seqlen_ori_kv=None, max_seqlen_cmp_kv=None, num_heads_q, num_heads_kv, head_dim, quant_mode, layout_q='TND', layout_kv='PA_BBND', has_ori_kv=True, has_cmp_kv=True)"
+    }
+  },
+  "shape": {
+    "batch": 1,
+    "queries": 4,
+    "keys": 8192,
+    "heads": 64,
+    "dimension": 512,
+    "topk": 2048,
+    "window": 128,
+    "ring_capacity": 256,
+    "selection": "synthetic_uniform",
+    "hot_counts": [
+      32,
+      37,
+      34,
+      27
+    ]
+  },
+  "arms": {
+    "fp4_w0": {
+      "status": "MEASURED",
+      "kernel_vs_matching_reference": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.001924786857310384,
+        "max_abs": 0.0006835000995450424,
+        "worst_row_relative_l2": 0.0021185013456571588,
+        "mean_row_cosine": 0.9999981586611196,
+        "passed": true,
+        "tolerance_global_and_worst_row": 0.01
+      },
+      "output_vs_original_bf16": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.08490968976672211,
+        "max_abs": 0.03540373218015534,
+        "worst_row_relative_l2": 0.12003362051011685,
+        "mean_row_cosine": 0.9964546831664229
+      },
+      "quantization_only_vs_original_bf16": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.08489320646541398,
+        "max_abs": 0.035580288405714325,
+        "worst_row_relative_l2": 0.12009646469782424,
+        "mean_row_cosine": 0.9964562372088039
+      },
+      "metadata_shape": [
+        1024
+      ],
+      "capture": {
+        "kind": "graph",
+        "calls_per_graph": 1,
+        "iterations": "replays outside capture",
+        "poison_control": {
+          "finite": true,
+          "actual_nonfinite_count": 0,
+          "reference_nonfinite_count": 0,
+          "relative_l2": 0.001924786857310384,
+          "max_abs": 0.0006835000995450424,
+          "worst_row_relative_l2": 0.0021185013456571588,
+          "mean_row_cosine": 0.9999981586611196,
+          "passed": true,
+          "tolerance_global_and_worst_row": 0.01
+        }
+      },
+      "post_timing_control": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.001924786857310384,
+        "max_abs": 0.0006835000995450424,
+        "worst_row_relative_l2": 0.0021185013456571588,
+        "mean_row_cosine": 0.9999981586611196,
+        "passed": true,
+        "tolerance_global_and_worst_row": 0.01
+      }
+    },
+    "fp4_fp8_w128": {
+      "status": "MEASURED",
+      "kernel_vs_matching_reference": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.0019276825973031072,
+        "max_abs": 0.0006752218431423929,
+        "worst_row_relative_l2": 0.0021641050713308535,
+        "mean_row_cosine": 0.9999981519818686,
+        "passed": true,
+        "tolerance_global_and_worst_row": 0.01
+      },
+      "output_vs_original_bf16": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.08437151515164748,
+        "max_abs": 0.03540373218015534,
+        "worst_row_relative_l2": 0.1199879644191827,
+        "mean_row_cosine": 0.9965017960313891
+      },
+      "quantization_only_vs_original_bf16": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.08435266554333326,
+        "max_abs": 0.035338091481179584,
+        "worst_row_relative_l2": 0.11984945039662916,
+        "mean_row_cosine": 0.9965033397355538
+      },
+      "metadata_shape": [
+        1024
+      ],
+      "capture": {
+        "kind": "graph",
+        "calls_per_graph": 1,
+        "iterations": "replays outside capture",
+        "poison_control": {
+          "finite": true,
+          "actual_nonfinite_count": 0,
+          "reference_nonfinite_count": 0,
+          "relative_l2": 0.0019276825973031072,
+          "max_abs": 0.0006752218431423929,
+          "worst_row_relative_l2": 0.0021641050713308535,
+          "mean_row_cosine": 0.9999981519818686,
+          "passed": true,
+          "tolerance_global_and_worst_row": 0.01
+        }
+      },
+      "post_timing_control": {
+        "finite": true,
+        "actual_nonfinite_count": 0,
+        "reference_nonfinite_count": 0,
+        "relative_l2": 0.0019276825973031072,
+        "max_abs": 0.0006752218431423929,
+        "worst_row_relative_l2": 0.0021641050713308535,
+        "mean_row_cosine": 0.9999981519818686,
+        "passed": true,
+        "tolerance_global_and_worst_row": 0.01
+      }
+    }
+  },
+  "controls": {
+    "zero_query_mixed": {
+      "finite": true,
+      "actual_nonfinite_count": 0,
+      "reference_nonfinite_count": 0,
+      "relative_l2": 0.001632279986557176,
+      "max_abs": 0.0001828969543069825,
+      "worst_row_relative_l2": 0.0017188417240849266,
+      "mean_row_cosine": 0.9999986747788112,
+      "passed": true,
+      "tolerance_global_and_worst_row": 0.01
+    },
+    "hot_only_with_zero_cold_length": {
+      "finite": true,
+      "actual_nonfinite_count": 0,
+      "reference_nonfinite_count": 0,
+      "relative_l2": 0.002126551612176714,
+      "max_abs": 0.0023326427025754937,
+      "worst_row_relative_l2": 0.0024539269807410755,
+      "mean_row_cosine": 0.9999977598532078,
+      "passed": true,
+      "tolerance_global_and_worst_row": 0.01
+    }
+  },
+  "paired": {
+    "scope": "one prepared attention call; excludes cache writes, partition and metadata",
+    "rounds": [
+      {
+        "round": 0,
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "baseline": {
+          "event_us": 36.85633897781372,
+          "wall_us": 38.52852
+        },
+        "candidate": {
+          "event_us": 37.583439350128174,
+          "wall_us": 38.65652
+        },
+        "event_us_ratio": 1.019727959761607
+      },
+      {
+        "round": 1,
+        "order": [
+          "candidate",
+          "baseline"
+        ],
+        "candidate": {
+          "event_us": 37.548511028289795,
+          "wall_us": 38.49382
+        },
+        "baseline": {
+          "event_us": 36.72394037246704,
+          "wall_us": 37.846419999999995
+        },
+        "event_us_ratio": 1.0224532184580324
+      },
+      {
+        "round": 2,
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "baseline": {
+          "event_us": 36.77694082260132,
+          "wall_us": 37.93832
+        },
+        "candidate": {
+          "event_us": 37.52329111099243,
+          "wall_us": 39.26052
+        },
+        "event_us_ratio": 1.0202939742049573
+      },
+      {
+        "round": 3,
+        "order": [
+          "candidate",
+          "baseline"
+        ],
+        "candidate": {
+          "event_us": 37.57812976837158,
+          "wall_us": 38.450230000000005
+        },
+        "baseline": {
+          "event_us": 36.75221920013428,
+          "wall_us": 38.15473
+        },
+        "event_us_ratio": 1.0224723999315473
+      },
+      {
+        "round": 4,
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "baseline": {
+          "event_us": 36.7040491104126,
+          "wall_us": 37.67332
+        },
+        "candidate": {
+          "event_us": 37.53374099731445,
+          "wall_us": 38.713319999999996
+        },
+        "event_us_ratio": 1.0226049143626086
+      },
+      {
+        "round": 5,
+        "order": [
+          "candidate",
+          "baseline"
+        ],
+        "candidate": {
+          "event_us": 37.55124092102051,
+          "wall_us": 38.55922
+        },
+        "baseline": {
+          "event_us": 36.73161029815674,
+          "wall_us": 37.775729999999996
+        },
+        "event_us_ratio": 1.0223140400382855
+      },
+      {
+        "round": 6,
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "baseline": {
+          "event_us": 36.73103094100952,
+          "wall_us": 38.77032
+        },
+        "candidate": {
+          "event_us": 37.555930614471436,
+          "wall_us": 38.82492
+        },
+        "event_us_ratio": 1.022457841566895
+      },
+      {
+        "round": 7,
+        "order": [
+          "candidate",
+          "baseline"
+        ],
+        "candidate": {
+          "event_us": 37.54036903381348,
+          "wall_us": 38.73792
+        },
+        "baseline": {
+          "event_us": 36.77073955535889,
+          "wall_us": 38.666419999999995
+        },
+        "event_us_ratio": 1.0209304867881677
+      },
+      {
+        "round": 8,
+        "order": [
+          "baseline",
+          "candidate"
+        ],
+        "baseline": {
+          "event_us": 36.74644947052002,
+          "wall_us": 38.54182
+        },
+        "candidate": {
+          "event_us": 37.53259897232056,
+          "wall_us": 39.15812
+        },
+        "event_us_ratio": 1.021393890107158
+      },
+      {
+        "round": 9,
+        "order": [
+          "candidate",
+          "baseline"
+        ],
+        "candidate": {
+          "event_us": 37.54271984100342,
+          "wall_us": 38.48093
+        },
+        "baseline": {
+          "event_us": 36.720569133758545,
+          "wall_us": 37.41043
+        },
+        "event_us_ratio": 1.0223893781234736
+      }
+    ],
+    "baseline_median": 36.73902988433838,
+    "candidate_median": 37.545615434646606,
+    "median_paired_ratio": 1.0223517090808796,
+    "min_paired_ratio": 1.019727959761607,
+    "max_paired_ratio": 1.0226049143626086,
+    "candidate_faster_rounds": 0
+  },
+  "native_binary_report": {
+    "counts": {
+      "installed_hit": 1
+    },
+    "events": [
+      {
+        "event": "installed_hit",
+        "key": "94869cd0c8c48e18e56843c4008aaddb8fdc55ac1b8234c35b3ddd09f1a47180",
+        "binary_key_schema": 1,
+        "reason": null
+      }
+    ],
+    "events_dropped": 0
+  },
+  "collector_version": "dsl-recent128-evidence-v1",
+  "evidence_status": "INCOMPLETE",
+  "evidence_issues": [
+    "Missing file: /tmp/launcher.json",
+    "Missing valid launcher payload_commit"
+  ],
+  "computed": {
+    "timing": {
+      "ratio_of_medians": 1.021954459680822,
+      "reported_median_paired_ratio": 1.0223517090808796,
+      "round_count": 10,
+      "recomputed_median_paired_ratio": 1.0223517090808796,
+      "recomputed_median_wall_ratio": 1.0165482000666883,
+      "candidate_faster_rounds": 0,
+      "ratio_note": "Ratio of medians and median of paired ratios are different statistics."
+    },
+    "hot_selection": {
+      "counts": [
+        32,
+        37,
+        34,
+        27
+      ],
+      "mean_count": 32.5,
+      "fraction_per_query": [
+        0.015625,
+        0.01806640625,
+        0.0166015625,
+        0.01318359375
+      ],
+      "mean_fraction": 0.015869140625
+    },
+    "l2_vs_bf16": {
+      "w0": 0.08490968976672211,
+      "window": 0.08437151515164748,
+      "absolute_drop": 0.0005381746150746325,
+      "relative_drop": 0.006338200228421449
+    }
+  },
+  "collection": {
+    "source": {
+      "path": "/tmp/dsl-k2048-perf/results.json",
+      "present": true,
+      "sha256": "6793d6610cd4623d3f0b3b30ddea24393abcadc926671ced73314d4e9da1021a",
+      "bytes": 12927
+    },
+    "launcher_source": {
+      "path": "/tmp/launcher.json",
+      "present": false
+    },
+    "launcher": null,
+    "native_report_source": {
+      "path": "/tmp/dsl-k2048-perf/native_binary_report.json",
+      "present": true,
+      "sha256": "2b79461c151d848ae5a46ee4627578b89d0f61605789221f8b419263ea5b57b7",
+      "bytes": 262
+    },
+    "native_report_file": {
+      "counts": {
+        "installed_hit": 1
+      },
+      "events": [
+        {
+          "event": "installed_hit",
+          "key": "94869cd0c8c48e18e56843c4008aaddb8fdc55ac1b8234c35b3ddd09f1a47180",
+          "binary_key_schema": 1,
+          "reason": null
+        }
+      ],
+      "events_dropped": 0
+    },
+    "native_report_interpretation": "Preserved verbatim; native-hit schema is not interpreted.",
+    "assurance": "File-presence and recorded-control consistency only; not independent NPU execution verification."
+  }
+}
