@@ -4,6 +4,21 @@
 本次不是参数建议；已新增候选attention入口、FP32 partial写出、归约kernel、host/bridge与runner。
 **尚未在外部Mac上做CANN编译/NPU运行，不预报40–50us。**
 
+## 当前优先：复用229d296已编译库，验证空片哨兵兼容修复
+
+229d296反馈A5编译已成功，运行停在zero-query padded257的host空片max检查。
+源码的`NEGATIVE_MIN_VALUE_FP32=0xFF7FFFFF`是有限`-FLT_MAX`；`ZeroInvalidLseVF`
+空片写sum0/max=-FLT_MAX，旧校验仅认0/-inf，属于host合同遗漏。
+
+本次只修改Python校验/诊断，不修改设备kernel、ABI或桥接。**直接复用刚编译成功的同一.so，先不要重编。**
+拉最新源码，沿原实际命令使用全新output目录先`--timing none`。合法空态仅限O严格0/sum0，
+max为0、-inf或精确位模式0xff7fffff；任意负值/NaN/+inf仍拒绝。active finite、zero计数和所有误差阈值不变。
+新runner在每次partial门禁前保存本机diagnostic npz及空max位模式直方图小JSON，即使失败也保留证据。
+
+全部数值控制通过后再跑原Q4 graph矩阵。若仍失败，自主从新诊断导出原始位模式、counts、
+对应case和误差到小JSON，连同实际库SHA提交；不要只发截断traceback，不上传大npz，不删门禁。
+本任务不实施用户规划的两套attention后端或DSL缓存布局迁移。
+
 ## 合同和隔离
 
 - 现有原V4/原C4各入口保留。新导出`QsfaSinglePassLaunchKvSplit`使用独立**ABI2/112B tiling**；旧ABI1仍72B，15指针描述符不变。

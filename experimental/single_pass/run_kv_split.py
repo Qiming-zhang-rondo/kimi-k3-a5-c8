@@ -49,6 +49,41 @@ def all_passed(value):
     return all(all_passed(child) for child in value.values())
 
 
+def supported_empty_maximum(maximum):
+    """Known native empty sentinels, not an arbitrary finite-value waiver."""
+    import numpy as np
+    maximum=np.asarray(maximum)
+    negative_finite_limit=np.float32(-np.finfo(np.float32).max)
+    return (maximum==0)|np.isneginf(maximum)|(maximum==negative_finite_limit)
+
+
+def partial_diagnostics(partials,path):
+    """Persist unmodified device states before any validator can reject them."""
+    import numpy as np
+    if not isinstance(partials,(tuple,list)) or len(partials)!=3:
+        raise ValueError("Diagnostic accessor needs actual partial O/max/sum")
+    o,m,s=(np.asarray(value) for value in partials)
+    path=Path(path)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    np.savez_compressed(path,partial_output=o,partial_maximum=m,partial_sum=s)
+    result=dict(status="SAVED_BEFORE_VALIDATION",path=str(path),
+        shapes=dict(output=list(o.shape),maximum=list(m.shape),total=list(s.shape)),
+        dtypes=dict(output=str(o.dtype),maximum=str(m.dtype),total=str(s.dtype)))
+    if m.shape==s.shape and m.dtype==np.float32:
+        empty=s==0
+        values=np.ascontiguousarray(m[empty]).view(np.uint32)
+        patterns,counts=np.unique(values,return_counts=True)
+        result.update(empty_partial_rows=int(np.sum(empty)),
+            empty_maximum_uint32_histogram={f"0x{int(bits):08x}":int(count)
+                for bits,count in zip(patterns[:16],counts[:16])},
+            empty_maximum_unique_patterns=len(patterns),histogram_truncated=len(patterns)>16,
+            known_empty_maximum_rows=int(np.sum(supported_empty_maximum(m[empty]))),
+            nonfinite_sums=int(np.sum(~np.isfinite(s))))
+        if o.shape[:-1]==m.shape:
+            result["empty_output_nonzero_elements"]=int(np.count_nonzero(o[empty]))
+    return result
+
+
 def measure_candidates(calls,specs,controls,graph_controls,args,benchmark,paired_benchmark,persist=lambda:None,results=None):
     require(all_passed(controls),"All accuracy/partial/empty controls must pass before ANY timing")
     if args.timing=="graph":
@@ -76,13 +111,13 @@ def host_partial_control(partials,final,compare,acceptable):
         raise ValueError("Partial output must be [Q,splits,64,512]")
     if m.shape!=o.shape[:-1] or s.shape!=m.shape or any(x.dtype!=np.float32 for x in (o,m,s)):
         raise ValueError("Partial max/sum must be FP32 [Q,splits,64]")
-    # Native ZeroInvalidLse uses max=0/sum=0. The independent mathematical
-    # helper uses the canonical max=-inf/sum=0 representation. Both carry
-    # zero mass: only sum>0 makes a partial max participate in reduction.
-    # Do not hide poison/invalid maxima while normalizing that representation.
+    # Native ZeroInvalidLseVF also uses exact FP32 -FLT_MAX (0xff7fffff),
+    # despite one upstream comment calling it -inf. The independent math
+    # helper uses canonical -inf/sum=0. All known empty representations have
+    # zero mass; do not admit arbitrary finite values or poison as sentinels.
     empty=s==0
-    if np.any(empty & ~((m==0)|np.isneginf(m))):
-        raise ValueError("Empty device partial max must be native 0 or canonical -inf")
+    if np.any(empty & ~supported_empty_maximum(m)):
+        raise ValueError("Empty device partial max must be 0, -inf, or exact FP32 -FLT_MAX (0xff7fffff)")
     canonical_max=np.where(empty,np.float32(-np.inf),m)
     states=tuple(PartialState(o[:,i],canonical_max[:,i,:,None],s[:,i,:,None]) for i in range(o.shape[1]))
     merged=merge_partial_states(states)
@@ -91,8 +126,9 @@ def host_partial_control(partials,final,compare,acceptable):
     metric.update(passed=bool(acceptable(metric,.001)),tolerance=.001,
         reference="CPU FP32 stable merge of actual device FP32 normalized O/max/sum, then BF16 RNE",
         normalized_partials=True,empty_partial_rows=int(np.sum(empty)),
-        empty_maximum_contract="native 0 or -inf; ignored only when sum=0 and O=0",
-        native_zero_max_empty_rows=int(np.sum(empty&(m==0))))
+        empty_maximum_contract="0, -inf, or exact FP32 -FLT_MAX; ignored only when sum=0 and O=0",
+        native_zero_max_empty_rows=int(np.sum(empty&(m==0))),
+        native_finite_limit_empty_rows=int(np.sum(empty&(m==np.float32(-np.finfo(np.float32).max)))))
     return metric,merged
 
 
@@ -113,11 +149,11 @@ def zero_query_partial_control(partials,prefix):
     active=s>0
     max_ok=bool(np.all(m[active]==0))
     empty_ok=bool(np.all(o[~active]==0) and np.all(s[~active]==0) and
-        np.all((m[~active]==0)|np.isneginf(m[~active])))
+        np.all(supported_empty_maximum(m[~active])))
     return dict(passed=count_ok and max_ok and empty_ok,expected_partial_counts=expected_counts.tolist(),
         partial_counts_exact=count_ok,zero_query_active_maxima_exact=max_ok,
         empty_partial_output_and_sum_zero=empty_ok,
-        empty_maximum_contract="0 or -inf; zero sum excludes it from max/weights")
+        empty_maximum_contract="0, -inf, or exact FP32 -FLT_MAX; zero sum excludes it from max/weights")
 
 
 def execute(args,report,persist):
@@ -148,6 +184,7 @@ def execute(args,report,persist):
     require(args.queries*max(args.splits)<=available_aic,
         "Candidate Q*splits exceeds this device's available AIC cores")
     host=lambda tensor:tensor.detach().float().cpu().numpy().copy()
+    partial_host=lambda tensor:tensor.detach().cpu().numpy().copy() # Preserve actual partial dtype/bits.
     report["environment"]=backend.environment
     report["device_core_limits"]=dict(cube_core_num=available_aic,
         largest_attention_launch=args.queries*max(args.splits),
@@ -225,6 +262,11 @@ def execute(args,report,persist):
     arrays={f"w{window}_matching_math":value for window,value in references.items()}
     report["controls"]=dict(mathematical={},partial_reduce={},zero_query={})
     report["cross_checks"]={}
+    report["partial_diagnostics"]={}
+    def save_partials(label,partials):
+        record=partial_diagnostics(partials,args.output/"partial_diagnostics"/(label+".npz"))
+        report["partial_diagnostics"][label]=record
+        persist() # Preserve raw evidence even if the following gate raises.
     with torch.inference_mode():
         baseline_outputs={}
         for window in args.windows:
@@ -241,6 +283,8 @@ def execute(args,report,persist):
             persist()
         for name,spec in specs.items():
             tensor=calls[name]()
+            partials=tuple(partial_host(value) for value in plans[name].partial_outputs())
+            save_partials("main_"+name,partials)
             require(tensor.dtype==torch.bfloat16,"KV-split final output must be BF16")
             actual=host(tensor)
             arrays[name]=actual
@@ -248,7 +292,6 @@ def execute(args,report,persist):
             metric.update(passed=bool(acceptable(metric,.01)),tolerance=.01,
                 reference="Independent FP64 whole-selected-set softmax; no intermediate BF16 partial O")
             report["controls"]["mathematical"][name]=metric
-            partials=tuple(host(tensor) for tensor in plans[name].partial_outputs())
             gate,merged=host_partial_control(partials,actual,compare,acceptable)
             report["controls"]["partial_reduce"][name]=gate
             for suffix,value in zip(("partial_o","partial_max","partial_sum"),partials):
@@ -282,9 +325,10 @@ def execute(args,report,persist):
             report["controls"]["zero_query"][label]=section
             for name,spec in specs.items():
                 actual=host(plans[name].run(*control_inputs,spec["window"])[0])
+                partials=tuple(partial_host(value) for value in plans[name].partial_outputs())
+                save_partials(label+"_"+name,partials)
                 metric=compare(actual,expected[spec["window"]])
                 metric.update(passed=bool(acceptable(metric,.01)),tolerance=.01)
-                partials=tuple(host(value) for value in plans[name].partial_outputs())
                 merge_gate,_=host_partial_control(partials,actual,compare,acceptable)
                 count_gate=zero_query_partial_control(partials,prefix)
                 section[name]=dict(passed=metric["passed"] and merge_gate["passed"] and count_gate["passed"],
@@ -307,9 +351,18 @@ def execute(args,report,persist):
             for name in specs:
                 plan=plans[name]
                 buffers=lambda plan=plan:(*plan.outputs(),*plan.partial_outputs())
+                replay_states={}
+                def replay_compare(*values,**kwargs):
+                    # graph_replay_control invokes compare after replay/sync,
+                    # before its strict acceptance gate can raise.
+                    partials=tuple(partial_host(value) for value in plan.partial_outputs())
+                    save_partials("graph_replay_"+name,partials)
+                    replay_states["partials"]=partials
+                    return compare(*values,**kwargs)
                 output_gate=graph_replay_control(calls[name],buffers,torch,host,
-                    dict(compare=compare,acceptable=acceptable))
-                partial_gate,_=host_partial_control(tuple(host(value) for value in plan.partial_outputs()),
+                    dict(compare=replay_compare,acceptable=acceptable))
+                partials=replay_states["partials"]
+                partial_gate,_=host_partial_control(partials,
                     host(plan.outputs()[0]),compare,acceptable)
                 report["graph_controls"][name]=dict(passed=output_gate["passed"] and partial_gate["passed"],
                     output_replay=output_gate,partial_states_after_poison_replay=partial_gate)
@@ -366,7 +419,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-kv-split-a5-v1",status="STARTED",
+    report=dict(version="qsfa-recent128-kv-split-a5-v1.1-native-empty-sentinel",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED",
         scope="prepared read including partial attention plus device reduction; no writes")

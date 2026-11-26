@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -91,7 +92,7 @@ class KvSplitRunnerTest(unittest.TestCase):
         sums=np.zeros_like(maxima)
         sums[:,0]=257
         compare=lambda actual,reference:dict(error=float(np.max(np.abs(actual-reference))))
-        for empty_max in (0.,-np.inf):
+        for empty_max in (0.,-np.inf,np.float32(-np.finfo(np.float32).max)):
             maxima[:,1]=empty_max
             metric,state=runner.host_partial_control((output,maxima,sums),output[:,0],
                 compare,lambda m,tol:m["error"]<=tol)
@@ -99,7 +100,7 @@ class KvSplitRunnerTest(unittest.TestCase):
             np.testing.assert_array_equal(state.output,3)
             np.testing.assert_array_equal(state.maximum,-1000)
             np.testing.assert_array_equal(state.total,257)
-        for bad_empty_max in (np.nan,np.inf,1.):
+        for bad_empty_max in (np.nan,np.inf,1.,-42.,np.nextafter(np.float32(-np.finfo(np.float32).max),np.float32(0))):
             maxima[:,1]=bad_empty_max
             with self.assertRaises(ValueError):
                 runner.host_partial_control((output,maxima,sums),output[:,0],compare,lambda *args:True)
@@ -110,7 +111,7 @@ class KvSplitRunnerTest(unittest.TestCase):
         maxima=np.zeros((3,4,64),np.float32)
         sums=np.zeros_like(maxima)
         sums[:,0]=257
-        for empty_max in (0.,-np.inf):
+        for empty_max in (0.,-np.inf,np.float32(-np.finfo(np.float32).max)):
             maxima[:,1:]=empty_max
             gate=runner.zero_query_partial_control((output,maxima,sums),257)
             self.assertTrue(gate["passed"])
@@ -133,6 +134,50 @@ class KvSplitRunnerTest(unittest.TestCase):
         np.testing.assert_array_equal(state.total,0)
         self.assertTrue(np.isneginf(state.maximum).all())
         self.assertTrue(runner.zero_query_partial_control((output,maxima,sums),0)["passed"])
+
+    def test_empty_finite_sentinel_is_exact_and_never_waives_wrong_output_or_sum(self):
+        finite_limit=np.float32(-np.finfo(np.float32).max)
+        values=np.array([0.,-np.inf,finite_limit,-42.,np.nan,np.inf,
+            np.nextafter(finite_limit,np.float32(0))],np.float32)
+        np.testing.assert_array_equal(runner.supported_empty_maximum(values),
+            [True,True,True,False,False,False,False])
+        self.assertEqual(int(np.array([finite_limit]).view(np.uint32)[0]),0xff7fffff)
+        output=np.zeros((1,2,64,512),np.float32)
+        maxima=np.full((1,2,64),finite_limit,np.float32)
+        sums=np.zeros_like(maxima)
+        compare=lambda actual,reference:dict(error=float(np.max(np.abs(actual-reference))))
+        output[:,1]=1
+        with self.assertRaises(ValueError):
+            runner.host_partial_control((output,maxima,sums),output[:,0],compare,lambda *args:True)
+        output[:]=0
+        for invalid in (-1.,np.nan,np.inf):
+            sums[:,1]=invalid
+            with self.assertRaises(ValueError):
+                runner.host_partial_control((output,maxima,sums),output[:,0],compare,lambda *args:True)
+        sums[:]=0
+        sums[:,0]=258
+        maxima[:,0]=0
+        self.assertFalse(runner.zero_query_partial_control((output,maxima,sums),257)["passed"])
+
+    def test_diagnostics_preserve_raw_bits_even_when_following_gate_rejects(self):
+        output=np.zeros((1,2,64,512),np.float32)
+        maxima=np.zeros((1,2,64),np.float32)
+        maxima[:,1]=-42
+        sums=np.zeros_like(maxima)
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"partial"/"failure.npz"
+            record=runner.partial_diagnostics((output,maxima,sums),path)
+            self.assertTrue(path.is_file())
+            self.assertEqual(record["empty_maximum_uint32_histogram"],
+                {"0x00000000":64,"0xc2280000":64})
+            self.assertEqual(record["known_empty_maximum_rows"],64)
+            with self.assertRaises(ValueError):
+                runner.host_partial_control((output,maxima,sums),output[:,0],
+                    lambda *args:{},lambda *args:True)
+            with np.load(path) as saved:
+                np.testing.assert_array_equal(saved["partial_maximum"].view(np.uint32),maxima.view(np.uint32))
+                np.testing.assert_array_equal(saved["partial_output"],output)
+                np.testing.assert_array_equal(saved["partial_sum"],sums)
 
 
 if __name__=="__main__":
