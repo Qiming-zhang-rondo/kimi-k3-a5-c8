@@ -32,6 +32,7 @@ STUB = r'''
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -43,7 +44,7 @@ STUB = r'''
 void require(bool good, const char* what) { if (!good) throw std::runtime_error(what); }
 namespace AscendC {
 constexpr unsigned PIPE_V=1, EVENT_ID0=0;
-enum class HardEvent { MTE2_V,V_MTE3,MTE3_V };
+enum class HardEvent { MTE2_V,V_MTE3,MTE3_V,MTE2_S,S_MTE2 };
 enum class TPosition { VECCALC };
 enum class RoundMode { CAST_RINT };
 enum class CMPMODE { GT };
@@ -52,7 +53,10 @@ size_t currentRowHead=0, inputFloats=0, scalarCount=0;
 float *inputBase=nullptr, *maximumBase=nullptr, *sumBase=nullptr;
 std::vector<bool> activeHeads;
 std::vector<float> beforeCast;
-unsigned pending[3]={}, maximumReads=0, outputReads=0, exponentials=0, vfLoads=0;
+unsigned pending[5]={}, maximumReads=0, outputReads=0, exponentials=0, vfLoads=0;
+unsigned gmScalarReads=0,statsDmaReads=0,statsDmaEpoch=0,scalarReadyEpoch=0;
+struct ScalarSlot { bool maximum;size_t index;unsigned epoch; };
+std::map<const float*,ScalarSlot> scalarSlots;
 unsigned statWrites=0;
 uint32_t GetBlockIdx() { return blockIndex; }
 uint32_t GetBlockNum() { return blockCount; }
@@ -61,6 +65,7 @@ template<HardEvent E> void SetFlag(unsigned id) {
 }
 template<HardEvent E> void WaitFlag(unsigned id) {
  require(id==0 && pending[unsigned(E)]--==1,"unmatched event wait");
+ if constexpr(E==HardEvent::MTE2_S) scalarReadyEpoch=statsDmaEpoch;
 }
 template<unsigned> void PipeBarrier() {}
 struct bfloat16_t { uint16_t bits=0; };
@@ -75,6 +80,21 @@ template<class T> struct LocalTensor {
  T* p=nullptr; size_t count=0;
  void* GetPhyAddr() const { require(p!=nullptr,"absent UB"); return p; }
  LocalTensor operator[](size_t i) const { require(i<=count,"UB index");return {p+i,count-i}; }
+ T GetValue(size_t i) const {
+  require(p && i<count,"UB scalar bounds");
+  if constexpr(std::is_same<T,float>::value) {
+   auto slot=scalarSlots.find(p+i);
+   require(slot!=scalarSlots.end() && slot->second.epoch<=scalarReadyEpoch,
+           "UB stats read without completed MTE2_S");
+   if(slot->second.maximum) {
+    require(activeHeads[slot->second.index],"empty max entered scalar arithmetic"); ++maximumReads;
+   } else {
+    const size_t index=slot->second.index;
+    currentRowHead=(index/(currentSplits*64))*64+index%64;
+   }
+  }
+  return p[i];
+ }
 };
 template<class T> struct GlobalTensor {
  T* p=nullptr;
@@ -84,8 +104,9 @@ template<class T> struct GlobalTensor {
   require(p!=nullptr,"absent GM scalar");
   if constexpr(std::is_same<T,float>::value) {
    require((p==maximumBase || p==sumBase) && i<scalarCount,"compact stats bounds");
-   if(p==maximumBase) { require(activeHeads[i],"empty max was consumed"); ++maximumReads; }
-   else currentRowHead=(i/(currentSplits*64))*64+i%64;
+   // Simulate an old DCache line surviving a preceding producer overwrite.
+   // DMA sees f.maximum/f.sum, but an uninvalidated scalar GM read sees zero.
+   ++gmScalarReads;return T(0);
   }
   return p[i];
  }
@@ -113,6 +134,21 @@ template<class T> void DataCopy(GlobalTensor<T> destination,LocalTensor<T> sourc
  std::memcpy(destination.p,source.p,count*sizeof(T));
 }
 struct DataCopyExtParams { uint16_t blockCount;uint32_t blockLen,srcStride,dstStride,rsv; };
+template<class T> struct DataCopyPadExtParams { bool isPad;uint8_t leftPadding,rightPadding;T paddingValue; };
+template<class T> void DataCopyPad(LocalTensor<T> destination,GlobalTensor<T> source,
+ const DataCopyExtParams& c,const DataCopyPadExtParams<T>& pad) {
+ require(destination.p && source.p && c.blockCount==1 && c.blockLen==4 && c.srcStride==0 && c.dstStride==0,
+         "compact input stats DMA");
+ require(pad.isPad && pad.leftPadding==0 && pad.rightPadding==7 && destination.count>=8,
+         "input stats UB 32B padding");
+ const bool isMaximum=source.p>=maximumBase && source.p<maximumBase+scalarCount;
+ const bool isSum=source.p>=sumBase && source.p<sumBase+scalarCount;
+ require(isMaximum || isSum,"stats input GM bounds");
+ const size_t index=source.p-(isMaximum?maximumBase:sumBase);
+ destination.p[0]=source.p[0];
+ std::fill(destination.p+1,destination.p+8,pad.paddingValue);
+ scalarSlots[destination.p]={isMaximum,index,++statsDmaEpoch};++statsDmaReads;
+}
 template<class T> void DataCopyPad(GlobalTensor<T> destination,LocalTensor<T> source,const DataCopyExtParams& c) {
  require(destination.p && source.p && c.blockCount==1 && c.blockLen==4 && c.srcStride==0 && c.dstStride==0,
          "compact scalar statistics DMA");
@@ -237,7 +273,8 @@ template<unsigned Splits> std::vector<float> execute(Fixture f,unsigned blocks,b
  beforeCast.assign(rowHeads*512,std::numeric_limits<float>::quiet_NaN());
  inputBase=f.partial.data();inputFloats=f.partial.size();maximumBase=f.maximum.data();sumBase=f.sum.data();
  scalarCount=f.sum.size();currentSplits=Splits;blockCount=blocks;
- maximumReads=outputReads=exponentials=vfLoads=statWrites=0;
+ maximumReads=outputReads=exponentials=vfLoads=statWrites=gmScalarReads=statsDmaReads=0;
+ statsDmaEpoch=scalarReadyEpoch=0;scalarSlots.clear();
  for(blockIndex=0;blockIndex<blocks;++blockIndex) {
   QsfaKvSplitReduction::Run<Splits>(reinterpret_cast<uint8_t*>(f.partial.data()),
     reinterpret_cast<uint8_t*>(f.maximum.data()),reinterpret_cast<uint8_t*>(f.sum.data()),
@@ -251,6 +288,8 @@ template<unsigned Splits> std::vector<float> execute(Fixture f,unsigned blocks,b
  const unsigned active=std::count(activeHeads.begin(),activeHeads.end(),true);
  require(maximumReads==active && outputReads==active && exponentials==active && vfLoads==active*8,
          "empty input consumed or active partial omitted");
+ require(gmScalarReads==0 && statsDmaReads==2*rowHeads*Splits,
+         "producer statistics used stale scalar GM cache instead of DMA");
  require(statWrites==(stats?2*rowHeads:0),"optional stats copy count");
  for(unsigned row=0;row<rowHeads;++row) {
   const unsigned q=row/64,h=row%64;
@@ -341,6 +380,9 @@ class KvSplitReduceDeviceModelTests(unittest.TestCase):
         self.run_suite("shifts")
 
     def test_actual_vf_consumes_normalized_partials_and_final_stats(self):
+        self.run_suite("normalized")
+
+    def test_dynamic_stats_ignore_simulated_stale_global_scalar_cache(self):
         self.run_suite("normalized")
 
 

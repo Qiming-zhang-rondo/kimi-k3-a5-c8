@@ -4,7 +4,36 @@
 本次不是参数建议；已新增候选attention入口、FP32 partial写出、归约kernel、host/bridge与runner。
 **尚未在外部Mac上做CANN编译/NPU运行，不预报40–50us。**
 
-## 当前优先：复用229d296已编译库，验证空片哨兵兼容修复
+## 当前优先：定位22ab74b真实数值误差，再验证DMA归约修复
+
+22ab74b反馈主数学误差0.2–1.2，尚无性能结果。不能据S4误差较低就猜ABI或tiling错。
+连S1也失败，先将producer与reducer分开检查；**不要重跑旧版本来收集已存在的数据**。
+
+```bash
+# 读取实际完整results.json，不能给它15行的手工摘要文件。
+python experimental/single_pass/collect_kv_split_failure.py /actual/failed-run/results.json \
+  > experimental/single_pass/evidence/kv_split_failure_details.json
+```
+
+该工具只读既有JSON/NPZ，不导Torch、不运行NPU，默认输出<=50KB合法JSON。若需拆分，
+加`--case w0_split1` / `--case w128_split1`，提交各小文件；不上传npz。
+完整保留原reported误差及source SHA，缺实际数组时明确NOT_AVAILABLE，不凭摘要补造值。
+S1优先三项：final_vs_full_math、final_vs_direct_BF16(partialO[:,0])、partialO_vs_full_math，
+并保存query/head norm/cosine。如果final与partial直接转换不符，先查归约/传输；
+partial本身偏离全数学，才进一步定位producer。任何仅FAIL的标记都需要其真实误差量级。
+
+本次归约中已移除动态GM统计量的Scalar GetValue，改为MTE2搬入UB并等待MTE2_S后读取。
+官方约束明确GetValue可能读取过期DCache：
+https://asc.gitcode.com/api/SIMD-API/basic_api/cache_control/DataCacheCleanAndInvalid.html 。
+这是确定需修的一致性风险，**尚未证明它是本轮数值失败的唯一根因**。VF数学、ABI2/112B、
+GM布局、MXFP4/BF16格式均不改。与上一轮纯Python修复不同，这次需要编译归约ASC。
+
+先备份失败候选旧库并记录SHA，复用此前成功的隔离build目录增量构建；不覆盖原82us验证库，
+不换SDK/vendor。每次用新Python进程/新output，先Q4 `--timing none`全矩阵，
+所有数学/partial/zero/graph门禁通过后才跑graph性能。若仍失败，自动提取同一工具的小JSON，
+根据真实S1三项和partial证据继续定位，不放宽阈值、不反复给用户截断traceback。
+
+## 前一轮说明：空片哨兵兼容修复
 
 229d296反馈A5编译已成功，运行停在zero-query padded257的host空片max检查。
 源码的`NEGATIVE_MIN_VALUE_FP32=0xFF7FFFFF`是有限`-FLT_MAX`；`ZeroInvalidLseVF`

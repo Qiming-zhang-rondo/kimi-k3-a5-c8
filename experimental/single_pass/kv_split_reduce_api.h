@@ -16,7 +16,9 @@ extern "C" {
 // maximum/sum:   float[queryCount, splitCount, 64], compact softmax statistics.
 // output:        bfloat16[queryCount, 64, 512].
 // finalMaximum/finalSum: optional float[queryCount,64], required iff returnStats.
-// Empty partials have sum=0; their max and O allocations are not consumed.
+// Empty partials have sum=0; their max value is ignored and O is not loaded.
+// Statistics are copied through MTE2 to UB before scalar reads; no producer
+// statistics are read through the scalar GM Data Cache.
 // The caller queues this after the producer on the same stream. No global
 // barrier or synchronization with other streams is performed by this launch.
 QSFA_KV_SPLIT_REDUCE_EXPORT int32_t QsfaSinglePassLaunchKvSplitReduce(
