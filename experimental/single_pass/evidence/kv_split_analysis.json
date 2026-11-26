@@ -1,0 +1,16 @@
+{
+  "finding": "DSL uses ALL available AIC cores via KV-split, our V4 uses only 4",
+  "evidence": {
+    "dsl_python": "_get_cube_core_num; _FD_MP_SLOTS = AIC_CORE_MAX_NUM",
+    "dsl_binary": "aclrtGetDeviceInfo ACL_DEV_ATTR_AICORE_CORE_NUM; aclrtLaunchKernelWithHostArgs numBlocks dynamic",
+    "our_v4": "Fixed aicCount=4, 1 AIC per query, each processes all 2048 tokens sequentially"
+  },
+  "gap_decomposition": {
+    "core_count": "16 AIC vs 4 AIC = 4x parallelism (primary)",
+    "d_difference": "512 vs 576 = 11 percent less compute",
+    "data_size": "320B vs 400B per token = 20 percent less memory",
+    "dequant": "FP4 E2M1 simpler than MXFP4"
+  },
+  "next_step": "Change our V4 to KV-split scheduling: split 2048 tokens across 16 AIC cores, add final LSE reduction. Expected: approach 40-50us while keeping production MXFP4 format.",
+  "advantage": "Our format stays production-compatible MXFP4 C4. No migration needed."
+}
