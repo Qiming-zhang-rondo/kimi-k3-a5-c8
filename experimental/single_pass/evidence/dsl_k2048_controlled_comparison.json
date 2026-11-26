@@ -1,0 +1,45 @@
+{
+  "status": "MEASURED",
+  "experiment": "DSL recent128 TopK=2048 controlled comparison with V4",
+  "config": {
+    "topk": 2048,
+    "window": 128,
+    "d_total": 512,
+    "timing": "graph",
+    "queries": 4,
+    "keys": 8192
+  },
+  "dsl_results": {
+    "w0_us": 36.74,
+    "w128_us": 37.55,
+    "paired_ratio": 1.0224,
+    "hot_window_overhead": "2.2%",
+    "precision": {
+      "fp4_w0_l2_vs_bf16": 0.0849,
+      "fp4_fp8_w128_l2_vs_bf16": 0.0844
+    },
+    "format": {
+      "cold": "FP4 E2M1 group16 320B per token",
+      "hot": "FP8 E4M3FN 544B",
+      "d_total": 512
+    }
+  },
+  "our_v4_results": {
+    "c4_baseline_us": 80.48,
+    "v4_w128_us": 82.05,
+    "hot_window_overhead": "1.9%",
+    "format": {
+      "cold": "MXFP4 C4 400B per token",
+      "hot": "BF16 576B",
+      "d_total": 576
+    }
+  },
+  "controlled_comparison": {
+    "note": "Absolute times NOT directly comparable. D=512 vs 576, FP4 E2M1 vs MXFP4",
+    "hot_window_overhead_ours": "1.9%",
+    "hot_window_overhead_dsl": "2.2%",
+    "our_advantage": "Format-compatible with production C4 MXFP4 400B, BF16 hot for higher precision, drop-in replacement",
+    "dsl_limitation": "Different KV format FP4 E2M1 320B, requires format migration, FP8 hot for lower precision"
+  },
+  "timing_comparable_flag": "DSL itself reports timing_comparable_to_yesterdays_D576: false"
+}
