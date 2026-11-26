@@ -1,0 +1,15 @@
+{
+  "status": "CONTROL_FAILED",
+  "issue": "KV-split kernel produces WRONG numerical results (L2=0.2-1.2, should be <=0.01)",
+  "mathematical_failures": {
+    "w0_split1_l2": 1.04,
+    "w0_split2_l2": 1.06,
+    "w0_split4_l2": 0.2,
+    "w128_split1_l2": 1.2,
+    "w128_split2_l2": 1.03,
+    "w128_split4_l2": 0.2
+  },
+  "pattern": "split4 has lower error (0.20) than split1/split2 (1.0+). Suggests tiling/pointer offset bug in new ABI2/112B, or partial combination issue.",
+  "zero_query_pass": true,
+  "note": "Zero query counts correct, but actual attention math wrong. Empty sentinel fix from 1061f67 accepted, but real numerical bug remains."
+}
