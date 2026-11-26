@@ -1,0 +1,7 @@
+{
+  "status": "ERROR",
+  "error": "Empty device partial max must be native 0 or canonical -inf",
+  "traceback": "Traceback (most recent call last):\n  File \"/tmp/sfa_merge_src_upload/experimental/single_pass/run_kv_split.py\", line 377, in main\n    execute(args,report,persist)\n  File \"/tmp/sfa_merge_src_upload/experimental/single_pass/run_kv_split.py\", line 288, in execute\n    merge_gate,_=host_partial_control(partials,actual,compare,acceptable)\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/sfa_merge_src_upload/experimental/single_pass/run_kv_split.py\", line 85, in ho",
+  "location": "run_kv_split.py:85 host_partial_control",
+  "note": "KV-split first run on A5. Build OK, accuracy check failed at empty split max validation."
+}
