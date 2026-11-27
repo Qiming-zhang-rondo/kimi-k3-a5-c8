@@ -1,0 +1,42 @@
+{
+  "status": "MEASURED",
+  "fair_ab_20rounds": {
+    "w0_split4_vs_installed_c4": {
+      "bl": 80.91,
+      "cd": 46.9,
+      "med_ratio": 0.5796
+    },
+    "w0_split4_vs_w0_v4": {
+      "bl": 80.36,
+      "cd": 46.94,
+      "med_ratio": 0.5834
+    },
+    "w0_v4_vs_installed_c4": {
+      "bl": 81.56,
+      "cd": 80.37,
+      "med_ratio": 0.9935
+    },
+    "w128_split4_vs_installed_c4": {
+      "bl": 80.99,
+      "cd": 50.31,
+      "med_ratio": 0.622
+    },
+    "w128_split4_vs_w0_split4": {
+      "bl": 46.87,
+      "cd": 50.31,
+      "med_ratio": 1.0733
+    },
+    "w128_split4_vs_w128_v4": {
+      "bl": 81.99,
+      "cd": 50.3,
+      "med_ratio": 0.6137
+    }
+  },
+  "key_findings": {
+    "kvsplit_w128_vs_installed_c4": "0.622x \u2014 37.8 percent FASTER than production C4",
+    "kvsplit_w0_vs_installed_c4": "0.580x \u2014 42.0 percent FASTER",
+    "kvsplit_net_benefit_vs_v4": "0.583x \u2014 41.7 percent from KV-split alone",
+    "hot_window_cost": "1.073x \u2014 7.3 percent cost of hot window",
+    "v4_aligned_with_installed": "0.994x confirmed"
+  }
+}
