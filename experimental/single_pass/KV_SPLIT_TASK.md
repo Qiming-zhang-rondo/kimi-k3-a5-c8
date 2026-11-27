@@ -4,7 +4,40 @@
 本次不是参数建议；已新增候选attention入口、FP32 partial写出、归约kernel、host/bridge与runner。
 **尚未在外部Mac上做CANN编译/NPU运行，不预报40–50us。**
 
-## 当前优先：定位22ab74b真实数值误差，再验证DMA归约修复
+## 当前优先：读取e93c460对应的已有S1原始证据
+
+### 2026-11-27：e93c460之后，只提交已有S1原始证据
+
+DMA版本反馈仍错，原V4两臂正常。该提交仍只有16行手工摘要，没有实际库SHA、S1三项和partial数组统计。
+本轮禁止凭摘要继续猜ABI/tiling、重编或重跑六组。先找到e93c460对应的完整失败输出目录，
+只运行以下CPU工具（不要把摘要文件当results.json）：
+
+```bash
+python experimental/single_pass/collect_kv_split_failure.py /actual/v3-failed/results.json \
+  --case w0_split1 > experimental/single_pass/evidence/kv_split_v3_w0_split1_raw.json
+python experimental/single_pass/collect_kv_split_failure.py /actual/v3-failed/results.json \
+  --case w128_split1 > experimental/single_pass/evidence/kv_split_v3_w128_split1_raw.json
+```
+
+这两个生成文件各<=50KB，可直接git add/commit/push，**不再人工重写或四舍五入**。
+若路径不明，自主查当次run.log、shell命令和/tmp结果，用户不负责逐项中转。
+文件若缺失，提交工具生成的NOT_AVAILABLE及实际文件清单，不伪造数字。
+
+必要判别字段已经由工具提供：
+
+1. `cases.w0_split1.split1_identity_checks.saved_final_vs_bf16_partial0`：设备final对CPU直接BF16(partial0)。
+2. 同层`partial0_vs_matching_math`：partial0对完整数学参考。
+3. 原`mathematical`/`npu_vs_cpu_partial_merge`的完整实际误差、query/head norm与cosine。
+4. `bridge_build.library_sha256`及源文件hash，比较DMA前后的库是否确实变化；只写commit_tested不能证明新库被加载。
+
+工具按同一实际main调用匹配数组；无对应数组明确NOT_AVAILABLE。A失败说明producer/partial布局已有问题；
+A通过而B失败才指向归约/传输（这里A=partial0_vs_matching_math，B=final_vs_bf16_partial0）。
+S1不需要max/sum加权，能把两段问题直接区分。当前尚无证据定罪新的POD或Cube traits。
+
+新runner未来失败会自动在输出目录生成`failure_small_w0_split1.json`及`failure_small_w128_split1.json`，
+只做CPU读取，不占卡、不改原状态，不放宽任何门禁。当前旧失败无需为生成这些文件重跑。
+
+### 前一轮背景（不是本轮重编或重跑指令）
 
 22ab74b反馈主数学误差0.2–1.2，尚无性能结果。不能据S4误差较低就猜ABI或tiling错。
 连S1也失败，先将producer与reducer分开检查；**不要重跑旧版本来收集已存在的数据**。

@@ -20,6 +20,7 @@ from run_single_pass import select_aic_count
 
 FAULT_CODES=("507015","507035","507053","507036","507011",
              "ACL_ERROR_RT_AICORE_EXCEPTION","GM invalid")
+FAILURE_CASES=("w0_split1","w128_split1")
 
 
 class ControlFailed(RuntimeError):
@@ -55,6 +56,33 @@ def supported_empty_maximum(maximum):
     maximum=np.asarray(maximum)
     negative_finite_limit=np.float32(-np.finfo(np.float32).max)
     return (maximum==0)|np.isneginf(maximum)|(maximum==negative_finite_limit)
+
+
+def failure_diagnostic_paths(results_path):
+    return [Path(results_path).parent/("failure_small_"+case+".json") for case in FAILURE_CASES]
+
+
+def write_failure_diagnostics(results_path):
+    """CPU-only post-failure export; preserve the source JSON and failed status.
+
+    Each case is bounded to 50KB. No tensor reads or device calls are made;
+    only states already saved by the runner are consulted.
+    """
+    paths=failure_diagnostic_paths(results_path)
+    for case,path in zip(FAILURE_CASES,paths):
+        try:
+            from collect_kv_split_failure import collect,encode_bounded
+            text=encode_bounded(collect(results_path,case_filter=case))+"\n"
+        except Exception as error:
+            text=json.dumps(dict(status="CPU_DIAGNOSTIC_EXPORT_ERROR",case=case,
+                source_results=str(results_path),error=str(error),npu_executed=False),
+                ensure_ascii=False)+"\n"
+        try:
+            with path.open("x",encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError as error:
+            print(f"Diagnostic export unavailable: {path}: {error}",file=sys.stderr)
+    return paths
 
 
 def partial_diagnostics(partials,path):
@@ -436,8 +464,15 @@ def main(argv=None):
             marker.parent.mkdir(parents=True,exist_ok=True)
             marker.write_text(json.dumps(dict(status="DEVICE_FAULT",results=str(args.output/"results.json")))+"\n")
             report["device_fault_marker"]=str(marker)
-    persist()
-    print(json.dumps(dict(status=report["status"],results=str(args.output/"results.json"))))
+    failed=report["status"] in ("ERROR","CONTROL_FAILED")
+    if failed:
+        report["failure_diagnostic_files"]=[str(path) for path in
+            failure_diagnostic_paths(args.output/"results.json")]
+    persist() # Freeze source bytes before read-only collectors hash them.
+    if failed:
+        write_failure_diagnostics(args.output/"results.json")
+    print(json.dumps(dict(status=report["status"],results=str(args.output/"results.json"),
+        failure_diagnostic_files=report.get("failure_diagnostic_files",[]))))
     return 0 if report["status"] in ("VALIDATED_ONLY","MEASURED") else 1
 
 

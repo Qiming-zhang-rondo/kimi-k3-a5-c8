@@ -1,4 +1,11 @@
-# 当前新实验：保留MXFP4格式，尝试V4 KV-split
+# 当前只取证：定位KV-split的S1大误差
+
+最新e93c460报告DMA修复后仍失败，原V4正常。**现在先不重编、不重跑NPU、不改tiling或换算法。**
+按 [experimental/single_pass/KV_SPLIT_TASK.md](experimental/single_pass/KV_SPLIT_TASK.md)
+最顶部任务，从已有完整results.json/outputs.npz/partial_diagnostics只读提取
+S1原始三项，直接提交生成的JSON，不能再用手工摘要替代。
+
+下面保留候选背景，不是本轮重新扫描指令。
 
 用户于2026-11-26明确要求“你试一下”。执行
 [experimental/single_pass/KV_SPLIT_TASK.md](experimental/single_pass/KV_SPLIT_TASK.md)。

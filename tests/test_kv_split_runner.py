@@ -1,6 +1,8 @@
 """Host-only gates for the new KV-split runner; never imports Torch/NPU."""
 from pathlib import Path
 from types import SimpleNamespace
+import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -12,6 +14,30 @@ import run_kv_split as runner
 
 
 class KvSplitRunnerTest(unittest.TestCase):
+    def test_failure_exports_are_cpu_only_and_do_not_change_original_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="split-failure-export-") as temp:
+            path=Path(temp)/"results.json"
+            report=dict(status="CONTROL_FAILED",version="qsfa-recent128-kv-split-a5-v1.1-native-empty-sentinel",
+                args=dict(queries=4,splits=[1,2,4]),controls=dict(mathematical={
+                    "w0_split1":dict(passed=False,relative_l2=1.16),
+                    "w128_split1":dict(passed=False,relative_l2=1.14)}))
+            path.write_text(json.dumps(report))
+            before=path.read_bytes()
+            torch_before={name for name in sys.modules if name=="torch" or name.startswith("torch.")}
+            outputs=runner.write_failure_diagnostics(path)
+            self.assertEqual(path.read_bytes(),before)
+            self.assertEqual(torch_before,{name for name in sys.modules if name=="torch" or name.startswith("torch.")})
+            self.assertEqual(len(outputs),2)
+            for output,case in zip(outputs,runner.FAILURE_CASES):
+                self.assertLessEqual(output.stat().st_size,50001)
+                data=json.loads(output.read_text())
+                self.assertTrue(data["read_only"])
+                self.assertFalse(data["npu_executed"])
+                self.assertEqual(data["source_results_sha256"],hashlib.sha256(before).hexdigest())
+                self.assertEqual(data["experiment_status"],"CONTROL_FAILED")
+                self.assertFalse(data["cases"][case]["mathematical"]["passed"])
+                self.assertEqual(data["full_outputs"]["status"],"NOT_AVAILABLE")
+
     def test_default_matrix_keeps_both_windows_and_degenerate_split_one(self):
         args=runner.parser().parse_args(["--payload-dir","/tmp/p","--library","/tmp/l.so",
             "--device","npu:3","--output","/tmp/o"])
