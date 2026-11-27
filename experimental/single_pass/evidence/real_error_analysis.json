@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-27 17:30",
+  "situation": "User restarted D node with launch_hot_d.sh after all fixes. Still getting errors.",
+  "error_seen": "ContractError: Unsupported recent128 options; baseline quantization cannot be changed: kernel",
+  "error_timestamp": "16:55:43",
+  "fixes_applied_since_error": [
+    "1. kernel -> single_pass_kernel in run_d.sh and run_p.sh",
+    "2. diagnostics_path added to additional_config",
+    "3. diagnostics_path changed to /tmp/sfa_diagnostics/layers",
+    "4. contract.py updated with single_pass_kernel support (5 references)",
+    "5. launch_guard.py added to overlay"
+  ],
+  "uncertainty": "Error timestamp 16:55:43 might be from BEFORE the single_pass_kernel fix. User may be seeing old log. OR the fix didn't take effect.",
+  "files_attached": [
+    "current_run_d.sh - full run_d.sh from 178 production container",
+    "current_contract.py - contract.py from overlay on 178",
+    "current_launch_hot_d.sh - launch script from 178"
+  ],
+  "need": "Review actual files to determine if config is correct and what error would occur on next restart"
+}
