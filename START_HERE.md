@@ -1,12 +1,12 @@
-# 当前任务：复测新版50us是否真的快于原生纯C4
+# 当前任务：只打包已有20轮复测原始结果，不重跑
 
-用户对cfdb6c3摘要的50us vs旧80us提出质疑，明确要求内网AI实测比较。
-立即按 [experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md](experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md)
-执行：复用已有成功库，只更新Python测试，**无需重编kernel**。
-五臂同输入：实际installed C4、同库旧C4、旧V4热窗、新S4纯C4、新S4热窗。
-新增`--verify-comparison`做六组直接20轮AB/BA；全部精度/graph门禁先通过，计时后直接读取
-最后timed buffer再验（不能先调用算子刷新）。交付完整原始JSON和SHA，不再只交手工摘要。
-空闲卡、同scope，所有candidate计时包含attention+reduce；不换CANN/vendor、不停业务。
+4ffc47c回报新版热窗50.31us/installed C4 80.99us，但只推送42行摘要，不能独立核对原始轮次和门禁。
+**现在不要重编、不要再跑NPU。** 从刚才实际--verify-comparison输出目录找到完整results.json，
+按 [experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md](experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md)
+最顶部命令，用新增stdlib工具导出32KiB文本分片+manifest，直接git add整个导出目录并推送。
+工具读取既有字节，保留全部controls/graph/post/20轮event+wall，并验证SHA可精确恢复。
+不能把手写fair_ab_20rounds.json传给工具；它会拒绝这种摘要。
+用户不需要再搬运日志；agent自主查上次命令/输出路径，无需新测量。
 
 下面保留候选背景，不是本轮重新扫描指令。
 

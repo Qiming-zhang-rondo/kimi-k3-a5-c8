@@ -601,11 +601,21 @@ def main(argv=None):
     if failed:
         report["failure_diagnostic_files"]=[str(path) for path in
             failure_diagnostic_paths(args.output/"results.json")]
+    if args.verify_comparison:
+        report["verification_evidence_directory"]=str(args.output/"verification_evidence")
     persist() # Freeze source bytes before read-only collectors hash them.
     if failed:
         write_failure_diagnostics(args.output/"results.json")
+    evidence_export={}
+    if args.verify_comparison:
+        try:
+            from export_verification_evidence import export_evidence
+            export_evidence(args.output/"results.json",args.output/"verification_evidence")
+            evidence_export["verification_evidence_directory"]=report["verification_evidence_directory"]
+        except Exception as error:
+            evidence_export["verification_evidence_export_error"]=str(error)
     print(json.dumps(dict(status=report["status"],results=str(args.output/"results.json"),
-        failure_diagnostic_files=report.get("failure_diagnostic_files",[]))))
+        failure_diagnostic_files=report.get("failure_diagnostic_files",[]),**evidence_export)))
     return 0 if report["status"] in ("VALIDATED_ONLY","MEASURED") else 1
 
 

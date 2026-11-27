@@ -1,5 +1,28 @@
 # 公平核对“新S4约50µs”与“原生C4约80µs”
 
+## 当前只打包4ffc47c对应的已有原始结果：不重跑
+
+20轮复测已回报，但提交的`evidence/fair_ab_20rounds.json`只有42行手工摘要，仍缺原始轮次、数学/graph/post门禁和实际库身份。
+当前禁止再次重测来补这些已经存在的数据。agent自主定位刚才`--verify-comparison`命令的实际完整输出目录，运行：
+
+```bash
+python experimental/single_pass/export_verification_evidence.py \
+  /actual/completed-fair-ab/graph/results.json \
+  experimental/single_pass/evidence/kv_split_fair_ab_full
+git add experimental/single_pass/evidence/kv_split_fair_ab_full
+git commit -m "Upload complete existing fair-AB results as verified text parts"
+git push
+```
+
+路径由agent查上轮log/命令填实，不能拿42行摘要当results。导出目录必须是新的，不能覆盖旧证据。
+工具仅stdlib、只读现有文件，无Torch/NPU；gzip+base64切成每份<=32KiB加换行的纯文本，manifest保留完整原JSON字节数/SHA及每片SHA。
+导出后会自检能逐字节还原，包含所有原始门禁、20轮event/wall、配对次序和状态，不需要上传大npz。
+**直接推送工具生成的全部文件，不再人工重写数字或只发verification_summary。**
+如原文件确实缺失，提交实际查找路径/命令证据并明确缺失；不能从摘要补造rounds或重新生成“原始结果”。
+
+未来runner在`--verify-comparison`结束后会自动生成`verification_evidence/`同样产物。
+下面保留已经执行过的复测合同与命令，当前不再执行新NPU任务。
+
 本轮只用已经通过数值控制的现有库做同轮单算子对照，不修改kernel，不重新编译，不换CANN、vendor或wheel，不接入模型服务。不能把历史80µs与另一次运行的50µs直接相除。目标是确认差距是否在相同输入、相同计时范围下复现，并区分分K收益和热窗代价。
 
 ## 五条真实路径
