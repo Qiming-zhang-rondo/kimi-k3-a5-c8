@@ -1,19 +1,24 @@
-# 当前任务：修复融合算子的启用配置，确认真实worker执行
+# 当前任务：保留PROLOG_V3的生产热环接入
 
-最新回报5b16195仅用PYTHONPATH和SFA_RECENT128_CONFIG/LIB_DIR尝试P/D启动；当前代码不读取这两个启用变量。
-实际入口为VllmConfig.additional_config.sfa_recent128，缺失时默认window0。插件导入路径仍须用实际worker证据核对，不能只猜。
+用户已明确要求可支持的并发8、整模型Graph、MTP、prefix cache和P/D传输全部接入，保留原C4缓存布局和indexer C4。
+最新54076f89的17:24:36真实错误：所有配置字段已接受，hooks.weights进入runtime构造，
+但当前NATIVE raw-BF16 tap不覆盖生产PROLOG_V3。runtime尚未初始化完成，尚无候选kernel执行证据。
+不再为此改JSON字段，不删除guard放行缺失数据，也不关闭生产特性后称完成接入。
 
-内网agent现在按 [framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md](framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md)
-一次完成：隔离checkout安装核对、正式配置、独立真实模型probe、实际worker来源、候选attention/设备归约计数及collector。
-本轮已增加环境变量ON但没有正式配置时的明确报错，不会自动把未支持的PD/graph服务改成accuracy_eager。
-不重启或修改现有P/D服务，保持原已验证原生C4路径。当前overlay仍是单请求accuracy_eager接线原型；生产服务接入尚未完成。
+内网agent现在按 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)
+一次执行：核实实际Cloud Prolog schema/可选原BF16出口；定位当前匹配源/版本/头文件；
+用tools/collect_prolog_sources.py原字节导出完整源码与构建材料，自动小文本分片后推送。
+如果已有真实可复用出口，验证后复用；否则在隔离版本化variant内部RMSNorm/RoPE后、MXFP4量化前写BF16热环。
+保留原量化输入、原packed400写入、原query输出及原图内原地cache更新，不增加重复投影或整cache复制。
+工具仅做stdlib只读采集，3项宿主测试通过；没有新的Prolog device实现或性能结果。
 
-完整框架验证合同继续见 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md)。
-Q<=4使用kv_split4，较长prefill显式旧V4 fallback；先确认实际模型R64/packed400、完整库身份、ABI和数学检查。
-PR199精确源码可选--source-profile pr199；旧overlay必须按manifest恢复或使用新checkout，不能叠装不同runtime版本。
+生产适配同时需要多请求row→request/ring-bank寻址、预分配Graph缓冲、MTP事务/有效位置、prefix尾窗快照和PD尾窗完成协议。
+现有accuracy_eager adapter是受保护的诊断原型，不能直接删除单请求/PD/图门禁冒充生产支持。
+原C4布局不妨碍这些能力；新增BF16热环的数据来源与生命周期仍必须接线。
 
-用户已要求先把服务/接线处理好。新增真实激活重要性实验暂缓，相关本地草稿不包含在本轮发布；
-此前三臂单算子脚本仍可独立使用，但本轮不重跑扫描、不重编已成功内核，也不把环境变量或80us原生算子记录当融合已生效。
+旧配置问题及已确认字段见 [framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md](framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md)。
+当前additional_config正确，indexer_kv_dtype=mxfp4和mla_kv_quant_mode=mxfp4均保留。
+旧框架精度探针合同见 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md)，它不代表生产能力已交付。
 
-上一轮完整20轮原始证据仍可从既有文件只读打包，见
-[experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md](experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md)，不得为补现有数据反复重测。
+不重启或修改现有服务、不更换CANN/vendor/wheel、不覆盖已成功库。新增真实激活重要性实验继续暂缓；
+此前未发布草稿不包含在本轮提交。单算子三臂脚本仍可独立使用，本轮不重跑扫描。
