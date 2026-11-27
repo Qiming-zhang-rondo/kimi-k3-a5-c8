@@ -1,4 +1,10 @@
-# 当前任务：把82µs V4接到真实框架，先检查实际模型格式
+# 当前任务：KV-split接入VA，先验证真实模型精度
+
+用户已确认导师PR199，最新要求先接自研hotwindow并看整体精度。先按 [ENVIRONMENT_TASK.md](ENVIRONMENT_TASK.md) 识别实际VA/CANN，再由agent自主继续隔离安装/模型验证；历史pin不作为推荐版本。
+
+最新执行入口为 [KV_SPLIT_VA_TASK.md](KV_SPLIT_VA_TASK.md)。新增`single_pass_kernel=kv_split4`，
+小query走ABI2分片+设备归约，大prefill明确走ABI1 load_tile4；同轮OFF/V4/KV-split对照。
+下面保留旧V4接入背景及NoPE源合同收集要求，不是本轮仅运行旧82us入口的指令。
 
 用户已将重点转为框架接入与精度，tile扫描不再是前置。9ffe1e0原始证据：V4(rows32/input416/I2/O1)约82.08µs，对同轮original C4 80.47µs，配对1.01994；比fast-pair快10.5%。这是Q4/K8192 prepared-read，不能写成模型TPOT。
 
@@ -23,7 +29,7 @@ python framework_integration/run_model_probe.py \
 ## 2. R64/400：隔离安装、真实模型三臂、原精度任务
 
 1. 找到真实MXLLM源码/已验证V4库。优先复用 `/tmp/qsfa-load-tiles-build/libqsfa_recent128_direct.so` 的实际成功产物，核对完整SHA及variant4；不换CANN/vendor，不覆盖服务。桥接默认原ABI1，15指针/72B POD。
-2. 隔离checkout应用 `install_overlay.py --check` 后 `--apply`。基线3ba7355d/ascend pin760d7ec；当前源不同就自主核对RMSNorm/RoPE后、MXFP4前的原BF16捕获点，以及真实attention读hook，再做必要adapter修改，不能盲改SHA校验。
+2. 隔离checkout应用 `install_overlay.py --check` 后 `--apply`。优先按当前已核实PR199 head342680fb及其VA c09d3e20依赖，精确原文件用`--source-profile pr199`。3ba7355d/VA760d7ec仅为历史审阅源；当前源不同则自主核对实际写点和读hook后适配，不能盲改SHA。
 3. engine保留权重/TP/量化/TopK，初始精度范围为eager、max_num_seqs1、chunked prefill、Q<=512，关闭prefix/PD/PCP/DCP/MTP。默认preserve原preprocessing；若原模型使用PrologV3且不输出原BF16，OFF/native/V4三臂必须共同显式使用 `--native-accuracy-preprocess`，并在权重转换前选NATIVE。不能只改ON，也不能用此测试验收服务性能。
 4. 独立进程顺序跑OFF/native/V4。原始BF16热环按层维护tags，容量保留W+chunk-1；不将C4解码值当原BF16。至少短prompt、>2048真实长prompt、chunk边界和多步decode/ring回绕。
 

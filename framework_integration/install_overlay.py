@@ -19,6 +19,13 @@ PATCH = Path("ascend_vllm/patch/worker/patch_sfa_v1_mxfp4.py")
 WORKER = Path("ascend_vllm/patch/worker/__init__.py")
 PINNED_SOURCE_SHA256 = "b209150bd23ff6401ac8b69901c06582bef5515b577581d7022a6e292d1a507c"
 PINNED_WORKER_SHA256 = "6fa56c057930b2de8f447f6418836bd1ecf74a8287f8f8d8c51b2e96a3368879"
+SOURCE_PROFILES = {
+    "legacy": (PINNED_SOURCE_SHA256, PINNED_WORKER_SHA256),
+    # Reviewed original files at mxllm PR199 head 342680fb. This selects exact
+    # source bytes only; it does not certify the installed VA/CANN stack.
+    "pr199": ("8d9f93cdd1d374d0fcbc309c1a0047c5f9fc6cb068fda271f6ee07be26798c5c",
+              "e388c47319c6029f8904140b16977558b00ec95faa00360a403b26085c00bf2d"),
+}
 STATE = ".sfa_recent128_overlay.json"
 TAP = ("    # BEGIN SFA_RECENT128_RAW_KV_TAP\n"
        "    from sfa_recent128.hooks import capture_native_kv\n"
@@ -216,12 +223,17 @@ def main():
     mode.add_argument("--check",action="store_true",help="Read-only validation (default)")
     mode.add_argument("--apply",action="store_true",help="Copy runtime and patch this source checkout")
     parser.add_argument("--output",type=Path,help="External experiment output for original-source backups/manifest")
-    parser.add_argument("--expected-source-sha256",default=PINNED_SOURCE_SHA256)
-    parser.add_argument("--expected-worker-sha256",default=PINNED_WORKER_SHA256)
+    parser.add_argument("--source-profile",choices=tuple(SOURCE_PROFILES),default="legacy",
+        help="Exact reviewed MXLLM source pair; pr199 is head 342680fb, not a compatibility override")
+    parser.add_argument("--expected-source-sha256")
+    parser.add_argument("--expected-worker-sha256")
     args=parser.parse_args()
     try:
+        source_hash,worker_hash=SOURCE_PROFILES[args.source_profile]
         result=install_overlay(args.mxllm_root,apply=args.apply,output=args.output,
-            expected_source_sha256=args.expected_source_sha256,expected_worker_sha256=args.expected_worker_sha256)
+            expected_source_sha256=args.expected_source_sha256 or source_hash,
+            expected_worker_sha256=args.expected_worker_sha256 or worker_hash)
+        result["source_profile"]=args.source_profile
     except (ValueError,OSError,json.JSONDecodeError) as error:
         parser.exit(2,f"Overlay refused: {error}\n")
     print(json.dumps(result,indent=2))

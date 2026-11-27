@@ -73,6 +73,38 @@ class SinglePassMathRuntimeTest(unittest.TestCase):
         self.assertEqual(r.counts["validation_attention_calls"],0)
         self.assertLess(r.control_max["relative_l2"],.01)
 
+    def split_fixture(self):
+        r,reader,cold,fake,inputs=self.fixture()
+        r.config.single_pass_kernel="kv_split4"
+        reader.last_reduction_calls=1
+        reader.last_call_metadata.update(status="EXERCISED",kernel_variant="kv_split4",
+            executed_kernel_variant="kv_split4",entry="QsfaSinglePassLaunchKvSplit",
+            device_entry="qsfa_recent128_kv_split_attention",dispatch_reason="q_le_4_kv_split4",
+            split_count=4,aic_count=4,queries=1,heads=1,candidate_attention_calls=1,
+            device_reduction_calls=1,original_topk_unchanged=True,topk_partitioned=True,
+            validation_attention_calls=0)
+        return r,reader,cold,fake,inputs
+
+    def test_split_runtime_checks_full_math_and_counts_real_attention_and_reduction(self):
+        r,reader,cold,fake,inputs=self.split_fixture()
+        with patch.dict(sys.modules,{"torch":fake}):r._read_single_pass(*inputs)
+        self.assertEqual(reader.calls,1)
+        self.assertEqual(r.counts["kv_split_attention_calls"],1)
+        self.assertEqual(r.counts["kv_split_reduction_calls"],1)
+        self.assertEqual(r.counts["kv_split_rows"],1)
+        self.assertEqual(r.counts["validation_attention_calls"],0)
+        self.assertEqual(r.counts["full_math_checked_rows"],1)
+        self.assertLess(r.control_max["relative_l2"],.01)
+
+    def test_split_runtime_rejects_fake_reduction_or_changed_topk_metadata(self):
+        for field,value in (("device_reduction_calls",0),("original_topk_unchanged",False),
+                            ("split_count",1),("aic_count",1)):
+            r,reader,cold,fake,inputs=self.split_fixture()
+            reader.last_call_metadata[field]=value
+            with self.subTest(field=field),patch.dict(sys.modules,{"torch":fake}),self.assertRaises(RuntimeError):
+                r._read_single_pass(*inputs)
+            self.assertEqual(r.counts["kv_split_attention_calls"],0)
+
     def test_future_and_missing_raw_bf16_tags_fail_before_attention(self):
         for fault in ("future","tag"):
             with self.subTest(fault=fault):

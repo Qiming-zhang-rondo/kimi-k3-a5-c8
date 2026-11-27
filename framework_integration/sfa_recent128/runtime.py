@@ -284,7 +284,9 @@ class Recent128Runtime:
 
         This is explicitly an accuracy harness. It gathers only selected cold
         pages for its independent FP64 oracle, and never invokes a second NPU
-        attention to manufacture the candidate output.
+        attention to manufacture the candidate output. Requested kv_split4
+        adds one device reduction per head group only for Q<=4; larger
+        prefill chunks keep the measured load_tile4 reader explicitly.
         """
         import torch
         if q_rope is None or q_rope.shape[-1] != 64 or cache.shape[-1] != 400:
@@ -334,18 +336,44 @@ class Recent128Runtime:
         actual=self.single_pass_reader.last_call_metadata
         requested=getattr(self.config,"single_pass_kernel","overlay")
         expected_entry={"overlay":"QsfaSinglePassLaunch","fast_pair":"QsfaSinglePassLaunchFastPair",
-                        "load_tile4":"QsfaSinglePassLaunchLoadTile"}[requested]
+                        "load_tile4":"QsfaSinglePassLaunchLoadTile",
+                        "kv_split4":"QsfaSinglePassLaunchKvSplit" if n<=4
+                                     else "QsfaSinglePassLaunchLoadTile"}[requested]
         expected_calls=(heads+63)//64
         if (actual.get("kernel_variant")!=requested or actual.get("entry")!=expected_entry
                 or actual.get("return_stats") is not False
                 or actual.get("external_merge_calls")!=0
-                or actual.get("topk_partitioned") is not False
+                or actual.get("topk_partitioned") is not (requested=="kv_split4" and n<=4)
                 or actual.get("head_groups")!=expected_calls
                 or self.single_pass_reader.last_attention_calls!=expected_calls):
             self._error("Single-pass actual reader entry/call contract differs from requested kernel")
         if requested=="load_tile4" and (actual.get("load_variant")!=4 or
                 actual.get("device_entry")!="QsfaSinglePassLaunchLoadTile32"):
             self._error("Single-pass load_tile4 did not execute the requested compiled layout")
+        if requested=="kv_split4":
+            split=n<=4
+            executed="kv_split4" if split else "load_tile4"
+            reductions=expected_calls if split else 0
+            aic=n*4 if split else max(value for value in (1,2,4,8,16) if value<=n and n%value==0)
+            numeric=("queries","heads","head_groups","candidate_attention_calls",
+                     "split_count","aic_count","device_reduction_calls")
+            if (any(type(actual.get(name)) is not int for name in numeric)
+                    or actual.get("status")!="EXERCISED" or actual.get("queries")!=n
+                    or actual.get("heads")!=heads
+                    or actual.get("executed_kernel_variant")!=executed
+                    or actual.get("dispatch_reason")!=("q_le_4_kv_split4" if split else
+                                                       "q_gt_4_prefill_load_tile4")
+                    or actual.get("split_count")!=(4 if split else 1)
+                    or actual.get("aic_count")!=aic
+                    or actual.get("device_entry")!=("qsfa_recent128_kv_split_attention" if split else
+                                                    "QsfaSinglePassLaunchLoadTile32")
+                    or (not split and actual.get("load_variant")!=4)
+                    or actual.get("original_topk_unchanged") is not True
+                    or actual.get("candidate_attention_calls")!=expected_calls
+                    or actual.get("device_reduction_calls")!=reductions
+                    or getattr(self.single_pass_reader,"last_reduction_calls",None)!=reductions
+                    or actual.get("validation_attention_calls")!=0):
+                self._error("Requested kv_split4 actual dispatch/partial-reduction contract differs from query route")
         metrics=comparison_arrays(result.detach().float().cpu().numpy(),reference,limit=.01)
         if not metrics["passed"]:
             self._error("Single-pass model attention failed full FP64 matching math: "+json.dumps(metrics))
@@ -356,6 +384,13 @@ class Recent128Runtime:
         self.counts["candidate_attention_calls"]+=self.single_pass_reader.last_attention_calls
         self.counts["single_pass_expected_attention_calls"]+=expected_calls
         self.counts["single_pass_"+requested+"_calls"]+=self.single_pass_reader.last_attention_calls
+        if requested=="kv_split4":
+            if n<=4:
+                self.counts["kv_split_attention_calls"]+=self.single_pass_reader.last_attention_calls
+                self.counts["kv_split_reduction_calls"]+=self.single_pass_reader.last_reduction_calls
+                self.counts["kv_split_rows"]+=n
+            else:
+                self.counts["kv_split_prefill_fallback_calls"]+=self.single_pass_reader.last_attention_calls
         self.counts["full_math_checked_rows"]+=n
         # The mathematical reference is on CPU; validation_attention_calls=0.
         self.counts["validation_attention_calls"]+=0

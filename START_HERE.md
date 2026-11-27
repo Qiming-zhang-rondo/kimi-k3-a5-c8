@@ -1,12 +1,22 @@
-# 当前任务：只打包已有20轮复测原始结果，不重跑
+# 当前任务：先接自研hotwindow V4最新融合版，检查整体精度
 
-4ffc47c回报新版热窗50.31us/installed C4 80.99us，但只推送42行摘要，不能独立核对原始轮次和门禁。
-**现在不要重编、不要再跑NPU。** 从刚才实际--verify-comparison输出目录找到完整results.json，
-按 [experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md](experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md)
-最顶部命令，用新增stdlib工具导出32KiB文本分片+manifest，直接git add整个导出目录并推送。
-工具读取既有字节，保留全部controls/graph/post/20轮event+wall，并验证SHA可精确恢复。
-不能把手写fair_ab_20rounds.json传给工具；它会拒绝这种摘要。
-用户不需要再搬运日志；agent自主查上次命令/输出路径，无需新测量。
+用户已明确先接我们自己的MXFP4+BF16路线，DSL cache迁移暂不实施。
+按 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md) 一次执行：
+先在实际目标容器收集环境/预检格式，再自主完成隔离安装、真实模型smoke及原GLM评分。
+环境检查是同一任务的第一步，不再等待用户逐项转发版本信息。CANN9.3仍为既定目标；不擅自改运行中容器。
+PR199 head342680fb的写点/worker原文件和VA c09d3e20 hook签名已审阅，安装可用`--source-profile pr199`。
+
+## 接入内容与范围
+
+用户明确要求框架接入。按 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md)
+执行已有真实hook和新增`--single-pass-kernel kv_split4`：Q<=4走split4+设备归约，较大prefill明确走旧V4。
+复用已经成功的库，隔离VA/MXLLM源码安装；先检查实际checkpoint/缓存格式，再真实模型OFF/V4/KV-split三臂精度。
+当前仍是accuracy_eager接线验证，不能拿它测TPOT或宣称生产图/MTP/PD已支持。R64packed400与NoPE272不可混用。
+如实际模型格式不兼容，agent自主按任务收齐真实原生源合同并提交必要adapter，不让用户逐项搬文件。
+
+上一轮20轮完整原始数据仍需从既有文件打包：按
+[experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md](experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md)
+顶部CPU导出命令完成，禁止重跑来补已经存在的数据；这不是继续单算子摸高的前置。
 
 下面保留候选背景，不是本轮重新扫描指令。
 

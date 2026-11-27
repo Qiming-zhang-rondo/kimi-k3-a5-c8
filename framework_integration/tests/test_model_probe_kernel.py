@@ -16,7 +16,7 @@ class ModelProbeKernelTest(unittest.TestCase):
             enable_chunked_prefill=True,max_num_batched_tokens=128)
         common=dict(source_root=Path("/source"),library_dir=Path("/lib"),
                     diagnostics=Path("/results"),max_query_chunk=128)
-        for kernel in ("load_tile4","fast_pair","overlay"):
+        for kernel in ("load_tile4","fast_pair","overlay","kv_split4"):
             config=probe.engine_options(options,arm="single_pass",**common,
                 single_pass_kernel=kernel)["additional_config"]["sfa_recent128"]
             self.assertEqual(config["single_pass_kernel"],kernel)
@@ -27,6 +27,21 @@ class ModelProbeKernelTest(unittest.TestCase):
             config=probe.engine_options(options,arm=arm,**common)["additional_config"]["sfa_recent128"]
             self.assertNotIn("single_pass_kernel",config)
         self.assertNotIn("additional_config",options)
+
+    def test_split_kernel_is_explicit_and_stays_accuracy_only(self):
+        options=dict(model="actual/checkpoint",enforce_eager=True,max_num_seqs=1,
+            enable_prefix_caching=False,attention_config={"mla_kv_quant_mode":"mxfp4"},
+            enable_chunked_prefill=True,max_num_batched_tokens=128)
+        common=dict(source_root=Path("/source"),library_dir=Path("/lib"),
+            diagnostics=Path("/results"),max_query_chunk=128)
+        value=probe.engine_options(options,arm="single_pass",single_pass_kernel="kv_split4",**common)
+        config=value["additional_config"]["sfa_recent128"]
+        self.assertEqual(config["single_pass_kernel"],"kv_split4")
+        self.assertEqual(config["execution"],"accuracy_eager")
+        self.assertEqual(config["preprocess"],"preserve")
+        with self.assertRaises(ValueError):
+            probe.engine_options(dict(options,enforce_eager=False),arm="single_pass",
+                single_pass_kernel="kv_split4",**common)
 
 
 if __name__=="__main__":unittest.main()

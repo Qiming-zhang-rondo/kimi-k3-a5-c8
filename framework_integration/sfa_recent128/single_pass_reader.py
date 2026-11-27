@@ -1,8 +1,9 @@
-"""ABI1 one-attention reader for the explicit eager accuracy experiment.
+"""Standalone one-attention reader for the explicit eager accuracy experiment.
 
 Head padding, metadata copies and Python allocations are instrumentation, not
 a serving implementation. The candidate never calls a cold reader or an
-external softmax merge. Its caller owns the independent accuracy reference.
+external Python softmax merge. KV-split adds a second device reduction launch;
+its caller owns the independent accuracy reference.
 """
 from functools import lru_cache
 import importlib.util
@@ -39,12 +40,14 @@ class SinglePassReader:
         _require(math.isfinite(float(impl.scale)) and float(impl.scale)>0,"Invalid attention scale")
         self.impl,self.config=impl,config
         self.kernel_variant=getattr(config,"single_pass_kernel","overlay")
-        _require(self.kernel_variant in ("overlay","fast_pair","load_tile4"),
-            "single_pass_kernel must be overlay, fast_pair or load_tile4")
+        _require(self.kernel_variant in ("overlay","fast_pair","load_tile4","kv_split4"),
+            "single_pass_kernel must be overlay, fast_pair, load_tile4 or kv_split4")
         self.load_variant=4 if self.kernel_variant=="load_tile4" else 0
         self.actual_c_entry={"overlay":"QsfaSinglePassLaunch","fast_pair":"QsfaSinglePassLaunchFastPair",
-                             "load_tile4":"QsfaSinglePassLaunchLoadTile"}[self.kernel_variant]
-        self.device_entry="QsfaSinglePassLaunchLoadTile32" if self.load_variant else self.actual_c_entry
+                             "load_tile4":"QsfaSinglePassLaunchLoadTile",
+                             "kv_split4":"QsfaSinglePassLaunchKvSplit"}[self.kernel_variant]
+        self.device_entry=("qsfa_recent128_kv_split_attention" if self.kernel_variant=="kv_split4" else
+            "QsfaSinglePassLaunchLoadTile32" if self.load_variant else self.actual_c_entry)
         self.bridge=load_bridge(str(Path(config.source_root).expanduser().resolve()),
                                 str(Path(config.library_dir).expanduser().resolve()))
         actual=dict(self.bridge.configuration())
@@ -53,9 +56,14 @@ class SinglePassReader:
         if self.kernel_variant=="fast_pair":
             _require(actual.get("fast_pair_reader_available") is True,
                 "single_pass_kernel=fast_pair requires QsfaSinglePassLaunchFastPair; refusing overlay fallback")
-        if self.kernel_variant=="load_tile4":
+        if self.kernel_variant=="kv_split4":
+            _require(actual.get("kv_split_reader_available") is True and
+                actual.get("kv_split_abi_version")==2 and actual.get("kv_split_tiling_bytes")==112 and
+                callable(getattr(self.bridge,"prepare_kv_split",None)),
+                "single_pass_kernel=kv_split4 requires real KV-split exports, ABI2/112B and prepare_kv_split; refusing fallback")
+        if self.kernel_variant in ("load_tile4","kv_split4"):
             _require(actual.get("load_tile_reader_available") is True,
-                "single_pass_kernel=load_tile4 requires QsfaSinglePassLaunchLoadTile; refusing fallback")
+                "load_tile4 and kv_split4 prefill routing require QsfaSinglePassLaunchLoadTile; refusing fallback")
             variants=actual.get("load_tile_variants")
             geometry=variants.get(4,variants.get("4")) if isinstance(variants,dict) else None
             expected=dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=1)
@@ -66,18 +74,22 @@ class SinglePassReader:
         self._configuration=actual
         self.plans={}
         self.last_attention_calls=0
+        self.last_reduction_calls=0
         self.last_call_metadata={}
 
     def configuration(self):
         return dict(self._configuration,execution="accuracy_eager",performance_claim=False,
             kernel_variant=self.kernel_variant,entry=self.actual_c_entry,actual_c_entry=self.actual_c_entry,return_stats=False,
             load_variant=self.load_variant,device_entry=self.device_entry,
+            kv_split_query_limit=4 if self.kernel_variant=="kv_split4" else None,
+            prefill_kernel_variant="load_tile4" if self.kernel_variant=="kv_split4" else self.kernel_variant,
             format="C4 E2M1/E8M0 + BF16 RoPE64; original BF16 hot ring")
 
     def read(self,query_nope,q_rope,cold,topk,table,q_lengths,kv_lengths,
              hot_latent,hot_rope,tags,positions,capacity):
         import torch
         self.last_attention_calls=0
+        self.last_reduction_calls=0
         self.last_call_metadata={"status":"VALIDATING","performance_claim":False}
         q,heads,dim=query_nope.shape
         device=query_nope.device
@@ -123,12 +135,29 @@ class SinglePassReader:
         padded_table[:,:logical_pages].copy_(prefix.to(dtype=torch.int32))
         ql=q_lengths.to(dtype=torch.int32).contiguous()
         kl=kv_lengths.to(dtype=torch.int32).contiguous()
-        aic=max(count for count in (1,2,4,8,16) if count<=q and q%count==0)
+        executed=self.kernel_variant
+        dispatch_reason="requested_kernel"
+        if self.kernel_variant=="kv_split4":
+            executed="kv_split4" if q<=4 else "load_tile4"
+            dispatch_reason="q_le_4_kv_split4" if q<=4 else "q_gt_4_prefill_load_tile4"
+        split_count=4 if executed=="kv_split4" else 1
+        load_variant=4 if executed=="load_tile4" else 0
+        entry={"overlay":"QsfaSinglePassLaunch","fast_pair":"QsfaSinglePassLaunchFastPair",
+               "load_tile4":"QsfaSinglePassLaunchLoadTile","kv_split4":"QsfaSinglePassLaunchKvSplit"}[executed]
+        device_entry=("qsfa_recent128_kv_split_attention" if executed=="kv_split4" else
+                      "QsfaSinglePassLaunchLoadTile32" if load_variant else entry)
+        aic=q*split_count if executed=="kv_split4" else max(
+            count for count in (1,2,4,8,16) if count<=q and q%count==0)
         scale=float(self.impl.scale)
-        key=(q,physical_keys,capacity,scale,str(device))
+        key=(executed,q,physical_keys,capacity,scale,str(device))
         if key not in self.plans:
-            self.plans[key]=self.bridge.prepare(query_nope.new_empty((q,64,576)),
-                physical_keys,capacity,aic,scale,False)
+            template=query_nope.new_empty((q,64,576))
+            if executed=="kv_split4":
+                _require(physical_keys>=2048,"KV-split requires an original physical C4 pool of at least 2048 tokens")
+                self.plans[key]=self.bridge.prepare_kv_split(template,
+                    physical_keys,capacity,split_count,scale,False)
+            else:
+                self.plans[key]=self.bridge.prepare(template,physical_keys,capacity,aic,scale,False)
         plan=self.plans[key]
         common=(cold,topk.contiguous(),padded_table,ql,kl,
                 hot_latent,hot_rope,tags.contiguous(),positions.contiguous())
@@ -139,9 +168,12 @@ class SinglePassReader:
             merged=torch.zeros((q,64,576),device=device,dtype=torch.bfloat16)
             merged[:,:width,:512].copy_(query_nope[:,start:start+width])
             merged[:,:width,512:].copy_(q_rope[:,start:start+width])
-            if self.kernel_variant=="load_tile4":
+            if executed=="kv_split4":
+                state=plan.run(merged,*common,128)
+                self.last_reduction_calls+=1
+            elif executed=="load_tile4":
                 state=plan.run(merged,*common,128,False,False,False,False,4)
-            elif self.kernel_variant=="fast_pair":
+            elif executed=="fast_pair":
                 state=plan.run(merged,*common,128,False,False,True)
             else:
                 state=plan.run(merged,*common,128,False)
@@ -156,9 +188,13 @@ class SinglePassReader:
             physical_keys=physical_keys,logical_keys=logical_keys,ring_capacity=capacity,aic_count=aic,
             head_groups=self.last_attention_calls,candidate_attention_calls=self.last_attention_calls,
             head_padding_rows=padding,table_logical_columns_copied=logical_pages,
-            table_physical_columns=pages,topk_partitioned=False,external_merge_calls=0,
+            table_physical_columns=pages,topk_partitioned=executed=="kv_split4",external_merge_calls=0,
+            original_topk_unchanged=True,split_count=split_count,
+            device_reduction_calls=self.last_reduction_calls,
+            device_kernel_launches=self.last_attention_calls+self.last_reduction_calls,
             validation_attention_calls=0,performance_claim=False,
-            kernel_variant=self.kernel_variant,entry=self.actual_c_entry,actual_c_entry=self.actual_c_entry,return_stats=False,
-            load_variant=self.load_variant,device_entry=self.device_entry,
+            kernel_variant=self.kernel_variant,executed_kernel_variant=executed,dispatch_reason=dispatch_reason,
+            entry=entry,actual_c_entry=entry,return_stats=False,
+            load_variant=load_variant,device_entry=device_entry,
             logical_lengths_preserved=True,cold_cache_truncated=False)
         return result

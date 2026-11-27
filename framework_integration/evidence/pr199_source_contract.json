@@ -1,0 +1,32 @@
+{
+  "status": "SOURCE_INSPECTED_ENVIRONMENT_NOT_VERIFIED",
+  "observed_date": "2026-11-27",
+  "source": "read-only authenticated GitCode browser",
+  "pr_url": "https://gitcode.com/InferTurbo/mxllm/pull/199",
+  "observed_pr_state": "OPEN",
+  "target_branch": "v0.30.0",
+  "head_commit": "342680fb25208c85d5d084b4fae9d051f488abfb",
+  "pyproject_url": "https://gitcode.com/InferTurbo/mxllm/blob/342680fb25208c85d5d084b4fae9d051f488abfb/pyproject.toml",
+  "declared_dependencies_at_head": {
+    "vllm_version": "ced6857afa0ea7b2e3f0846a62e1394e90f15607",
+    "vllm_ascend_version": "c09d3e20b9c45c80b34ae3781440d90904a44023"
+  },
+  "reviewed_mxllm_original_sha256": {
+    "ascend_vllm/patch/worker/patch_sfa_v1_mxfp4.py": "8d9f93cdd1d374d0fcbc309c1a0047c5f9fc6cb068fda271f6ee07be26798c5c",
+    "ascend_vllm/patch/worker/__init__.py": "e388c47319c6029f8904140b16977558b00ec95faa00360a403b26085c00bf2d"
+  },
+  "reviewed_va_sfa_source": "https://github.com/vllm-project/vllm-ascend/blob/c09d3e20b9c45c80b34ae3781440d90904a44023/vllm_ascend/attention/sfa_v1.py",
+  "hook_signature_review": "exec_kv and _execute_sparse_flash_attention_process parameters match the current overlay; source/AST review only",
+  "installer_pr199_profile_host_check": "READY -> INSTALLED -> ALREADY_INSTALLED in a temporary checkout, no framework import or device launch",
+  "modified_files": [
+    "ascend_vllm/patch/worker/patch_sfa_v1_mxfp4.py",
+    "tests/patch/worker/test_patch_sfa_v1_mxfp4.py"
+  ],
+  "prolog_capture_preference": "callable cloud_ops_turbo.cloud_mla_prolog_v3 in-place path",
+  "fallback": "cloud_mla_prolog_v3_functional plus full-cache commit when in-place unavailable",
+  "cann_requirement_in_pr_diff": "NO_EXPLICIT_VERSION_CHANGE",
+  "user_selected_cann_target": "9.3 (exact installed release/build suffix to collect)",
+  "user_reason": "DSL attention operator",
+  "installed_stack_compatibility": "NOT_VERIFIED",
+  "dsl_or_recent128_added_by_this_pr": false
+}

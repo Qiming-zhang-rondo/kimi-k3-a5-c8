@@ -29,15 +29,31 @@ class Tensor:
 
 
 class Bridge:
-    def __init__(self):self.preparations=[];self.calls=[];self._single_pass_build_identity={"library_sha256":"fake"}
+    def __init__(self):
+        self.preparations=[];self.split_preparations=[];self.calls=[]
+        self.legacy_calls=[];self.split_calls=[]
+        self._single_pass_build_identity={"library_sha256":"fake"}
     def configuration(self):return {"abi_version":1,"buffers_bytes":120}
     def prepare(self,query,*args):
         self.preparations.append((query,args))
         bridge=self
+        output=Tensor(np.zeros((query.shape[0],64,512)),"bf16")
         class Plan:
             def run(self,*inputs):
                 bridge.calls.append(inputs)
-                output=Tensor(np.full((query.shape[0],64,512),len(bridge.calls)),"bf16")
+                bridge.legacy_calls.append(inputs)
+                output.data.fill(len(bridge.calls))
+                return output,None,None
+        return Plan()
+    def prepare_kv_split(self,query,*args):
+        self.split_preparations.append((query,args))
+        bridge=self
+        output=Tensor(np.zeros((query.shape[0],64,512)),"bf16")
+        class Plan:
+            def run(self,*inputs):
+                bridge.calls.append(inputs)
+                bridge.split_calls.append(inputs)
+                output.data.fill(len(bridge.calls))
                 return output,None,None
         return Plan()
 
@@ -63,6 +79,11 @@ class FrameworkSinglePassReaderTests(unittest.TestCase):
             Tensor(np.array([q],np.int32),"int32"),Tensor(np.array([1024],np.int32),"int32"),
             Tensor(np.zeros((2,128,1,512))),Tensor(np.zeros((2,128,1,64))),
             Tensor(np.full(capacity,-1,np.int64),"int64"),Tensor(np.arange(q,dtype=np.int64),"int64"),capacity]
+
+    def split_configuration(self):
+        return dict(abi_version=1,buffers_bytes=120,kv_split_reader_available=True,
+            kv_split_abi_version=2,kv_split_tiling_bytes=112,load_tile_reader_available=True,
+            load_tile_variants={4:dict(rows=32,input_stride_bytes=416,input_depth=2,output_depth=1)})
 
     def test_short_query_chunks_choose_only_supported_aic_divisors(self):
         reader=reader_module.SinglePassReader(self.config,self.impl)
@@ -168,6 +189,107 @@ class FrameworkSinglePassReaderTests(unittest.TestCase):
                 elif change=="packed_width":values[2]=Tensor(np.zeros((32,128,1,272)),"int8")
                 else:values[3]=Tensor(np.zeros((4,1,128),np.int32),"int32")
                 with self.assertRaises(RuntimeError):reader.read(*values)
+        self.assertEqual(self.bridge.calls,[])
+
+    def test_kv_split4_q1_q3_q4_use_real_split_factory_and_preserve_input_objects(self):
+        self.config.single_pass_kernel="kv_split4"
+        self.bridge.configuration=self.split_configuration
+        for q in (1,3,4):
+            with self.subTest(q=q):
+                reader=reader_module.SinglePassReader(self.config,self.impl)
+                values=self.inputs(q=q)
+                original_topk=values[3].data.copy()
+                original_cache=values[2].data.copy()
+                output=reader.read(*values)
+                self.assertEqual(output.shape,(q,8,512))
+                call=self.bridge.split_calls[-1]
+                self.assertIs(call[1],values[2])
+                self.assertIs(call[2],values[3])
+                self.assertEqual(call[10:],(128,))
+                np.testing.assert_array_equal(values[3].data,original_topk)
+                np.testing.assert_array_equal(values[2].data,original_cache)
+                template,args=self.bridge.split_preparations[-1]
+                self.assertEqual(template.shape,(q,64,576))
+                self.assertEqual(args,(4096,256,4,self.impl.scale,False))
+                metadata=reader.last_call_metadata
+                self.assertEqual(metadata["kernel_variant"],"kv_split4")
+                self.assertEqual(metadata["executed_kernel_variant"],"kv_split4")
+                self.assertEqual(metadata["entry"],"QsfaSinglePassLaunchKvSplit")
+                self.assertEqual(metadata["split_count"],4)
+                self.assertEqual(metadata["aic_count"],q*4)
+                self.assertEqual(reader.last_attention_calls,1)
+                self.assertEqual(reader.last_reduction_calls,1)
+                self.assertEqual(metadata["device_reduction_calls"],1)
+                self.assertTrue(metadata["topk_partitioned"])
+                self.assertTrue(metadata["original_topk_unchanged"])
+        self.assertEqual(self.bridge.preparations,[])
+        self.assertEqual(self.bridge.legacy_calls,[])
+
+    def test_kv_split4_q8_executes_load_tile4_without_false_split_metadata(self):
+        self.config.single_pass_kernel="kv_split4"
+        self.bridge.configuration=self.split_configuration
+        reader=reader_module.SinglePassReader(self.config,self.impl)
+        values=self.inputs(q=8)
+        reader.read(*values)
+        self.assertEqual(self.bridge.split_preparations,[])
+        self.assertEqual(self.bridge.split_calls,[])
+        self.assertEqual(len(self.bridge.preparations),1)
+        self.assertEqual(self.bridge.legacy_calls[0][-6:],(128,False,False,False,False,4))
+        self.assertIs(self.bridge.legacy_calls[0][1],values[2])
+        self.assertIs(self.bridge.legacy_calls[0][2],values[3])
+        metadata=reader.last_call_metadata
+        self.assertEqual(metadata["kernel_variant"],"kv_split4")
+        self.assertEqual(metadata["executed_kernel_variant"],"load_tile4")
+        self.assertEqual(metadata["entry"],"QsfaSinglePassLaunchLoadTile")
+        self.assertEqual(metadata["split_count"],1)
+        self.assertEqual(metadata["aic_count"],8)
+        self.assertEqual(reader.last_reduction_calls,0)
+        self.assertEqual(metadata["device_reduction_calls"],0)
+        self.assertFalse(metadata["topk_partitioned"])
+        self.assertTrue(metadata["original_topk_unchanged"])
+
+    def test_kv_split4_head65_has_two_attention_and_reductions_and_reuses_prepared_state(self):
+        self.config.single_pass_kernel="kv_split4"
+        self.bridge.configuration=self.split_configuration
+        reader=reader_module.SinglePassReader(self.config,self.impl)
+        values=self.inputs(heads=65,q=4)
+        output=reader.read(*values)
+        self.assertEqual(output.shape,(4,65,512))
+        np.testing.assert_array_equal(output.data[:,:64],1)
+        np.testing.assert_array_equal(output.data[:,64:],2)
+        self.assertEqual(reader.last_attention_calls,2)
+        self.assertEqual(reader.last_reduction_calls,2)
+        self.assertEqual(reader.last_call_metadata["device_reduction_calls"],2)
+        self.assertEqual(reader.last_call_metadata["head_groups"],2)
+        self.assertEqual(reader.last_call_metadata["head_padding_rows"],4*63)
+        reader.read(*values)
+        self.assertEqual(len(self.bridge.split_preparations),1)
+        self.assertEqual(len(self.bridge.split_calls),4)
+        self.assertEqual(reader.last_attention_calls,2)
+        self.assertEqual(reader.last_reduction_calls,2)
+        self.assertEqual(reader.last_call_metadata["device_reduction_calls"],2)
+        self.assertEqual(self.bridge.preparations,[])
+
+    def test_kv_split4_missing_exports_abi_or_geometry_fails_without_silent_fallback(self):
+        self.config.single_pass_kernel="kv_split4"
+        factory=self.bridge.prepare_kv_split
+        for defect in ("missing_flag","missing_abi","wrong_abi","wrong_tiling","noncallable_factory",
+                       "missing_load_export","wrong_load_geometry"):
+            with self.subTest(defect=defect):
+                configuration=self.split_configuration()
+                self.bridge.prepare_kv_split=factory
+                if defect=="missing_flag":configuration.pop("kv_split_reader_available")
+                elif defect=="missing_abi":configuration.pop("kv_split_abi_version")
+                elif defect=="wrong_abi":configuration["kv_split_abi_version"]=1
+                elif defect=="wrong_tiling":configuration["kv_split_tiling_bytes"]=104
+                elif defect=="noncallable_factory":self.bridge.prepare_kv_split=None
+                elif defect=="missing_load_export":configuration["load_tile_reader_available"]=False
+                elif defect=="wrong_load_geometry":configuration["load_tile_variants"][4]["rows"]=16
+                self.bridge.configuration=lambda configuration=configuration:configuration
+                with self.assertRaises(RuntimeError):
+                    reader_module.SinglePassReader(self.config,self.impl)
+        self.assertEqual(self.bridge.preparations,[])
+        self.assertEqual(self.bridge.split_preparations,[])
         self.assertEqual(self.bridge.calls,[])
 
 

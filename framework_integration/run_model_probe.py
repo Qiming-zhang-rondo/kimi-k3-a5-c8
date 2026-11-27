@@ -54,8 +54,8 @@ def engine_options(options, *, arm, source_root, library_dir, diagnostics, max_q
         source_root=str(source_root), library_dir=str(library_dir) if library_dir else None,
         diagnostics_path=str(diagnostics))
     if arm=="single_pass":
-        if single_pass_kernel not in ("overlay","fast_pair","load_tile4"):
-            raise ValueError("single_pass_kernel must be overlay, fast_pair or load_tile4")
+        if single_pass_kernel not in ("overlay","fast_pair","load_tile4","kv_split4"):
+            raise ValueError("single_pass_kernel must be overlay, fast_pair, load_tile4 or kv_split4")
         additional["sfa_recent128"]["single_pass_kernel"]=single_pass_kernel
     return value
 
@@ -70,8 +70,8 @@ def main():
     parser.add_argument("--operator-source", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--library-dir", type=Path)
     parser.add_argument("--arm", choices=("off", "native", "fused", "single_pass"), required=True)
-    parser.add_argument("--single-pass-kernel",choices=("overlay","fast_pair","load_tile4"),default="load_tile4",
-        help="Explicit one-attention entry; default load_tile4 requires its real export and verified rows32/stride416/I2/O1 geometry")
+    parser.add_argument("--single-pass-kernel",choices=("overlay","fast_pair","load_tile4","kv_split4"),default="load_tile4",
+        help="Explicit reader; kv_split4 uses split4+device reduction for Q<=4 and verified load_tile4 for larger prefill")
     parser.add_argument("--max-query-chunk", type=int, default=512)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--native-accuracy-preprocess", action="store_true",

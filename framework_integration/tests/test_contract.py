@@ -24,6 +24,15 @@ def config(**kwargs):
 
 
 class Recent128ContractTest(unittest.TestCase):
+    def test_split4_reader_option_retains_format_and_accuracy_guards(self):
+        value=parse_recent128_config({"sfa_recent128":dict(window=128,reader="single_pass",
+            single_pass_kernel="kv_split4",source_root="/source",library_dir="/lib",
+            diagnostics_path="/results")})
+        self.assertEqual(value.single_pass_kernel,"kv_split4")
+        self.assertEqual(value.execution,"accuracy_eager")
+        with self.assertRaises(ContractError):
+            Recent128Config(single_pass_kernel="kv_split4",execution="serving")
+
     def test_preprocess_default_preserved_and_explicit_off_on_native_accuracy(self):
         self.assertEqual(parse_recent128_config().preprocess, "preserve")
         off = parse_recent128_config({"sfa_recent128": dict(window=0, preprocess="native_accuracy")})
