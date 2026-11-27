@@ -1,24 +1,23 @@
-# 当前任务：Prolog热环仅在内网实施，不再外传源码
+# 当前任务：已找到Prolog KV写点，直接在内网实现热环producer
 
-用户已明确45个文件的批量外传不符合部门要求；之前源码采集/上传要求撤销。
-不要再上传剩余源码、私有头/schema/diff/二进制，也不将任何外传作为继续实现的条件。
-此前采集器不再作为本任务执行入口。所有私有实现、构建与原始测试证据均留内网；
-只回传部门允许披露的能力结论和脱敏结果，不允许外发的内容不回传。
+最新fac32bf36已从真实V3/mode4链定位到RmsNormAndQuantizeCkv中QuantPerTileMxFp4前的FP32 inputLocal。
+状态仅IDENTIFIED，尚未实现、未编译、未在NPU执行。用户已授权推进生产接入，内网agent不要再停在等待确认。
 
-最新42b0f78已提供5个关键文件，足够发现当前选择混入旧接口：Python为V3 wrapper，
-但所选ACLNN头/kernel入口是旧V1；DynamicQuantQnWithMulQr处理Qn/Qr，不是KV量化前写点。
-内网agent在本机追踪真实wrapper→binding→ACLNN→MXFP4 mode4→K/RMSNorm/RoPE写点，
-复用已有原BF16出口或在正确私有producer增加可选BF16热环写入。不要在Q量化或旧V1入口盲插，也不用继续向用户索要文件。
+外部已交付公共接口适配器framework_integration/sfa_recent128/prolog_provider.py及5项宿主测试。
+新约定入口cloud_ops_turbo.cloud_mla_prolog_v3_recent128与函数ABI标记1，原Prolog9位置参数/原kwargs/原5输出保留；
+ON增加固定地址BF16 ring与device slot/position/epoch/valid元数据，OFF透明直通。接口不存在就明确报错，不回退。
+这是外部框架侧接口代码，尚未挂入生产runtime；不宣称部门内核、B8或Graph已经完成。
 
-具体合同与内网实施/验收见 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)。
-保留原Prolog计算、原C4 packed字节、原地Graph cache更新、原query输出与indexer C4；
-不重复投影、不整cache复制、不强制NATIVE后宣称生产性能无回退。新变体在隔离目录构建，保留已验证产物与服务。
+内网agent现在按 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)
+直接实施真实V3的wrapper/绑定/新variant/tiling/kernel，内部源码保留内网。先原FP32源不变、侧路非alias BF16 RNE写环，
+用正确UB/MTE所有权同步；KR64另取post-RoPE。保持原C4 packed/scale字节、query输出、Prolog原地Graph更新与indexer C4不变。
+随后隔离构建，做OFF/ON逐字节控制、BF16参考、B8Q4/padding/重排/MTP和动态Graph毒化重放，再同轮测producer成本。
+禁止只给旧函数贴ABI标记；禁止删除guard放行不存在的BF16来源；不重复投影、不整cache复制、不强制NATIVE冒充生产接入。
 
-用户要求可支持的并发8、Graph、MTP、prefix、PD全部接入。外部Codex继续实现本项目自己的reader/请求映射/静态缓冲；
-Prolog私有实现由内网agent就地完成，接口按允许披露的合同对接。逐项真实验证后才能声称生产支持；当前仍未完成。
+不再收集或外传剩余40份源、私有头/schema/实现diff/二进制，之前的批量上传要求已撤销。
+只回传部门允许披露的实现/构建/数值/图重放/性能结果，不允许外发的内容不回传，不要求用户做源码中转。
 
-54076f89的17:24:36错误是在配置解析通过后、runtime构造Prolog检查处；不是候选kernel执行错误。
-旧配置问题见 [framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md](framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md)，
-当前字段已修正，不再来回改JSON。主KV和indexer均保持原MXFP4设置。
-
-不重启/修改现有服务、不升级CANN/vendor/wheel、不覆盖原成功库。新增真实激活重要性实验继续暂缓。
+producer完成后继续多请求reader寻址、静态Graph缓冲、MTP事务、prefix尾窗快照、PD尾窗传输与完成协议。
+并发8/Graph/MTP/prefix/PD是生产目标，当前未完成；主C4 cache布局和QLI路径保持不变。
+现有accuracy_eager adapter仍是受保护诊断原型，不删除其限制后假称生产全特性支持。
+不重启工作服务、不升级CANN/vendor/wheel、不覆盖成功产物。真实激活重要性实验继续暂缓。

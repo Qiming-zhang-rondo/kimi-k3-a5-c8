@@ -4,7 +4,51 @@
 不要继续上传剩余文件、内部头文件、实现diff、schema或二进制；不以任何外传材料作为继续实现的前提。
 原始代码、构建与测试证据均留内网。对外只回传部门允许披露的能力结论和脱敏测试结果；不允许外发的内容不回传。
 
-## 本轮已提供的关键材料结论
+## 本轮直接继续实现：fac32bf36已定位正确KV写点
+
+本任务不是继续搜集材料或等待确认。用户已授权推进生产能力；内网agent现在就地编码、构建并验证，内部源码不外发。
+fac32bf36报告的真实V3/mode4链已进入RmsNormRopeScatterCkvKr→RmsNormAndQuantizeCkv；
+量化前FP32 inputLocal可用。该提交仍是IDENTIFIED，明确未实现、未编译，不应写成生产已接通。
+
+写点语义是BF16_RNE(actual input to QuantPerTileMxFp4)，检查其kc_scale/clip/rotation等是否都已生效。
+KR64从真实post-RoPE输出另路捕获；不要把K和KR视为同一个inputLocal，也不要在reader重复scale。
+**禁止原地把FP32 inputLocal转换为BF16**。原量化继续读原FP32；侧路用不alias的BF16 scratch，
+复用前等对应MTE3读完成，按实际管线所有权放同步；独立buffer可与量化并行，不无条件加整流同步。
+多核分列时必须保证整行payload和tags的唯一写者/完成关系。
+
+## 外部接口已经写好，私有实现按此对接
+
+本项目的`sfa_recent128.prolog_provider`提供OFF透明直通、ON元数据校验和明确的能力检查；
+新公共Python入口约定为`cloud_ops_turbo.cloud_mla_prolog_v3_recent128`，这是**待内网实现的新接口**，不是声称旧包已有。
+新函数对象声明`recent128_abi_version=1`，不存在/不匹配时直接报错，不能回退NATIVE或拿反量化结果伪装。
+它接收原Prolog9个位置参数和原kwargs，新增以下明确sidecar参数；原参数与五个query输出不改变：
+
+| 参数 | 合同 |
+| --- | --- |
+| recent_latent | BF16 [P,C,512]，预分配请求池热环 |
+| recent_rope | BF16 [P,C,64]，同请求池/容量 |
+| recent_position_tags / recent_epoch_tags | INT64 [P,C] |
+| token_ring_slots | INT32 [T]，每token稳定请求池槽，不能是当前batch行或C4物理槽 |
+| token_positions / token_request_epochs | INT64 [T] |
+| token_valid | BOOL [T]，graph padding及无效slot禁止写入 |
+| max_query_per_request | 正整数静态容量界；C按128对齐且C>=128+该界-1 |
+| recent_window | 固定128 |
+
+T为token_x前导维的展平token数；所有sidecar与token_x同设备、连续，地址在图捕获前固定。
+GPU有效mask、slot、位置和epoch由框架step级准备，新producer按值执行掩码和边界检查，不能在图内CPU读取。
+当前Python接口适配器只验证shape/dtype/device等元数据，不调用.item/.cpu/.tolist，不分配替代张量。
+它还未挂进生产runtime，也不等于Graph或B8已通过；内网先实现并注册这个producer接口，随后对接生产元数据。
+
+按此公共合同在内网修改真实V3 wrapper/绑定/新op variant/tiling/kernel，旧入口保持原样。
+不要求上传这些私有改动。新wrapper可以在模块初始化时为函数设置ABI版本标记；
+内部注册名和调用方式在本地自洽，绝不能仅给旧函数贴标记而没有真实热环写入。
+
+先做producer独立控制：OFF与原Prolog原query输出和C4 packed/scale字节一致；ON仍保持C4字节一致，
+sidecar等于本次实际FP32量化输入的BF16_RNE。覆盖B1Q1/B1Q4/B8Q4、环回绕、padding、request重排和MTP暂存/提交。
+Graph捕获后修改token_x、位置、slot和有效mask并毒化sidecar，replay检查payload及tag真正更新。
+只测producer的B8通过不能被写成batched attention已支持；后续reader另有多请求寻址与任务调度工作。
+
+## 42b0f78阶段材料说明（已由fac32bf36的正确KV定位推进）
 
 42b0f78提供的5份关键文件已足够发现一次入口选错，无需再上传其余40份：
 
