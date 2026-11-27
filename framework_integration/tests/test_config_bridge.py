@@ -9,11 +9,12 @@ from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "sfa_recent128/config_bridge.py"
+sys.path.insert(0,str(SOURCE.parents[1]))
 
 
 class ConfigBridgeTests(unittest.TestCase):
     def setUp(self):
-        spec = importlib.util.spec_from_file_location("recent128_config_bridge_test", SOURCE)
+        spec = importlib.util.spec_from_file_location("sfa_recent128.config_bridge_test", SOURCE)
         self.bridge = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.bridge)
         self.seen = []
@@ -55,6 +56,15 @@ class ConfigBridgeTests(unittest.TestCase):
         self.module_patch = patch.dict(sys.modules, self.modules)
         self.module_patch.start()
         self.addCleanup(self.module_patch.stop)
+
+    def test_environment_only_request_fails_before_vendor_factory_runs(self):
+        config=types.SimpleNamespace(additional_config={})
+        self.bridge.install()
+        with patch.dict("os.environ",{"SFA_RECENT128_CONFIG":"caller-request"},clear=True):
+            with self.assertRaisesRegex(RuntimeError,"unsupported environment.*additional_config"):
+                self.factory_module.init_ascend_config(config)
+        self.assertEqual(self.seen,[])
+        self.assertEqual(config.additional_config,{})
 
     def test_success_hides_only_owned_key_and_restores_original_object(self):
         nested = {"enabled": True}

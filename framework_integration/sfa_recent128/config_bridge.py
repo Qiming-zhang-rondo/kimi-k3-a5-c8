@@ -11,6 +11,8 @@ import importlib
 import sys
 from types import ModuleType
 
+from .launch_guard import require_explicit_config
+
 
 CONFIG_KEY = "sfa_recent128"
 _MARKER = "_sfa_recent128_config_bridge"
@@ -51,6 +53,7 @@ def install():
     @wraps(original)
     def init_ascend_config(vllm_config, *args, **kwargs):
         additional = getattr(vllm_config, "additional_config", None)
+        require_explicit_config(additional)
         if not isinstance(additional, Mapping) or CONFIG_KEY not in additional:
             return original(vllm_config, *args, **kwargs)
         vllm_config.additional_config = {

@@ -7,6 +7,7 @@ MXFP4 quantization. A packed-cache copy is never used as high precision KV.
 from functools import wraps
 
 from .contract import parse_recent128_config
+from .launch_guard import require_explicit_config
 
 
 def capture_native_kv(impl, latent, rope):
@@ -33,6 +34,7 @@ def install():
     def init(impl, *args, **kwargs):
         original_init(impl, *args, **kwargs)
         config = getattr(impl, "vllm_config", None)
+        require_explicit_config(getattr(config,"additional_config",None))
         impl._recent128_config = parse_recent128_config(getattr(config, "additional_config", None))
         impl._recent128_runtime = None
 
