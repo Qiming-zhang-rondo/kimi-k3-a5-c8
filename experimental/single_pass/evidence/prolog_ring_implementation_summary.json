@@ -1,0 +1,60 @@
+{
+  "date": "2026-11-27 20:10",
+  "status": "IMPLEMENTATION_LOCAL_COMPLETE",
+  "description": "BF16 ring producer implemented locally in isolated directory. Awaiting Codex review of approach.",
+
+  "kernel_class_modification": {
+    "file": "kernel_cloud_mla_prolog_split_n_arch35.h (private, not uploaded)",
+    "changes": [
+      "1. Added member variables: recent128LatentRingGm_ (bfloat16_t*), recent128RingSlotsGm_ (int32_t*), recent128RingCapacity_ (int64_t*), recent128RingEnabled_ (bool)",
+      "2. Added SetRecent128Ring(latentRing, ringSlots, ringCapacity) method - sets GM pointers and enables ring",
+      "3. Added ring write code in RmsNormAndQuantizeCkv between RmsNormNormal and QuantPerTileMxFp4: reads ringSlot from recent128RingSlotsGm_(tokenIndex), if slot>=0: Cast FP32->BF16 to sharedBuf scratch, DataCopy 512 BF16 to recent128LatentRingGm_[ringSlot%capacity * 512]",
+      "4. Cast API used: Cast(bf16Local, inputLocal, RoundMode::CAST_RINT, kvElemCount, 1, {1, 1, 8, 4})",
+      "5. Ring capacity read from device: recent128RingCapacity_.GetValue(0) then ringSlot % capacity"
+    ],
+    "write_point": "Between RmsNormNormal() + DataSyncBarrier and QuantPerTileMxFp4() in RmsNormAndQuantizeCkv",
+    "data_flow": "RmsNormNormal outputs FP32 to inputLocal (UB) -> [RING WRITE: Cast to BF16, DataCopy to ring GM] -> QuantPerTileMxFp4 consumes inputLocal (unchanged) -> ScatterCkv"
+  },
+
+  "kernel_entry_modification": {
+    "file": "cloud_mla_prolog_v3_recent128.cpp (new, based on V3 entry)",
+    "changes": [
+      "1. Renamed kernel function: cloud_mla_prolog_v3 -> cloud_mla_prolog_v3_recent128",
+      "2. Added 3 params before workspace: __gm__ uint8_t *recent128LatentRing, __gm__ uint8_t *recent128RingSlots, __gm__ uint8_t *recent128RingCapacity",
+      "3. Before all 21 op.Process() calls: op.SetRecent128Ring(reinterpret_cast<__gm__ bfloat16_t*>(recent128LatentRing), reinterpret_cast<__gm__ int32_t*>(recent128RingSlots), reinterpret_cast<__gm__ int64_t*>(recent128RingCapacity))",
+      "4. Fixed includes: ../cloud_mla_prolog/arch35/... -> arch35/... (local paths)"
+    ]
+  },
+
+  "other_kernel_classes": {
+    "changes": "Added no-op SetRecent128Ring to CloudMlaPrologV3SplitM and arch22 CloudMlaPrologVecS1CubS2 for compilation compatibility"
+  },
+
+  "new_files_created": {
+    "op_proto": "cloud_mla_prolog_v3_recent128_proto.h - V3 proto + 3 optional ring inputs + recent_window attr",
+    "tbe_script": "dynamic_cloud_mla_prolog_v3_recent128.py - V3 TBE + ring inputs + BUILD_KERNEL_SRC override",
+    "python_wrapper": "cloud_mla_prolog_v3_recent128_wrapper.py - recent128_abi_version=1, OFF passthrough to V3, ON calls new operator"
+  },
+
+  "implementation_notes": {
+    "abi_compliance": "Wrapper has recent128_abi_version = 1 as required by prolog_provider.py",
+    "off_mode": "When recent_latent is None, wrapper falls through to original cloud_ops_turbo_lib.cloud_mla_prolog (exact V3 behavior)",
+    "on_mode": "When ring provided, kernel additionally writes BF16 pre-quant KV to ring. Original C4 quantization unchanged.",
+    "first_version_limitations": "Single pool (P=1) only. Ring slot computed as ringSlot % capacity. Rope ring and position/epoch tags not yet written (only latent ring). max_query_per_request not used in kernel yet."
+  },
+
+  "compilation_status": {
+    "kernel_source_installed": "YES - /usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog_recent128/",
+    "tbe_script_install": "PENDING - dynamic/ directory write permission issue",
+    "op_proto_install": "PENDING",
+    "compile_attempt": "NOT YET"
+  },
+
+  "questions_for_codex": [
+    "1. Is the Cast API signature correct: Cast(bf16Local, inputLocal, RoundMode::CAST_RINT, 512, 1, {1, 1, 8, 4})?",
+    "2. Is reading ring capacity from device memory (recent128RingCapacity_.GetValue(0)) acceptable, or should it be a compile-time constant?",
+    "3. Should the ring write happen per-token (current: inside RmsNormAndQuantizeCkv which processes one token) or batched?",
+    "4. The TBE script installation failed (dynamic/ directory issue). Is there a way to compile without installing to the TBE directory?",
+    "5. For first version, is single-pool ring acceptable, or is multi-pool (per-request) required from the start?"
+  ]
+}
