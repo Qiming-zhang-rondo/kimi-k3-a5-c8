@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-27 19:45",
+  "status": "BF16_WRITE_POINT_IDENTIFIED",
+  "description": "Traced real PROLOG_V3 mode4 path in production container. Found exact location where pre-quantization FP32/BF16 KV exists in UB before MXFP4 quantization.",
+
+  "call_chain": {
+    "python_wrapper": "cloud_ops_turbo/cloud_mla_prolog_v3.py -> cloud_ops_turbo_lib.cloud_mla_prolog()",
+    "kernel_entry": "cloud_mla_prolog_v3/cloud_mla_prolog_v3.cpp (MLA_PROLOG_VERSION=3, uses arch35 on 950)",
+    "main_kernel": "cloud_mla_prolog/arch35/kernel_cloud_mla_prolog_split_n_arch35.h (139KB, shared with V1/V2/V3)",
+    "kv_function": "RmsNormRopeScatterCkvKr() -> RmsNormAndQuantizeCkv() -> ScatterCkv()"
+  },
+
+  "bf16_write_point": {
+    "file": "kernel_cloud_mla_prolog_split_n_arch35.h",
+    "function": "CloudMlaPrologVecS1CubS2<MLAPT>::RmsNormAndQuantizeCkv",
+    "line": "~1624-1660",
+    "exact_location": "Between RmsNormNormal() call and QuantPerTileMxFp4() call",
+    "code_flow": [
+      "1. RmsNormNormal<...>(inputLocal, mmCkvKrResGm_[...], rmsnormGammaCkvLocal_, ...) — writes FP32 RMSNorm output to inputLocal (UB)",
+      "2. DataSyncBarrier<MemDsbT::UB>()",
+      "3. if constexpr (isPertile) { QuantPerTileMxFp4(outputLocal, inputLocal, sharedBuf, perTileQuantParams) } — consumes inputLocal, produces MXFP4 packed bytes"
+    ],
+    "capture_point": "inputLocal contains FP32 RMSNorm output AFTER RmsNormNormal, BEFORE QuantPerTileMxFp4. This is the pre-quantization KV latent.",
+    "proposed_modification": "Add if constexpr (ENABLE_BF16_RING) block between RmsNormNormal and QuantPerTileMxFp4: cast FP32 to BF16 RNE, write to pre-allocated BF16 ring buffer indexed by logical position + request epoch"
+  },
+
+  "pipeline_full": {
+    "kv_path": "KV projection (matmul, mmCkvKrResGm_) -> RmsNormNormal -> [BF16 CAPTURE POINT] -> QuantPerTileMxFp4 -> ScatterCache -> kv_cache (packed400 MXFP4)",
+    "kr_path": "RoPE applied to kr part separately -> quant -> ScatterCache -> kr_cache"
+  },
+
+  "key_types": {
+    "kvCacheType": "uint8_t (byte view) when FP4, original type otherwise",
+    "inputLocal": "LocalTensor<float> (FP32 RMSNorm output in UB)",
+    "outputLocal": "LocalTensor<kvCacheType> (MXFP4 packed bytes)",
+    "tileSize": "128 (baseParams_->tileSize)",
+    "headSizeCkv": "512 fp4 elements = 256 bytes (baseParams_->headSizeCkv / 2)"
+  },
+
+  "rope_note": "RoPE is applied to the kr (rope) part, NOT the main ckv path. The main ckv BF16 capture point is after RMSNorm, before quant. The kr capture would be after RoPE, before quant (separate function).",
+
+  "next_step": "AWAITING_INSTRUCTIONS - Do not compile yet. User wants to wait for next step from external Codex review before implementing BF16 ring write."
+}
