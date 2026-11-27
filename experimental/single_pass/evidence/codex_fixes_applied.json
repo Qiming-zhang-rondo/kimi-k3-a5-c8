@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-27 20:25",
+  "status": "FIXES_APPLIED_NOT_COMPILED",
+  "reference": "Codex review a27efba",
+  "fixes_applied": [
+    {
+      "id": 1,
+      "issue": "Cast used mask/repeat overload (6 params) instead of count overload",
+      "fix": "Changed to: Cast(bf16Local, inputLocal, RoundMode::CAST_RINT, kvElemCount) — 4-param count overload",
+      "status": "APPLIED"
+    },
+    {
+      "id": 2,
+      "issue": "Ring addressing conflated bank and position",
+      "fix": "Separate addressing: bank = token_ring_slots[token] (request pool), position = token_positions[token] (logical), row = bank * capacity + position % capacity",
+      "status": "APPLIED"
+    },
+    {
+      "id": 3,
+      "issue": "Missing ABI1 fields: rope ring, position tags, epoch tags",
+      "fix": "Added all ABI1 fields: recent128RopeRingGm_, recent128PositionTagsGm_, recent128EpochTagsGm_, recent128PositionsGm_, recent128EpochsGm_, recent128ValidGm_",
+      "status": "APPLIED"
+    },
+    {
+      "id": 4,
+      "issue": "token_valid not checked (padding would write)",
+      "fix": "Added check: if (tokenValid && bank >= 0 && bank < recent128PoolCount_ && position >= 0)",
+      "status": "APPLIED"
+    },
+    {
+      "id": 5,
+      "issue": "Capacity read from device GM per token",
+      "fix": "Changed to static capacity from tiling: recent128RingCapacityStatic_ (set once in SetRecent128Ring, not per-token GM read)",
+      "status": "APPLIED"
+    },
+    {
+      "id": 6,
+      "issue": "BF16 scratch might overlap with FP32 inputLocal or MXFP4 quant scratch",
+      "fix": "Note: still using sharedBuf for BF16 cast scratch (marked as TODO for separate buffer). Current implementation adds PipeBarrier<PIPE_V>() after Cast before DataCopy.",
+      "status": "PARTIALLY_APPLIED"
+    }
+  ],
+  "kernel_entry_changes": {
+    "signature": "8 ring buffer params + 2 scalars (ringCapacity, poolCount) added before workspace",
+    "setter_calls": "All 21 SetRecent128Ring calls updated to 10-param signature"
+  },
+  "no_op_setters": "SplitM and arch22 no-op SetRecent128Ring updated to match 10-param signature (compilation compatibility)",
+  "sync_status": {
+    "178_D_node": "TBE directory updated, MD5: bd1e9ab3fb0532141b1d222a4dc9d49d",
+    "209_P_node": "TBE directory updated, MD5: bd1e9ab3fb0532141b1d222a4dc9d49d (identical)"
+  },
+  "compilation": "NOT_YET_ATTEMPTED (per user instruction, waiting for next Codex feedback)",
+  "remaining_known_issues": [
+    "BF16 scratch uses sharedBuf (needs independent buffer per Codex review point 6)",
+    "SplitM/arch22 ON mode will silently no-op (must reject in host binding per Codex)",
+    "Python wrapper and TBE script not yet updated for 10-param SetRecent128Ring"
+  ]
+}
