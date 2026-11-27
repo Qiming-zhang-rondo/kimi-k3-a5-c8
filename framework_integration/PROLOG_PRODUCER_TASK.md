@@ -1,8 +1,8 @@
 # Prolog热环：仅在内网实施，不再上传内部源码
 
-最新5e7067f0仅完成未编译的latent三输入smoke原型，尚未满足完整ABI1。
-内网agent现在先按[PROLOG_REVIEW_5E7067F0.md](PROLOG_REVIEW_5E7067F0.md)
-修正Cast重载、bank/逻辑位置寻址、scratch同步，并补齐KR/tags/valid及多pool；不要把当前版本接入生产服务。
+最新192946ea已在源中修正Cast、寻址、valid和容量，但仍未编译。
+内网agent按[PROLOG_REVIEW_5E7067F0.md](PROLOG_REVIEW_5E7067F0.md)顶部最新审查，
+一次补齐scratch跨流水依赖、全链参数合同和未实现分支拒绝，然后直接隔离编译/验证；已修项不反复改。
 
 用户已明确：45个文件的批量外传不符合部门要求。之前的源码采集/上传要求撤销。
 不要继续上传剩余文件、内部头文件、实现diff、schema或二进制；不以任何外传材料作为继续实现的前提。

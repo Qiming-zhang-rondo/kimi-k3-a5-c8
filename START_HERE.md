@@ -1,24 +1,24 @@
-# 当前任务：立即修正producer原型，编译验证后再启热环
+# 当前立即执行：补齐三项后直接编译producer，别再停在摘要
 
-用户希望尽快拉起一次真实热环服务。最新5e7067f0只有未编译实现摘要，尚无设备结果。
-先按 [framework_integration/PROLOG_REVIEW_5E7067F0.md](framework_integration/PROLOG_REVIEW_5E7067F0.md)
-直接修正，不再等待确认，也不再向用户索要内部源文件。
+192946ea已在本地源修正四参Cast、bank*C+position%C、valid谓词和静态容量，这些方向接受，不再反复改。
+当前仍未编译；立即按 [framework_integration/PROLOG_REVIEW_5E7067F0.md](framework_integration/PROLOG_REVIEW_5E7067F0.md)
+顶部192946ea审查直接完成以下步骤。在没有内网用户明确暂停指令时，不要以等待Codex反馈为由停住。
 
-两个首要错误：六参Cast把512当mask而非总元素数，改四参计数形式；token_ring_slots是请求bank，
-地址必须bank*C+token_positions%C，不能ringSlot%C。公共CPU参考producer_reference.py及3项测试已交付，
-可用于校验本地NPU输出预期，绝不放进Graph执行路径。
+1. 修scratch依赖：PIPE_V不覆盖V→MTE3或DMA结束前的scratch复用；用独立区域/正确事件完成所有权闭环。
+2. 一次对齐新variant全链：Python、注册/C++ binding、proto、TBE、tiling和kernel入口。8GM+2scalar不能沿旧3参数ABI launch，
+   容量/池大小走明确静态合同，workspace/tiling位置逐项核对。
+3. ON在host binding/tiling拒绝未实现SplitM/arch22分支；所选A5 mode4真实写latent、post-RoPE KR和position/epoch tags。
+4. 立刻隔离编译。编译首错由内网agent按当前SDK/已有源自行修，不再只推实现摘要；有真实外部阻断才按允许范围反馈。
+5. 最小B1单token/512全元素/回绕数值：C4 packed和scale逐字节不变、BF16等于prequant RNE。
+6. 再B8Q4/padding/reorder、动态Graph毒化重放；通过才测producer成本，再推进模型生产接线。
 
-当前3输入latent-only/P1原型缺KR、position/epoch tags、token_positions/epochs、valid mask与多pool，
-不能标成完整ABI1或接并发8生产。按原prolog_provider接口补齐，未支持的SplitM/arch22分支须host在launch前拒绝，
-不要用no-op假装成功。保持原FP32量化输入不变，BF16 scratch非alias且MTE3读结束后才可复用。
+半小时目标优先拿到真实BUILD_PASS及最小DEVICE_VALIDATED，不能承诺完整生产服务已就绪。
+producer编好不自动解决现reader B1寻址/accuracy_eager与PD生命周期；不能删guard或关热环当作接入完成。
 
-执行顺序：修Cast/寻址与scratch依赖→隔离编译单token/回绕smoke→补齐完整ABI1与B8/padding/MTP/Graph动态重放→
-原C4字节/scale逐字节一致与BF16 golden通过→再接生产reader/生命周期并验证真实热环调用。
-B1 smoke只证明底层局部，不是完整服务；不得以关闭热环或禁用原生产特性冒充接入成功。
+公共接口和全部本地实施要求见 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)。
+不重启工作服务、不升级环境、不继续写系统vendor；使用独立候选工程/作用域，原成功产物保留。
+内部源/diff/头/schema/二进制留内网，只回传允许的实际构建首错或数值/图测试结果，不要求更多源码上传。
 
-后续实现细节和公共接口见 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)。
-保留Prolog原地写cache、主C4布局、量化参数、indexer C4。不要chmod/sudo继续改工作vendor；使用隔离candidate工程/OPP作用域，
-现有已写入的candidate源先留档，不擅自删除或覆盖工作产物。
-
-内部源、diff、头/schema和二进制留内网；只回传部门允许披露的构建/数值/图/性能结论。
-不要求剩余40个文件，不开展暂缓的真实激活分析，不重测已成功的SFA tile扫描。
+P/D共享producer代码，但ring=None原样走原Prolog。P至少准备prompt尾窗给D，P自己的attention不必改热窗；
+D每步更新新token/draft。两个节点源码MD5相同不等于编译/运行已生效，PD仍须传BF16尾窗并等待完成。
+indexer C4与主C4布局/量化参数都保持原样。已暂缓的激活重要性实验和SFA tile扫描本轮不执行。
