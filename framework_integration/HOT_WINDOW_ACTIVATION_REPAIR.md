@@ -1,5 +1,37 @@
 # 5b16195：环境变量没有接到算子配置
 
+## 最新c0a62e7：hook已进入，键名写错
+
+实际错误只列`kernel`。正确键是`single_pass_kernel`；`reader/source_root/library_dir`已支持，
+不要根据人工摘要去重写dataclass。缺失的`diagnostics_path`也须补齐。
+当前已增加精确提示，并按该原始配置复现了“键名错误→缺诊断路径→成功解析”的宿主检查。
+
+不要继续手写启动JSON。直接用下文`run_model_probe.py`，它自动生成正确键和诊断路径；
+另传`--operator-source "$QSFA_OPERATOR_SOURCE"`，该变量指**本算子仓根目录**，包含
+`experimental/single_pass/load_single_pass.py`与`host_contract.py`。
+`--mxllm-root`才指MXLLM overlay checkout；两者不能混为一个目录。
+`--library-dir`指已经成功的`libqsfa_recent128_direct.so`所在目录。
+
+完整的sfa_recent128对象应为（路径由agent填现场真实值，并合并到已有additional_config，不覆盖indexer配置）：
+
+```json
+{
+  "window": 128,
+  "execution": "accuracy_eager",
+  "preprocess": "preserve",
+  "max_query_chunk": 512,
+  "reader": "single_pass",
+  "single_pass_kernel": "kv_split4",
+  "source_root": "/actual/operator-repository",
+  "library_dir": "/tmp/qsfa-kv-split-build",
+  "diagnostics_path": "/actual/new-run/layers"
+}
+```
+
+用户已确认现有additional_config的indexer KV dtype为mxfp4；原样保留，OFF/ON均保持indexer C4。
+新宿主检查明确验证：probe只新增/替换自身sfa_recent128键，其它indexer/vendor键和值不变。
+原报告“只支持四个字段”“reader等也被拒绝”与实际错误不符，不能继续作为修复依据。
+
 本次提交只有`hot_window_not_loaded.json`，没有真实worker配置、hook、库身份与候选调用计数。
 启动器只新增PYTHONPATH、SFA_RECENT128_CONFIG、SFA_RECENT128_LIB_DIR。当前代码没有读取后两个变量；
 它们不是有效启用方式。配置入口是实际VllmConfig.additional_config.sfa_recent128，缺失时window=0。
@@ -23,6 +55,7 @@ env -u SFA_RECENT128_CONFIG -u SFA_RECENT128_LIB_DIR \
   --engine-json "$QSFA_MODEL_OUTPUT/engine.json" \
   --prompts-jsonl "$QSFA_MODEL_OUTPUT/prompts.jsonl" \
   --mxllm-root "$MXLLM_EXPERIMENT_ROOT" \
+  --operator-source "$QSFA_OPERATOR_SOURCE" \
   --library-dir "$QSFA_KV_SPLIT_LIBRARY_DIR" \
   --arm single_pass --single-pass-kernel kv_split4 \
   --output "$QSFA_MODEL_OUTPUT/activation_check_split4"

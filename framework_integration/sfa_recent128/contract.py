@@ -84,7 +84,8 @@ def parse_recent128_config(additional_config=None):
     allowed = {"window", "execution", "preprocess", "max_query_chunk", "reader", "library_dir", "source_root", "diagnostics_path", "single_pass_kernel"}
     unknown = sorted(set(raw)-allowed)
     if unknown:
-        raise ContractError("Unsupported recent128 options; baseline quantization cannot be changed: " + ", ".join(unknown))
+        hint=" Use single_pass_kernel='kv_split4' instead of kernel; reader/source_root/library_dir are already supported." if "kernel" in unknown else ""
+        raise ContractError("Unsupported recent128 options; baseline quantization cannot be changed: " + ", ".join(unknown)+hint)
     return Recent128Config(**raw)
 
 

@@ -10,6 +10,20 @@ spec.loader.exec_module(probe)
 
 
 class ModelProbeKernelTest(unittest.TestCase):
+    def test_recent128_selection_preserves_existing_indexer_mxfp4_config(self):
+        additional={"indexer_kv_dtype":"mxfp4","vendor_options":{"retain":True}}
+        options=dict(model="actual/checkpoint",enforce_eager=True,max_num_seqs=1,
+            enable_prefix_caching=False,attention_config={"mla_kv_quant_mode":"mxfp4"},
+            enable_chunked_prefill=True,max_num_batched_tokens=128,additional_config=additional)
+        for arm in ("off","single_pass"):
+            value=probe.engine_options(options,arm=arm,source_root=Path("/operator-source"),
+                library_dir=Path("/verified-lib"),diagnostics=Path("/experiment/layers"),
+                max_query_chunk=128,single_pass_kernel="kv_split4")
+            self.assertEqual(value["additional_config"]["indexer_kv_dtype"],"mxfp4")
+            self.assertEqual(value["additional_config"]["vendor_options"],{"retain":True})
+            self.assertEqual(value["additional_config"]["sfa_recent128"]["window"],0 if arm=="off" else 128)
+        self.assertEqual(additional,{"indexer_kv_dtype":"mxfp4","vendor_options":{"retain":True}})
+
     def test_single_pass_defaults_load_tile4_and_other_arms_keep_configuration(self):
         options=dict(model="actual/checkpoint",enforce_eager=True,max_num_seqs=1,
             enable_prefix_caching=False,attention_config={"mla_kv_quant_mode":"mxfp4"},

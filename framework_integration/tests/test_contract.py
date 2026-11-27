@@ -24,6 +24,20 @@ def config(**kwargs):
 
 
 class Recent128ContractTest(unittest.TestCase):
+    def test_reported_kernel_typo_is_not_a_missing_schema_feature(self):
+        raw=dict(window=128,reader="single_pass",kernel="kv_split4",
+            source_root="/operator-source",library_dir="/verified-lib")
+        with self.assertRaisesRegex(ContractError,"kernel.*Use single_pass_kernel"):
+            parse_recent128_config({"sfa_recent128":raw})
+        fixed=dict(raw)
+        fixed["single_pass_kernel"]=fixed.pop("kernel")
+        with self.assertRaisesRegex(ContractError,"requires diagnostics_path"):
+            parse_recent128_config({"sfa_recent128":fixed})
+        fixed["diagnostics_path"]="/experiment/diagnostics"
+        actual=parse_recent128_config({"sfa_recent128":fixed})
+        self.assertEqual((actual.reader,actual.single_pass_kernel),("single_pass","kv_split4"))
+        self.assertEqual(raw["kernel"],"kv_split4")
+
     def test_split4_reader_option_retains_format_and_accuracy_guards(self):
         value=parse_recent128_config({"sfa_recent128":dict(window=128,reader="single_pass",
             single_pass_kernel="kv_split4",source_root="/source",library_dir="/lib",
