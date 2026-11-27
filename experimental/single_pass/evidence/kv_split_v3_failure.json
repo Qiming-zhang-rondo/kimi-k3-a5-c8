@@ -1,0 +1,16 @@
+{
+  "status": "CONTROL_FAILED",
+  "commit_tested": "2b96044",
+  "finding": "Base V4 passes (L2=0.0019) but ALL KV-split variants fail (L2=1.0-1.2)",
+  "results": {
+    "w0_v4_baseline": "PASS L2=0.0019",
+    "w128_v4_baseline": "PASS L2=0.0019",
+    "w0_split1": "FAIL L2=1.16",
+    "w0_split2": "FAIL L2=1.13",
+    "w0_split4": "FAIL L2=1.01",
+    "w128_split1": "FAIL L2=1.14",
+    "w128_split4": "FAIL L2=1.00"
+  },
+  "diagnosis": "L2 ~ 1.0 for all splits means output is completely wrong, not precision issue. Kernel likely reading wrong memory or pointer offsets incorrect in ABI2/112B tiling.",
+  "note": "DMA stats fix from 2b96044 did NOT resolve. Same L2 pattern as before. Need deeper investigation of KV-split kernel entry point, tiling POD, and partial output layout."
+}
