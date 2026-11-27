@@ -1,0 +1,790 @@
+{
+  "version": "mla-prolog-source-collection-v1",
+  "captured_at_utc": "2026-11-27T11:20:08.476416+00:00",
+  "scope": "read-only named-source scan; no framework imports, NPU execution or service changes",
+  "filename_filter": "case-insensitive filename or component directory containing mla_prolog",
+  "roots": [
+    "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cloud_ops_turbo",
+    "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include",
+    "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog"
+  ],
+  "source_suffixes": [
+    ".asc",
+    ".c",
+    ".cc",
+    ".cce",
+    ".cmake",
+    ".cpp",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".py",
+    ".sh"
+  ],
+  "exclusions": "hidden entries, node_modules/proc/sys/dev directories, all symlinks and output tree",
+  "budgets": {
+    "max_walk_files": 20000,
+    "max_walk_entries": 80000,
+    "max_source_bytes": 67108864,
+    "max_matches": 256,
+    "max_binary_hash_bytes": 268435456,
+    "part_bytes_limit": 32768
+  },
+  "sources": [
+    {
+      "source_path": "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cloud_ops_turbo/cloud_mla_prolog_v3.py",
+      "root_index": 0,
+      "relative_path": "cloud_mla_prolog_v3.py",
+      "suffix": ".py",
+      "kind": "source",
+      "source_kind": "py",
+      "bytes": 6716,
+      "sha256": "d859f3b5cd3d2b7ef4961a6b9353f088039acb05d900219b1ebf4e979cc09725",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0000_cloud_mla_prolog_v3.py",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnn_cloud_mla_prolog_v4_weight_nz.h",
+      "root_index": 1,
+      "relative_path": "aclnn_cloud_mla_prolog_v4_weight_nz.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 7550,
+      "sha256": "90cd9c96fb6fc545e193f657c1a39e82f9261dbfa443b4e810644d4f13bf1919",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0001_aclnn_cloud_mla_prolog_v4_weight_nz.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnn_cloud_mla_prolog.h",
+      "root_index": 1,
+      "relative_path": "aclnn_cloud_mla_prolog.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3490,
+      "sha256": "1625d56ecb0e348a64f315c7d48279ae4e09b818a4b79b71f0f69d5247e1e5df",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0002_aclnn_cloud_mla_prolog.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnn_cloud_mla_prolog_v2_weight_nz.h",
+      "root_index": 1,
+      "relative_path": "aclnn_cloud_mla_prolog_v2_weight_nz.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3460,
+      "sha256": "e6fad3ad86eeaf2e42fb7c3e21f8cc05fb9be37bde221c4e43345ac4e8020f63",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0003_aclnn_cloud_mla_prolog_v2_weight_nz.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnn_cloud_mla_prolog_v3_weight_nz.h",
+      "root_index": 1,
+      "relative_path": "aclnn_cloud_mla_prolog_v3_weight_nz.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 2875,
+      "sha256": "4ee8f6dea758edead6897c8ee4565b793cf55da32555da5cd33586014a284578",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0004_aclnn_cloud_mla_prolog_v3_weight_nz.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnnop/aclnn_cloud_mla_prolog_v4_weight_nz.h",
+      "root_index": 1,
+      "relative_path": "aclnnop/aclnn_cloud_mla_prolog_v4_weight_nz.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 7550,
+      "sha256": "90cd9c96fb6fc545e193f657c1a39e82f9261dbfa443b4e810644d4f13bf1919",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0005_aclnn_cloud_mla_prolog_v4_weight_nz.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnnop/aclnn_cloud_mla_prolog.h",
+      "root_index": 1,
+      "relative_path": "aclnnop/aclnn_cloud_mla_prolog.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3490,
+      "sha256": "1625d56ecb0e348a64f315c7d48279ae4e09b818a4b79b71f0f69d5247e1e5df",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0006_aclnn_cloud_mla_prolog.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnnop/aclnn_cloud_mla_prolog_v2_weight_nz.h",
+      "root_index": 1,
+      "relative_path": "aclnnop/aclnn_cloud_mla_prolog_v2_weight_nz.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3460,
+      "sha256": "e6fad3ad86eeaf2e42fb7c3e21f8cc05fb9be37bde221c4e43345ac4e8020f63",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0007_aclnn_cloud_mla_prolog_v2_weight_nz.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_api/include/aclnnop/aclnn_cloud_mla_prolog_v3_weight_nz.h",
+      "root_index": 1,
+      "relative_path": "aclnnop/aclnn_cloud_mla_prolog_v3_weight_nz.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 2875,
+      "sha256": "4ee8f6dea758edead6897c8ee4565b793cf55da32555da5cd33586014a284578",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0008_aclnn_cloud_mla_prolog_v3_weight_nz.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/cloud_mla_prolog_tiling_data.h",
+      "root_index": 2,
+      "relative_path": "cloud_mla_prolog_tiling_data.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 4864,
+      "sha256": "fdc76f2378d3a2ced6b6d914215d6b209b20ce8a40aa2b4dbd84d16c170ad6a4",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0009_cloud_mla_prolog_tiling_data.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/cloud_mla_prolog_template_tiling_key.h",
+      "root_index": 2,
+      "relative_path": "cloud_mla_prolog_template_tiling_key.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 53763,
+      "sha256": "a2443b59838b642c9d4353e080e313ceb385b2dd03b0eb2d8d01fae15825ac92",
+      "storage": {
+        "encoding": "gzip+base64",
+        "original_utf8": true,
+        "parts": [
+          {
+            "path": "parts/0010/0000.b64",
+            "bytes": 4036,
+            "sha256": "ad6c2012890dd2d0b1140e74b37796766252d8b703501eff46a3bb9bf657f110"
+          }
+        ],
+        "compressed_bytes": 3027,
+        "compressed_sha256": "579e02097fdcf46b68e635177adb69608f7cfef31b413719c8c797b7f46b33d0",
+        "part_bytes_limit": 32768,
+        "restore": "concatenate parts in listed order, base64-decode, then gzip-decompress"
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/cloud_mla_prolog.cpp",
+      "root_index": 2,
+      "relative_path": "cloud_mla_prolog.cpp",
+      "suffix": ".cpp",
+      "kind": "source",
+      "source_kind": "cpp",
+      "bytes": 5770,
+      "sha256": "0ab8aee7316dd7f7d1b8e7add66d56ee29cf1c1f3a0aacce3110a32538783adc",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0011_cloud_mla_prolog.cpp",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_rope_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_rope_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 1947,
+      "sha256": "03f3e1be8c1f8b6340ec54783b5ee011b3a3b3409bf3e0ee0cd5bc34fbbc1e0e",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0012_service_rope_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_rms_norm_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_rms_norm_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 8273,
+      "sha256": "f3950908afd16e693b2215b64cddeae2e72ec72501f8935b2778d86d7cf4f23f",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0013_service_rms_norm_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_rotary_position_embedding_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_rotary_position_embedding_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 9939,
+      "sha256": "160bc2c97ae5bfeddd7c127eb5f8916352d5361bad2144c02eeda2e04d984e19",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0014_service_rotary_position_embedding_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_matmul_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_matmul_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 49653,
+      "sha256": "f02980a005ad2ba678278f1674bb77fb740855ab98cfd6da3bff805b5256bc7e",
+      "storage": {
+        "encoding": "gzip+base64",
+        "original_utf8": true,
+        "parts": [
+          {
+            "path": "parts/0015/0000.b64",
+            "bytes": 12476,
+            "sha256": "c598913ddeeaff319f9012c00a59a1340051de6ae7ba6d3a0916489fbba5a993"
+          }
+        ],
+        "compressed_bytes": 9355,
+        "compressed_sha256": "ef736ecaa794124fa71da35ef2362d83af967de57cfbd711463dda12bb32aeda",
+        "part_bytes_limit": 32768,
+        "restore": "concatenate parts in listed order, base64-decode, then gzip-decompress"
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_scatter_cache_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_scatter_cache_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 6405,
+      "sha256": "60e3da15ea1efdf0abaa285c35cd3531f2171234950b97341131b7d0a2e4bf6a",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0016_service_scatter_cache_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/kernel_cloud_mla_prolog_split_m.h",
+      "root_index": 2,
+      "relative_path": "arch35/kernel_cloud_mla_prolog_split_m.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 105159,
+      "sha256": "bce92c7c974dfe4c32c8d059cffe9508f02a483eba5422d4f319eb1d7f604e50",
+      "storage": {
+        "encoding": "gzip+base64",
+        "original_utf8": true,
+        "parts": [
+          {
+            "path": "parts/0017/0000.b64",
+            "bytes": 24264,
+            "sha256": "9d6f841ce79282555ab3bae59479e9a5f500ff946a480bac98e42b0a4f36eeee"
+          }
+        ],
+        "compressed_bytes": 18198,
+        "compressed_sha256": "355b953db7119599100d0ce8ad56f61b1b5f2c48d8b879725d505ee090709b62",
+        "part_bytes_limit": 32768,
+        "restore": "concatenate parts in listed order, base64-decode, then gzip-decompress"
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_gather_sin_cos_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_gather_sin_cos_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3059,
+      "sha256": "aa31af93e66c45d575a5c71d020efd47fa4b2ada4d1860278f627e76c4201f6d",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0018_service_gather_sin_cos_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_dynamic_quant_qn_mul_qr_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_dynamic_quant_qn_mul_qr_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 12113,
+      "sha256": "738ad1c7f1936d6114cbfc73a34f3e727d55b745224baa7b2d85cbc48bd9696e",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0019_service_dynamic_quant_qn_mul_qr_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/cloud_mla_prolog_vector_comm_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/cloud_mla_prolog_vector_comm_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 24238,
+      "sha256": "7dcec78c670393a673d37c837953e4fb80d96783fd0cf301c082d1054c017492",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0020_cloud_mla_prolog_vector_comm_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/service_dequant_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/service_dequant_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 9702,
+      "sha256": "c0da6a12ac3bf22bf5ac391fa1c2a7500373b4edf87f9006efb8afb385dcc03b",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0021_service_dequant_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/kernel_cloud_mla_prolog_split_n_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/kernel_cloud_mla_prolog_split_n_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 139567,
+      "sha256": "f2cb9cbaca36bdd215ec8dbba14324ee30b171ad7d9b2f998b7459430f07d87c",
+      "storage": {
+        "encoding": "gzip+base64",
+        "original_utf8": true,
+        "parts": [
+          {
+            "path": "parts/0022/0000.b64",
+            "bytes": 30096,
+            "sha256": "4b86ccc151da478dfa7445dc535d7ca4efcd957e2234723c4c476022234d22bf"
+          }
+        ],
+        "compressed_bytes": 22571,
+        "compressed_sha256": "1c062e7868fbed31dbb7e1d6b00fd27c7035afa4734aba28a04a8a7481c0e1be",
+        "part_bytes_limit": 32768,
+        "restore": "concatenate parts in listed order, base64-decode, then gzip-decompress"
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/cloud_mla_prolog_comm_arch35.h",
+      "root_index": 2,
+      "relative_path": "arch35/cloud_mla_prolog_comm_arch35.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 25479,
+      "sha256": "74f814797019db0b6b341ec35e61d0ecbddf514ef5c6edc07e0f5ba8dd1cb8f0",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0023_cloud_mla_prolog_comm_arch35.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_mxfp4.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_mxfp4.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 22122,
+      "sha256": "95c1068cd86121485d5507df5c4da5f4659e324289f889ec8f83b33175cb30fe",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0024_vf_mxfp4.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_dequant.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_dequant.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 6662,
+      "sha256": "94f55e97b1bd29587dc19c4fe56e018fc32ecfa66f609f7a67e0438826696100",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0025_vf_dequant.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_comm.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_comm.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 1197,
+      "sha256": "94f640ead52320dfcb95b95b5723d59ee4f8594a37a57b1b552c414dad9d7c62",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0026_vf_comm.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_quant_perchannel.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_quant_perchannel.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 5368,
+      "sha256": "e591f0a7538ec56fd57c79faac10f1a8fa301e9cbcda8ff9827dbf618699decc",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0027_vf_quant_perchannel.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_rms_norm.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_rms_norm.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 4884,
+      "sha256": "6e17b978951d2941761a0fdcddcaedd9a01b21b1e47ebb19b5dcd6da0c610a4d",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0028_vf_rms_norm.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_mul_qr.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_mul_qr.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3587,
+      "sha256": "65829e3b0997e19896f9ea10faeb6aed4429b91300e26971a7d340ebfbcbc4ed",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0029_vf_mul_qr.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_rope.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_rope.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3778,
+      "sha256": "cd894f08bd792591866e700208a89d3b2985321a69618082495fd75bd25efd33",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0030_vf_rope.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_quant_pertensor.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_quant_pertensor.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 5007,
+      "sha256": "5a5bbf44f65ec275683e9a63953e8f35c25a917f2ee7876e9541d188cb96bca0",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0031_vf_quant_pertensor.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch35/vf/vf_dynamic_quant.h",
+      "root_index": 2,
+      "relative_path": "arch35/vf/vf_dynamic_quant.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 25766,
+      "sha256": "62e387309a42db7f7ef913b1c7140c318d3a94970494b8936a9eaae4ac577b90",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0032_vf_dynamic_quant.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/kernel_cloud_mla_prolog_split_n_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/kernel_cloud_mla_prolog_split_n_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 126423,
+      "sha256": "9c174b83070ea479fccfd5b138985427191b7edd17f5e9363b99c59b0e47552a",
+      "storage": {
+        "encoding": "gzip+base64",
+        "original_utf8": true,
+        "parts": [
+          {
+            "path": "parts/0033/0000.b64",
+            "bytes": 27516,
+            "sha256": "c7f1023e50c2e9e5242607c16a34500f959d510bf98da0a85219ac9f40f31d61"
+          }
+        ],
+        "compressed_bytes": 20635,
+        "compressed_sha256": "5b2bc0450f491d25380b6283887ea316caf22d35c428eeceff232057979dc0ca",
+        "part_bytes_limit": 32768,
+        "restore": "concatenate parts in listed order, base64-decode, then gzip-decompress"
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/cloud_mla_prolog_vector_comm_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/cloud_mla_prolog_vector_comm_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 22862,
+      "sha256": "0171399244653af63c97f328ba4022c85fbfc3187ea2c580922b1d747b40b076",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0034_cloud_mla_prolog_vector_comm_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_dequant_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_dequant_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 9860,
+      "sha256": "254f40e8cb27bec3eba17ee37d5d1a7e51f58206b4684ff3ffbb70f15b1d4743",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0035_service_dequant_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_rope_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_rope_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3528,
+      "sha256": "d8498fba2d9457242f416d83a1fb971661916ece6c13638192d9e0673a843da8",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0036_service_rope_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_gather_sin_cos_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_gather_sin_cos_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3131,
+      "sha256": "a22b8325caf79cc723c8970e3174f337bbedb9a8042c3a00a1f2954e7d794367",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0037_service_gather_sin_cos_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_rotary_position_embedding_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_rotary_position_embedding_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 10447,
+      "sha256": "45e3d5ad597f45d8c8d71ee49ad1aa8ab3526a2bc10203554e983e0c574f8a33",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0038_service_rotary_position_embedding_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_matmul_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_matmul_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 26679,
+      "sha256": "573782f99ce3d28ec38416ff47edc0f6e24fdef615e4a4289a19803d792a78df",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0039_service_matmul_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/rms_norm.h",
+      "root_index": 2,
+      "relative_path": "arch22/rms_norm.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 3876,
+      "sha256": "283d1fbf3018309aa189ad2d655e8e54521e3dda5bf1a351dc70de72a7646fdb",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0040_rms_norm.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_dynamic_quant_qn_mul_qr_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_dynamic_quant_qn_mul_qr_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 13150,
+      "sha256": "031195c8a1a2f8e126b2b4fb464c8bf0f9d372a3637b64655f56a9fcf086768b",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0041_service_dynamic_quant_qn_mul_qr_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_rms_norm_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_rms_norm_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 7071,
+      "sha256": "39b35f06e04d3766f864ef3323aad7de5040f50eaceb1372b807c495bbd56c55",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0042_service_rms_norm_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/service_scatter_cache_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/service_scatter_cache_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 6359,
+      "sha256": "b03af8e5bd16b1fc7db84c6d6f9fd07bb3e055c2e415269f7a1355ce90aef934",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0043_service_scatter_cache_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    },
+    {
+      "source_path": "/usr/local/Ascend/cann-9.2.1/opp/vendors/custom_cot/op_impl/ai_core/tbe/custom_cot_impl/ascendc/cloud_mla_prolog/arch22/cloud_mla_prolog_comm_arch22.h",
+      "root_index": 2,
+      "relative_path": "arch22/cloud_mla_prolog_comm_arch22.h",
+      "suffix": ".h",
+      "kind": "source",
+      "source_kind": "h",
+      "bytes": 17794,
+      "sha256": "ab708fb294fec6d051f7e4cf322dbd2ef5568f5f752da121212521cb7f67947d",
+      "storage": {
+        "encoding": "raw_utf8",
+        "path": "sources/0044_cloud_mla_prolog_comm_arch22.h",
+        "part_bytes_limit": 32768
+      }
+    }
+  ],
+  "binaries": [
+    {
+      "source_path": "/home/ma-user/anaconda3/envs/PyTorch-2.10.0/lib/python3.12/site-packages/cloud_ops_turbo/__pycache__/cloud_mla_prolog_v3.cpython-312.pyc",
+      "root_index": 0,
+      "relative_path": "__pycache__/cloud_mla_prolog_v3.cpython-312.pyc",
+      "suffix": ".pyc",
+      "kind": "binary",
+      "copied": false,
+      "bytes": 7176,
+      "sha256": "2176be6d1a97875840fbb104a4bdf940cdbd3ca40dde32fec358d6ae9950774b",
+      "hash_status": "HASHED"
+    }
+  ],
+  "skipped": [],
+  "skipped_reasons": {},
+  "scan_complete_within_scope": true,
+  "walk_files": 322,
+  "walk_entries": 333,
+  "source_bytes": 830948,
+  "binary_hash_bytes": 7176,
+  "source_found": true,
+  "source_count": 45,
+  "binary_count": 1,
+  "source_kinds": {
+    "py": 1,
+    "h": 43,
+    "cpp": 1
+  },
+  "skipped_details_truncated": false,
+  "status": "SOURCES_COLLECTED"
+}
