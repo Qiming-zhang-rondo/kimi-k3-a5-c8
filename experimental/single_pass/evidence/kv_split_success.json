@@ -1,0 +1,42 @@
+{
+  "status": "MEASURED",
+  "kv_split_v4_results": {
+    "w0_split1": {
+      "v4_us": 80.48,
+      "kvsplit_us": 89.75,
+      "ratio": 1.115
+    },
+    "w0_split2": {
+      "v4_us": 80.31,
+      "kvsplit_us": 59.14,
+      "ratio": 0.736
+    },
+    "w0_split4": {
+      "v4_us": 81.25,
+      "kvsplit_us": 47.01,
+      "ratio": 0.584
+    },
+    "w128_split1": {
+      "v4_us": 82.05,
+      "kvsplit_us": 96.04,
+      "ratio": 1.171
+    },
+    "w128_split2": {
+      "v4_us": 82.03,
+      "kvsplit_us": 63.37,
+      "ratio": 0.773
+    },
+    "w128_split4": {
+      "v4_us": 81.99,
+      "kvsplit_us": 50.48,
+      "ratio": 0.616
+    }
+  },
+  "vs_installed_twopass": {
+    "twopass_us": 107.29,
+    "kvsplit_w128_s4_us": 50.48,
+    "ratio": 0.47,
+    "speedup": "53 percent FASTER"
+  },
+  "note": "KV-split S4 (16 AIC) W128 = 50.48us. Massive improvement from V4 82us."
+}
