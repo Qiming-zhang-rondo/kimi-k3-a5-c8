@@ -1,0 +1,119 @@
+// smoke_ring_write.asc — v2
+// Fixed: use GlobalTensor for DataCopy (not raw pointers)
+#include "kernel_operator.h"
+
+using namespace AscendC;
+
+// ============================================================
+// Ring write core logic
+// ============================================================
+__aicore__ inline void WriteRingSmoke(
+    LocalTensor<float> &inputLocal,
+    GlobalTensor<bfloat16_t> &latentRingGm,     // [P, C, 512]
+    GlobalTensor<int64_t> &positionTagsGm,       // [P, C]
+    GlobalTensor<int64_t> &epochTagsGm,          // [P, C]
+    GlobalTensor<int32_t> &ringSlotsGm,          // [T]
+    GlobalTensor<int64_t> &positionsGm,          // [T]
+    GlobalTensor<int64_t> &epochsGm,             // [T]
+    GlobalTensor<uint8_t> &validFlagsGm,         // [T]
+    int64_t capacity,
+    int32_t poolCount,
+    int64_t tokenIdx,
+    LocalTensor<bfloat16_t> &bf16Scratch
+)
+{
+    int32_t bank = ringSlotsGm.GetValue(tokenIdx);
+    int64_t position = positionsGm.GetValue(tokenIdx);
+    int64_t reqEpoch = epochsGm.GetValue(tokenIdx);
+    bool tokenValid = static_cast<bool>(validFlagsGm.GetValue(tokenIdx));
+
+    if (tokenValid && bank >= 0 && bank < poolCount && position >= 0) {
+        int64_t row = static_cast<int64_t>(bank) * capacity + (position % capacity);
+        int64_t latentOffset = row * 512;
+
+        constexpr uint32_t kvElemCount = 512;
+        Cast(bf16Scratch, inputLocal, RoundMode::CAST_RINT, kvElemCount);
+        PipeBarrier<PIPE_V>();
+
+        DataCopy(latentRingGm[latentOffset], bf16Scratch, kvElemCount);
+        PipeBarrier<PIPE_MTE3>();
+
+        positionTagsGm.SetValue(row, position);
+        epochTagsGm.SetValue(row, reqEpoch);
+    }
+}
+
+// ============================================================
+// Kernel entry: B1 single token smoke
+// ============================================================
+__aicore__ __global__ void smoke_ring_write_kernel(
+    __gm__ float *rmsNormOutput,
+    __gm__ bfloat16_t *latentRing,
+    __gm__ int64_t *positionTags,
+    __gm__ int64_t *epochTags,
+    __gm__ int32_t *ringSlots,
+    __gm__ int64_t *positions,
+    __gm__ int64_t *epochs,
+    __gm__ uint8_t *validFlags,
+    __gm__ int64_t *capacityParam,
+    __gm__ int32_t *poolCountParam,
+    __gm__ bfloat16_t *resultLatent,
+    __gm__ int64_t *resultPosTag,
+    __gm__ int64_t *resultEpochTag
+)
+{
+    TPipe pipe;
+    int64_t capacity = capacityParam.GetValue(0);
+    int32_t poolCount = poolCountParam.GetValue(0);
+
+    // GlobalTensor wrappers
+    GlobalTensor<bfloat16_t> latentRingGm;
+    latentRingGm.SetGlobalBuffer(latentRing);
+    GlobalTensor<int64_t> positionTagsGm;
+    positionTagsGm.SetGlobalBuffer(positionTags);
+    GlobalTensor<int64_t> epochTagsGm;
+    epochTagsGm.SetGlobalBuffer(epochTags);
+    GlobalTensor<int32_t> ringSlotsGm;
+    ringSlotsGm.SetGlobalBuffer(ringSlots);
+    GlobalTensor<int64_t> positionsGm;
+    positionsGm.SetGlobalBuffer(positions);
+    GlobalTensor<int64_t> epochsGm;
+    epochsGm.SetGlobalBuffer(epochs);
+    GlobalTensor<uint8_t> validFlagsGm;
+    validFlagsGm.SetGlobalBuffer(validFlags);
+    GlobalTensor<int64_t> capacityGm;
+    capacityGm.SetGlobalBuffer(capacityParam);
+    GlobalTensor<int32_t> poolCountGm;
+    poolCountGm.SetGlobalBuffer(poolCountParam);
+    GlobalTensor<float> rmsNormGm;
+    rmsNormGm.SetGlobalBuffer(rmsNormOutput);
+    GlobalTensor<bfloat16_t> resultLatentGm;
+    resultLatentGm.SetGlobalBuffer(resultLatent);
+    GlobalTensor<int64_t> resultPosTagGm;
+    resultPosTagGm.SetGlobalBuffer(resultPosTag);
+    GlobalTensor<int64_t> resultEpochTagGm;
+    resultEpochTagGm.SetGlobalBuffer(resultEpochTag);
+
+    // UB scratch
+    TBuf<TPosition::VECCALC> inputBuf;
+    pipe.InitBuffer(inputBuf, 512 * sizeof(float));
+    LocalTensor<float> inputLocal = inputBuf.Get<float>();
+
+    TBuf<TPosition::VECCALC> bf16ScratchBuf;
+    pipe.InitBuffer(bf16ScratchBuf, 512 * sizeof(bfloat16_t));
+    LocalTensor<bfloat16_t> bf16Scratch = bf16ScratchBuf.Get<bfloat16_t>();
+
+    // Load input GM -> UB
+    DataCopy(inputLocal, rmsNormGm, 512);
+    PipeBarrier<PIPE_V>();
+
+    // Ring write smoke (token 0)
+    WriteRingSmoke(inputLocal, latentRingGm, positionTagsGm, epochTagsGm,
+                   ringSlotsGm, positionsGm, epochsGm, validFlagsGm,
+                   capacity, poolCount, 0, bf16Scratch);
+
+    // Readback for verification
+    DataCopy(resultLatentGm, latentRingGm, 512);
+    resultPosTagGm.SetValue(0, positionTagsGm.GetValue(0));
+    resultEpochTagGm.SetValue(0, epochTagsGm.GetValue(0));
+}

@@ -1,0 +1,35 @@
+{
+  "date": "2026-11-27 20:40",
+  "status": "SMOKE_COMPILE_BLOCKED_ON_DATACOPY_API",
+  "description": "B1 smoke test kernel created per Codex 12d952c instructions. CMake ASC language compilation configured successfully. Kernel code includes all Codex a27efba fixes (Cast 4-param count, bank+position addressing, valid check, static capacity, independent TBuf scratch). But DataCopy calls fail to compile.",
+
+  "compilation_setup": {
+    "approach": "CMake ASC language (same as KV-split: find_package(ASC), --npu-arch=dav-3510)",
+    "cmake_configure": "SUCCESS",
+    "asc_dir": "/usr/local/Ascend/cann-9.2.1/lib64/cmake",
+    "architecture": "dav-3510"
+  },
+
+  "datacopy_error": {
+    "error": "candidate function template not viable: requires 4 arguments, but 3 were provided",
+    "failing_calls": [
+      "DataCopy(inputLocal, rmsNormGm, 512) — UB<-GM (MTE2)",
+      "DataCopy(latentRingGm[latentOffset], bf16Scratch, kvElemCount) — GM<-UB (MTE3)",
+      "DataCopy(resultLatentGm, latentRingGm, 512) — GM<-GM"
+    ],
+    "sdk_header": "kernel_operator_data_copy_intf_impl.h lines 598, 681, 1303",
+    "candidates": "All DataCopy overloads in this SDK require 4+ arguments"
+  },
+
+  "kvsplit_reference": {
+    "note": "KV-split .asc kernels use 3-arg DataCopy successfully in same environment",
+    "examples": [
+      "DataCopy(partialUb[split * kDim], partialGm[taskHead * kDim], kDim)",
+      "DataCopy(outputGm[rowHead * kDim], outputUb, kDim)"
+    ],
+    "kvsplit_file": "experimental/single_pass/kv_split_reduce.asc line 174, 192",
+    "question": "What is different about KV-split's DataCopy that makes 3-arg work? Are there additional includes, macros, or type requirements?"
+  },
+
+  "question_for_codex": "How to correctly call DataCopy in this SDK (CANN 9.2.1, dav-3510) for: (1) UB<-GM copy, (2) GM<-UB copy with offset, (3) GM<-GM copy? The KV-split uses 3-arg DataCopy but our smoke test with same includes gets 'requires 4 arguments'. What are we missing?"
+}
