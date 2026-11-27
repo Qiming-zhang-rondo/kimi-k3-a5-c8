@@ -1,0 +1,8 @@
+{
+  status: FIXED_LOCALLY,
+  date: 2026-11-27 17:15,
+  error: ContractError: Enabled recent128 requires diagnostics_path for explicit fusion coverage and native fallback reasons,
+  fix: Added diagnostics_path to --additional-config sfa_recent128 on both nodes,
+  diagnostics_path: /tmp/sfa_diagnostics,
+  note: single_pass_kernel accepted. reader/source_root/library_dir accepted. Only diagnostics_path was missing. Now added. Next restart should work.
+}
