@@ -4,6 +4,24 @@
 
 用户已明确从单算子转向VA框架接入。当前优先执行本任务；上一轮完整20轮原始证据仍须从既有文件打包推送，但不再为了它重跑单算子或阻塞框架源码适配。
 
+## 本轮启动问题修复（回报74b0773）
+
+回报的三个错误发生在LLM初始化阶段，尚无候选attention执行或模型精度结果。
+PR199的`import ascend_vllm`只定义入口；其`_ensure_global_patch()`才会按顺序加载VA全局补丁、
+MXLLM的`patch_envs`和`patch_attention_config`。其中环境注册必须在worker读取前完成。
+`run_model_probe.py`现执行该正式入口，再验证真实配置字段和环境注册，不直接提前导入worker。
+
+VA会严格校验`additional_config`里的自定义字段。新增配置桥接只在调用其工厂期间隐藏
+`sfa_recent128`，用`finally`恢复原配置对象；其他参数继续接受原校验。
+安装器现在同时修改platform、worker和BF16捕获点三处，确保spawn的EngineCore也在配置校验前安装桥接。
+
+内网agent现在直接拉取后使用新隔离PR199 checkout重装；旧两文件overlay不能叠装，按原manifest恢复或换新checkout。
+确认MXLLM正常插件安装/注册仍指向该源码，保留其正式worker生命周期；仅修改`sys.path`不能替代插件注册。
+沿用下文同一engine与prompt命令，先完成smoke，再执行原评分。无需改内核或升级CANN来处理这三个启动错误。
+若启动仍失败，将输出目录的`startup.json`、`startup_traceback.txt`、`probe.json`及脱敏环境身份一并提交；
+其中stage会区分全局初始化、配置桥接和LLM构造，完整原始异常链自动保存。不要再写十行摘要代替traceback，
+也不要在初始化失败后重复跑NPU实验。
+
 ## 接线代码和边界
 
 `sfa_recent128.hooks`安装到`vllm_ascend.attention.sfa_v1.AscendSFAImpl`真实类；由MXLLM现有MXFP4 worker patch后安装，原BF16捕获点在原RMSNorm/RoPE之后、MXFP4量化之前。不是把单算子脚本当作模型调用。

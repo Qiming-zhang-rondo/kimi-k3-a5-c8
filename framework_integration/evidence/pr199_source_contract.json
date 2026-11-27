@@ -13,11 +13,16 @@
   },
   "reviewed_mxllm_original_sha256": {
     "ascend_vllm/patch/worker/patch_sfa_v1_mxfp4.py": "8d9f93cdd1d374d0fcbc309c1a0047c5f9fc6cb068fda271f6ee07be26798c5c",
-    "ascend_vllm/patch/worker/__init__.py": "e388c47319c6029f8904140b16977558b00ec95faa00360a403b26085c00bf2d"
+    "ascend_vllm/patch/worker/__init__.py": "e388c47319c6029f8904140b16977558b00ec95faa00360a403b26085c00bf2d",
+    "ascend_vllm/__init__.py": "dd0fa98502a74126a161f4b825858bbb9d8c4b5da57fdd94983f2321430d02a9",
+    "ascend_vllm/utils.py": "f3e10aa639c5a8f3688a5a63ad818ca5e00a06afd5270612585e7aa8961b001c",
+    "ascend_vllm/platform.py": "9e173012405bf3e2a44a87d5b6d3cbf3c5409302d99a79400a7e8c1a018e05ab",
+    "ascend_vllm/patch/platform/__init__.py": "35e7fd676da66e15f1c68c97cc3a875bc112644b5270e8de0d86c01acff879b7",
+    "ascend_vllm/patch/platform/patch_envs.py": "39868d7a64b58d2290c947c3d1bac4e4323d12a33909d4907b478118ea28b9b2"
   },
   "reviewed_va_sfa_source": "https://github.com/vllm-project/vllm-ascend/blob/c09d3e20b9c45c80b34ae3781440d90904a44023/vllm_ascend/attention/sfa_v1.py",
   "hook_signature_review": "exec_kv and _execute_sparse_flash_attention_process parameters match the current overlay; source/AST review only",
-  "installer_pr199_profile_host_check": "READY -> INSTALLED -> ALREADY_INSTALLED in a temporary checkout, no framework import or device launch",
+  "installer_pr199_profile_host_check": "Three-file READY -> INSTALLED -> ALREADY_INSTALLED in a temporary checkout; no framework import or device launch",
   "modified_files": [
     "ascend_vllm/patch/worker/patch_sfa_v1_mxfp4.py",
     "tests/patch/worker/test_patch_sfa_v1_mxfp4.py"
@@ -28,5 +33,21 @@
   "user_selected_cann_target": "9.3 (exact installed release/build suffix to collect)",
   "user_reason": "DSL attention operator",
   "installed_stack_compatibility": "NOT_VERIFIED",
-  "dsl_or_recent128_added_by_this_pr": false
+  "dsl_or_recent128_added_by_this_pr": false,
+  "bootstrap_contract": {
+    "entry": "ascend_vllm._ensure_global_patch()",
+    "plain_package_import": "DEFINES_ENTRY_ONLY",
+    "global_order": [
+      "vllm_ascend.utils.adapt_patch(is_global_patch=True)",
+      "ascend_vllm.patch.platform"
+    ],
+    "platform_order": [
+      "patch_envs",
+      "patch_attention_config",
+      "patch_mxfp4_packed_dim"
+    ],
+    "kv_contig_registration": "patch_envs registers ASCEND_VLLM_KV_CONTIG in vllm_ascend.envs.env_variables before worker imports",
+    "additional_config_bridge": "hide only sfa_recent128 during init_ascend_config; restore original object in finally; install in parent and spawned platform initialization",
+    "target_model_execution": "NOT_MEASURED"
+  }
 }

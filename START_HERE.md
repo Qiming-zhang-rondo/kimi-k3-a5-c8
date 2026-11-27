@@ -6,6 +6,12 @@
 环境检查是同一任务的第一步，不再等待用户逐项转发版本信息。CANN9.3仍为既定目标；不擅自改运行中容器。
 PR199 head342680fb的写点/worker原文件和VA c09d3e20 hook签名已审阅，安装可用`--source-profile pr199`。
 
+最新回报`74b0773`停在LLM构造前，尚未执行attention。本轮已补正式MXLLM全局初始化、
+`sfa_recent128`配置桥接，以及spawn进程的platform安装点。内网agent拉取后在**新隔离PR199 checkout**
+重装三文件overlay，继续同一份engine/prompt的OFF/V4/KV-split精度验证；不要直接导入worker，
+不要用环境变量默认值掩盖未初始化的注册项。失败时提交自动生成的`startup.json`、
+`startup_traceback.txt`、`probe.json`与环境身份，保留完整traceback，不再只提交手写摘要。
+
 ## 接入内容与范围
 
 用户明确要求框架接入。按 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md)

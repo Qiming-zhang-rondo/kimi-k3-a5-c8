@@ -10,6 +10,43 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import traceback
+
+
+def initialize_model(options,*,mxllm_root,output,arm,single_pass_kernel):
+    """Use the official MXLLM global patch lifecycle before LLM validation.
+
+    Worker patches remain owned by MXLLM's normal plugin stage. Keep a complete
+    startup report on failure so the inner agent need not rewrite tracebacks.
+    """
+    output=Path(output)
+    report=dict(status="STARTING",arm=arm,single_pass_kernel=single_pass_kernel,
+        model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED")
+    def persist():
+        (output/"startup.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n")
+    try:
+        report["stage"]="MXLLM_GLOBAL_BOOTSTRAP"
+        persist()
+        from mxllm_bootstrap import bootstrap_mxllm
+        report["bootstrap"]=bootstrap_mxllm(mxllm_root)
+        report["stage"]="RECENT128_CONFIG_BRIDGE"
+        persist()
+        from sfa_recent128.config_bridge import install
+        report["config_bridge"]=install()
+        report["stage"]="LLM_CONSTRUCTION"
+        persist()
+        from vllm import LLM,SamplingParams
+        model=LLM(**options)
+        report.update(status="MODEL_INITIALIZED",stage="MODEL_INITIALIZED")
+        persist()
+        return model,SamplingParams,report
+    except Exception:
+        detail=traceback.format_exc()
+        report.update(status="STARTUP_FAILED",traceback=detail)
+        (output/"startup_traceback.txt").write_text(detail)
+        persist()
+        (output/"probe.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n")
+        raise
 
 
 def flush_worker_evidence(worker):
@@ -106,12 +143,8 @@ def main():
         parser.error("Provide nonempty actual text prompts")
     (args.output/"engine.json").write_text(json.dumps(options, ensure_ascii=False, indent=2)+"\n")
     fingerprint = hashlib.sha256(args.prompts_jsonl.read_bytes()).hexdigest()
-    sys.path.insert(0, str(args.mxllm_root.resolve()))
-    import ascend_vllm
-    if not Path(ascend_vllm.__file__).resolve().is_relative_to(args.mxllm_root.resolve()):
-        raise RuntimeError("Imported mxllm differs from the isolated overlay checkout")
-    from vllm import LLM, SamplingParams
-    llm = LLM(**options)
+    llm,SamplingParams,startup=initialize_model(options,mxllm_root=args.mxllm_root.resolve(),
+        output=args.output,arm=args.arm,single_pass_kernel=args.single_pass_kernel)
     sampling = SamplingParams(temperature=0, seed=0, max_tokens=args.max_tokens, logprobs=5)
     with (args.output/"outputs.jsonl").open("w") as stream:
         for i, prompt in enumerate(prompts):
@@ -128,7 +161,8 @@ def main():
         prompt_sha256=fingerprint, prompts=len(prompts), max_tokens=args.max_tokens,
         single_pass_kernel=args.single_pass_kernel if args.arm=="single_pass" else None,
         scope="real-model wiring smoke; task accuracy and serving performance remain unmeasured",
-        installed_mxllm=str(Path(ascend_vllm.__file__).resolve()), worker_reports=worker_reports), indent=2)+"\n")
+        installed_mxllm=str(Path(sys.modules["ascend_vllm"].__file__).resolve()),
+        startup=startup,worker_reports=worker_reports), indent=2)+"\n")
     # Worker atexit hooks write the final layer counters on orderly process exit.
 
 
