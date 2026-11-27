@@ -1,23 +1,24 @@
-# 当前任务：已找到Prolog KV写点，直接在内网实现热环producer
+# 当前任务：立即修正producer原型，编译验证后再启热环
 
-最新fac32bf36已从真实V3/mode4链定位到RmsNormAndQuantizeCkv中QuantPerTileMxFp4前的FP32 inputLocal。
-状态仅IDENTIFIED，尚未实现、未编译、未在NPU执行。用户已授权推进生产接入，内网agent不要再停在等待确认。
+用户希望尽快拉起一次真实热环服务。最新5e7067f0只有未编译实现摘要，尚无设备结果。
+先按 [framework_integration/PROLOG_REVIEW_5E7067F0.md](framework_integration/PROLOG_REVIEW_5E7067F0.md)
+直接修正，不再等待确认，也不再向用户索要内部源文件。
 
-外部已交付公共接口适配器framework_integration/sfa_recent128/prolog_provider.py及5项宿主测试。
-新约定入口cloud_ops_turbo.cloud_mla_prolog_v3_recent128与函数ABI标记1，原Prolog9位置参数/原kwargs/原5输出保留；
-ON增加固定地址BF16 ring与device slot/position/epoch/valid元数据，OFF透明直通。接口不存在就明确报错，不回退。
-这是外部框架侧接口代码，尚未挂入生产runtime；不宣称部门内核、B8或Graph已经完成。
+两个首要错误：六参Cast把512当mask而非总元素数，改四参计数形式；token_ring_slots是请求bank，
+地址必须bank*C+token_positions%C，不能ringSlot%C。公共CPU参考producer_reference.py及3项测试已交付，
+可用于校验本地NPU输出预期，绝不放进Graph执行路径。
 
-内网agent现在按 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)
-直接实施真实V3的wrapper/绑定/新variant/tiling/kernel，内部源码保留内网。先原FP32源不变、侧路非alias BF16 RNE写环，
-用正确UB/MTE所有权同步；KR64另取post-RoPE。保持原C4 packed/scale字节、query输出、Prolog原地Graph更新与indexer C4不变。
-随后隔离构建，做OFF/ON逐字节控制、BF16参考、B8Q4/padding/重排/MTP和动态Graph毒化重放，再同轮测producer成本。
-禁止只给旧函数贴ABI标记；禁止删除guard放行不存在的BF16来源；不重复投影、不整cache复制、不强制NATIVE冒充生产接入。
+当前3输入latent-only/P1原型缺KR、position/epoch tags、token_positions/epochs、valid mask与多pool，
+不能标成完整ABI1或接并发8生产。按原prolog_provider接口补齐，未支持的SplitM/arch22分支须host在launch前拒绝，
+不要用no-op假装成功。保持原FP32量化输入不变，BF16 scratch非alias且MTE3读结束后才可复用。
 
-不再收集或外传剩余40份源、私有头/schema/实现diff/二进制，之前的批量上传要求已撤销。
-只回传部门允许披露的实现/构建/数值/图重放/性能结果，不允许外发的内容不回传，不要求用户做源码中转。
+执行顺序：修Cast/寻址与scratch依赖→隔离编译单token/回绕smoke→补齐完整ABI1与B8/padding/MTP/Graph动态重放→
+原C4字节/scale逐字节一致与BF16 golden通过→再接生产reader/生命周期并验证真实热环调用。
+B1 smoke只证明底层局部，不是完整服务；不得以关闭热环或禁用原生产特性冒充接入成功。
 
-producer完成后继续多请求reader寻址、静态Graph缓冲、MTP事务、prefix尾窗快照、PD尾窗传输与完成协议。
-并发8/Graph/MTP/prefix/PD是生产目标，当前未完成；主C4 cache布局和QLI路径保持不变。
-现有accuracy_eager adapter仍是受保护诊断原型，不删除其限制后假称生产全特性支持。
-不重启工作服务、不升级CANN/vendor/wheel、不覆盖成功产物。真实激活重要性实验继续暂缓。
+后续实现细节和公共接口见 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)。
+保留Prolog原地写cache、主C4布局、量化参数、indexer C4。不要chmod/sudo继续改工作vendor；使用隔离candidate工程/OPP作用域，
+现有已写入的candidate源先留档，不擅自删除或覆盖工作产物。
+
+内部源、diff、头/schema和二进制留内网；只回传部门允许披露的构建/数值/图/性能结论。
+不要求剩余40个文件，不开展暂缓的真实激活分析，不重测已成功的SFA tile扫描。
