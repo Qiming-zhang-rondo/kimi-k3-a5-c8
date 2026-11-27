@@ -1,0 +1,22 @@
+{
+  "status": "STARTUP_FAILED",
+  "date": "2026-11-27 16:55",
+  "error": "sfa_recent128.contract.ContractError: Unsupported recent128 options; baseline quantization cannot be changed: kernel",
+  "root_cause": "parse_recent128_config in contract.py rejects 'kernel' key. We added kernel=kv_split4, reader=single_pass, source_root, library_dir to --additional-config but Recent128Config dataclass only supports: window, execution, preprocess, max_query_chunk",
+  "progress": "overlay IS being loaded now (hooks.py called from /tmp/mxllm-split4-experiment/sfa_recent128/hooks.py) - the PYTHONPATH approach works!",
+  "additional_config_used": {
+    "sfa_recent128": {
+      "window": 128,
+      "reader": "single_pass",
+      "kernel": "kv_split4",
+      "source_root": "/tmp/mxllm-split4-experiment",
+      "library_dir": "/tmp/qsfa-kv-split-build"
+    }
+  },
+  "supported_by_contract": ["window", "execution", "preprocess", "max_query_chunk"],
+  "rejected_keys": ["kernel", "reader", "source_root", "library_dir"],
+  "error_location": "/tmp/mxllm-split4-experiment/sfa_recent128/contract.py line 87",
+  "hooks_loaded_from": "/tmp/mxllm-split4-experiment/sfa_recent128/hooks.py line 36",
+  "need": "Add kernel, reader, source_root, library_dir to Recent128Config dataclass and parse_recent128_config. Or document the correct additional_config key names for selecting kv_split4 kernel.",
+  "full_traceback_tail": "hooks.py line 36 in init -> impl._recent128_config = parse_recent128_config(getattr(config, 'additional_config', None)) -> contract.py line 87 raise ContractError('Unsupported recent128 options; baseline quantization cannot be changed: kernel')"
+}
