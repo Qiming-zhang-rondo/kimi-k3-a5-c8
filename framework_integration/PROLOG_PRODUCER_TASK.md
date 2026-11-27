@@ -1,5 +1,10 @@
 # Prolog热环：仅在内网实施，不再上传内部源码
 
+最新ac8bef44的DataCopy smoke已由外部直接提供完整替换，不再猜参数。
+先按[独立writer说明](../experimental/prolog_ring_smoke/README.md)构建和执行本仓
+`experimental/prolog_ring_smoke`；其AIV隔离、显式事件和真实ring回读通过后，移用正确模式到私有Prolog。
+原三参UB搬运在Vector pass可用，不能把GM→GM错误概括成所有DataCopy都要四参。
+
 最新192946ea已在源中修正Cast、寻址、valid和容量，但仍未编译。
 内网agent按[PROLOG_REVIEW_5E7067F0.md](PROLOG_REVIEW_5E7067F0.md)顶部最新审查，
 一次补齐scratch跨流水依赖、全链参数合同和未实现分支拒绝，然后直接隔离编译/验证；已修项不反复改。

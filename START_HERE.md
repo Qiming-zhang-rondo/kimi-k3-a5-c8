@@ -1,24 +1,11 @@
-# 当前立即执行：补齐三项后直接编译producer，别再停在摘要
+# 当前任务：直接构建并验证完整的独立热环 writer
 
-192946ea已在本地源修正四参Cast、bank*C+position%C、valid谓词和静态容量，这些方向接受，不再反复改。
-当前仍未编译；立即按 [framework_integration/PROLOG_REVIEW_5E7067F0.md](framework_integration/PROLOG_REVIEW_5E7067F0.md)
-顶部192946ea审查直接完成以下步骤。在没有内网用户明确暂停指令时，不要以等待Codex反馈为由停住。
+ac8bef44 的 119 行 smoke 存在裸指针调用 GetValue、GM→GM DataCopy、固定第0槽回读、缺少 AIV 编译分支隔离和跨流水事件等问题。仓库现已提供完整可编译候选替换，停止逐个猜 DataCopy 参数。
 
-1. 修scratch依赖：PIPE_V不覆盖V→MTE3或DMA结束前的scratch复用；用独立区域/正确事件完成所有权闭环。
-2. 一次对齐新variant全链：Python、注册/C++ binding、proto、TBE、tiling和kernel入口。8GM+2scalar不能沿旧3参数ABI launch，
-   容量/池大小走明确静态合同，workspace/tiling位置逐项核对。
-3. ON在host binding/tiling拒绝未实现SplitM/arch22分支；所选A5 mode4真实写latent、post-RoPE KR和position/epoch tags。
-4. 立刻隔离编译。编译首错由内网agent按当前SDK/已有源自行修，不再只推实现摘要；有真实外部阻断才按允许范围反馈。
-5. 最小B1单token/512全元素/回绕数值：C4 packed和scale逐字节不变、BF16等于prequant RNE。
-6. 再B8Q4/padding/reorder、动态Graph毒化重放；通过才测producer成本，再推进模型生产接线。
+内网 agent 现在直接执行 [experimental/prolog_ring_smoke/README.md](experimental/prolog_ring_smoke/README.md) 的隔离构建及设备验证命令。复用已经配置成功的真实 CANN 9.2.1 / dav-3510 工具链，选择空闲设备，不改现有 vendor，不停服务，不升级 CANN。
 
-半小时目标优先拿到真实BUILD_PASS及最小DEVICE_VALIDATED，不能承诺完整生产服务已就绪。
-producer编好不自动解决现reader B1寻址/accuracy_eager与PD生命周期；不能删guard或关热环当作接入完成。
+本目录含完整 ASC kernel、固定 ABI 头、CMake、真实 Torch stream 薄桥和验证脚本。测试覆盖 B1Q1/B8Q4、OFF、BF16 RNE、KR、bank/position/epoch、padding、回绕、输入未改及 Graph replay 的数据变化；不需要私有 Prolog 源码外传。
 
-公共接口和全部本地实施要求见 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)。
-不重启工作服务、不升级环境、不继续写系统vendor；使用独立候选工程/作用域，原成功产物保留。
-内部源/diff/头/schema/二进制留内网，只回传允许的实际构建首错或数值/图测试结果，不要求更多源码上传。
+外部已通过 4 项宿主测试和 C++ ABI 头语法检查；尚未在 A5 编译或执行。仅 writer 通过不等于 Prolog/C4 字节控制或服务已完成。设备通过后，把搬运/同步模式移到内网已定位的实际 FP32 KV 量化前写点，继续 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md) 的完整 ABI1 producer 任务。保留原 C4 数据/scale、PrologV3、Indexer MXFP4 以及用户要求的生产能力。
 
-P/D共享producer代码，但ring=None原样走原Prolog。P至少准备prompt尾窗给D，P自己的attention不必改热窗；
-D每步更新新token/draft。两个节点源码MD5相同不等于编译/运行已生效，PD仍须传BF16尾窗并等待完成。
-indexer C4与主C4布局/量化参数都保持原样。已暂缓的激活重要性实验和SFA tile扫描本轮不执行。
+源码/构建/原始日志留内网，只回传部门允许披露的结果摘要或首个错误；不要继续上传内部头文件、schema、实现 diff、二进制或其余私有文件。
