@@ -1,0 +1,127 @@
+{
+  "status": "DEVICE_RING_WRITER_VALIDATED",
+  "scope": "isolated_ring_writer_not_producer",
+  "prolog_validated": false,
+  "c4_validated": false,
+  "native_quantizer_tested": false,
+  "vendor_modified": false,
+  "latency": "NOT_MEASURED",
+  "cases": {
+    "p1_off": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      }
+    },
+    "p1_eager": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      }
+    },
+    "p1_graph_phase0": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      },
+      "captured_once": true,
+      "dynamic_metadata_updated": true,
+      "untouched_poison_retained": true
+    },
+    "p1_graph_phase1": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      },
+      "captured_once": true,
+      "dynamic_metadata_updated": true,
+      "untouched_poison_retained": true
+    },
+    "p8_off": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      }
+    },
+    "p8_eager": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      }
+    },
+    "p8_graph_phase0": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      },
+      "captured_once": true,
+      "dynamic_metadata_updated": true,
+      "untouched_poison_retained": true
+    },
+    "p8_graph_phase1": {
+      "passed": true,
+      "checks": {
+        "latentRing": true,
+        "ropeRing": true,
+        "positionTags": true,
+        "epochTags": true,
+        "input_latent_unchanged": true,
+        "input_rope_unchanged": true
+      },
+      "captured_once": true,
+      "dynamic_metadata_updated": true,
+      "untouched_poison_retained": true
+    }
+  },
+  "build_identity": {
+    "library": "/tmp/qsfa-ring-smoke/build/libqsfa_prolog_ring_smoke.so",
+    "library_sha256": "a68462fde8be2bfcb6ad5e07b6a8c5172ea1bf74d8878eda78fcd9caf44fc027",
+    "api_sha256": "19a53750dc08bcc6ff296c63b5ed886a8423159f4a54ac74e85333cd86d8453a",
+    "bridge_sha256": "2439a93665ff8c4a818b10185d32b017ecc7f16a11a7d58685e0555634b071f3",
+    "sdk_root": "/usr/local/Ascend/cann-9.2.1",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0.post7",
+    "torch_cxx11_abi": true,
+    "asc_compiled_by_runner": false,
+    "configuration": {
+      "abi_version": 1,
+      "buffers_bytes": 80,
+      "scope": "isolated_ring_writer_not_producer"
+    }
+  }
+}
