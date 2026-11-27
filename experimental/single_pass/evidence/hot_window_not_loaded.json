@@ -1,0 +1,39 @@
+{
+  "status": "HOT_WINDOW_NOT_LOADED",
+  "date": "2026-11-27",
+  "description": "Both P and D nodes restarted with launch_hot scripts. Environment variables correctly set. But profiling shows installed C4 operator, not our KV-split kernel.",
+  "environment_confirmed": {
+    "PYTHONPATH": "/usr/local/Ascend/cann-9.2.1/python/site-packages:...:/tmp/mxllm-split4-experiment:...",
+    "SFA_RECENT128_CONFIG": {"window": 128, "execution": "accuracy_eager", "preprocess": "preserve", "single_pass_kernel": "kv_split4"},
+    "SFA_RECENT128_LIB_DIR": "/tmp/qsfa-kv-split-build"
+  },
+  "profiling_result": {
+    "operator_seen": "CloudKvQuantSparseFlashAttention_high_performance_1158",
+    "operator_expected": "QsfaSinglePassLaunchKvSplit",
+    "execution_time_us": 80,
+    "conclusion": "overlay code NOT executing, installed operator still being used"
+  },
+  "launch_commands": {
+    "P_node_209": "docker exec -d mxllm_glm5.3c4_z00957521 bash /home/z00957521/launch_hot_p.sh",
+    "D_node_178": "docker exec -d mxllm_glm5.3c4_z00957521 bash /home/z00957521/launch_hot_d.sh"
+  },
+  "launch_hot_script_diff": {
+    "added_at_end_after_bashrc": [
+      "export PYTHONPATH=/tmp/mxllm-split4-experiment:${PYTHONPATH}",
+      "export SFA_RECENT128_CONFIG={\"window\": 128, \"execution\": \"accuracy_eager\", \"preprocess\": \"preserve\", \"single_pass_kernel\": \"kv_split4\"}",
+      "export SFA_RECENT128_LIB_DIR=/tmp/qsfa-kv-split-build"
+    ]
+  },
+  "overlay_installed": {
+    "path": "/tmp/mxllm-split4-experiment",
+    "files": ["sfa_recent128/config_bridge.py", "sfa_recent128/hooks.py", "sfa_recent128/runtime.py", "sfa_recent128/contract.py"],
+    "library": "/tmp/qsfa-kv-split-build/libqsfa_recent128_direct.so"
+  },
+  "hypothesis": "VLLM_PLUGINS=ascend_vllm loads ascend_vllm from site-packages or vllm_ascend source checkout, NOT from PYTHONPATH overlay. The vllm engine core subprocess imports patches from the installed path, ignoring our overlay.",
+  "profiling_csv_evidence": {
+    "api_statistic": "host,acl,aclnnCloudKvQuantSparseFlashAttention,93.52,9,10.391,8.46,20.36,12.908",
+    "kernel_details": "CloudKvQuantSparseFlashAttention,MIX_AIC,shape=[4,64,576;3790,128,1,400;3790,128,1,400;4,1,2048],79.482us",
+    "op_statistic": "CloudKvQuantSparseFlashAttention,MIX_AIC,243 calls,78.554 avg us"
+  },
+  "next_debug_step": "Check which ascend_vllm module the vllm process actually imports: python3 -c 'import ascend_vllm; print(ascend_vllm.__file__)'"
+}
