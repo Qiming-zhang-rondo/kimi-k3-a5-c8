@@ -1,24 +1,24 @@
-# 当前任务：保留PROLOG_V3的生产热环接入
+# 当前任务：Prolog热环仅在内网实施，不再外传源码
 
-用户已明确要求可支持的并发8、整模型Graph、MTP、prefix cache和P/D传输全部接入，保留原C4缓存布局和indexer C4。
-最新54076f89的17:24:36真实错误：所有配置字段已接受，hooks.weights进入runtime构造，
-但当前NATIVE raw-BF16 tap不覆盖生产PROLOG_V3。runtime尚未初始化完成，尚无候选kernel执行证据。
-不再为此改JSON字段，不删除guard放行缺失数据，也不关闭生产特性后称完成接入。
+用户已明确45个文件的批量外传不符合部门要求；之前源码采集/上传要求撤销。
+不要再上传剩余源码、私有头/schema/diff/二进制，也不将任何外传作为继续实现的条件。
+此前采集器不再作为本任务执行入口。所有私有实现、构建与原始测试证据均留内网；
+只回传部门允许披露的能力结论和脱敏结果，不允许外发的内容不回传。
 
-内网agent现在按 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)
-一次执行：核实实际Cloud Prolog schema/可选原BF16出口；定位当前匹配源/版本/头文件；
-用tools/collect_prolog_sources.py原字节导出完整源码与构建材料，自动小文本分片后推送。
-如果已有真实可复用出口，验证后复用；否则在隔离版本化variant内部RMSNorm/RoPE后、MXFP4量化前写BF16热环。
-保留原量化输入、原packed400写入、原query输出及原图内原地cache更新，不增加重复投影或整cache复制。
-工具仅做stdlib只读采集，3项宿主测试通过；没有新的Prolog device实现或性能结果。
+最新42b0f78已提供5个关键文件，足够发现当前选择混入旧接口：Python为V3 wrapper，
+但所选ACLNN头/kernel入口是旧V1；DynamicQuantQnWithMulQr处理Qn/Qr，不是KV量化前写点。
+内网agent在本机追踪真实wrapper→binding→ACLNN→MXFP4 mode4→K/RMSNorm/RoPE写点，
+复用已有原BF16出口或在正确私有producer增加可选BF16热环写入。不要在Q量化或旧V1入口盲插，也不用继续向用户索要文件。
 
-生产适配同时需要多请求row→request/ring-bank寻址、预分配Graph缓冲、MTP事务/有效位置、prefix尾窗快照和PD尾窗完成协议。
-现有accuracy_eager adapter是受保护的诊断原型，不能直接删除单请求/PD/图门禁冒充生产支持。
-原C4布局不妨碍这些能力；新增BF16热环的数据来源与生命周期仍必须接线。
+具体合同与内网实施/验收见 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md)。
+保留原Prolog计算、原C4 packed字节、原地Graph cache更新、原query输出与indexer C4；
+不重复投影、不整cache复制、不强制NATIVE后宣称生产性能无回退。新变体在隔离目录构建，保留已验证产物与服务。
 
-旧配置问题及已确认字段见 [framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md](framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md)。
-当前additional_config正确，indexer_kv_dtype=mxfp4和mla_kv_quant_mode=mxfp4均保留。
-旧框架精度探针合同见 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md)，它不代表生产能力已交付。
+用户要求可支持的并发8、Graph、MTP、prefix、PD全部接入。外部Codex继续实现本项目自己的reader/请求映射/静态缓冲；
+Prolog私有实现由内网agent就地完成，接口按允许披露的合同对接。逐项真实验证后才能声称生产支持；当前仍未完成。
 
-不重启或修改现有服务、不更换CANN/vendor/wheel、不覆盖已成功库。新增真实激活重要性实验继续暂缓；
-此前未发布草稿不包含在本轮提交。单算子三臂脚本仍可独立使用，本轮不重跑扫描。
+54076f89的17:24:36错误是在配置解析通过后、runtime构造Prolog检查处；不是候选kernel执行错误。
+旧配置问题见 [framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md](framework_integration/HOT_WINDOW_ACTIVATION_REPAIR.md)，
+当前字段已修正，不再来回改JSON。主KV和indexer均保持原MXFP4设置。
+
+不重启/修改现有服务、不升级CANN/vendor/wheel、不覆盖原成功库。新增真实激活重要性实验继续暂缓。
