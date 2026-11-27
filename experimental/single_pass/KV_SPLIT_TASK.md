@@ -4,81 +4,54 @@
 本次不是参数建议；已新增候选attention入口、FP32 partial写出、归约kernel、host/bridge与runner。
 **尚未在外部Mac上做CANN编译/NPU运行，不预报40–50us。**
 
-## 当前优先：读取e93c460对应的已有S1原始证据
+## 当前优先：验证归约partialUb反向同步修复（8791d2e之后）
 
-### 2026-11-27：e93c460之后，只提交已有S1原始证据
+本轮完整原始证据已到位，不再要求用户搬运日志，也不再停留在上一轮只读取证任务。
+`evidence/kv_split_v3_w{0,128}_split1_raw.json`两份由工具直接生成：
 
-DMA版本反馈仍错，原V4两臂正常。该提交仍只有16行手工摘要，没有实际库SHA、S1三项和partial数组统计。
-本轮禁止凭摘要继续猜ABI/tiling、重编或重跑六组。先找到e93c460对应的完整失败输出目录，
-只运行以下CPU工具（不要把摘要文件当results.json）：
+| window | partial0 vs matching math L2 | final vs BF16(partial0) L2 |
+| --- | --- | --- |
+| W0 | 0.000938923 | 1.159897 |
+| W128 | 0.0009372584 | 1.140965 |
+
+zero-query最后query的final_vs_partial为0，前三query约0.5–0.7；partial统计量和计数正常。
+这将当前S1大错缩小到归约/传输，而非producer计算。S2/S4仍须后续门禁确认，不能据S1替它们报通过。
+
+已发现并修正的代码缺陷：`kv_split_reduce.asc::Run`循环复用单份partialUb，原来只有
+MTE2_V正向依赖、MTE3_V输出复用依赖，却没有V_MTE2保护下一轮搬入。MTE3_V只阻塞Vector，
+不能阻止MTE2提前覆盖上一轮VF仍读取的partialUb。每轮最开头新增一对V_MTE2 SetFlag/WaitFlag，
+已有S_MTE2/MTE2_S/MTE2_V/V_MTE3/MTE3_V保留；数学、producer、ABI、形状和阈值全部不变。
+该缺口与现象吻合，**修复尚未在NPU上实证，不宣称已解决全部失败**。
+官方反向依赖说明：
+https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/82RC1/opdevg/Ascendcopdevg/atlas_ascendc_10_00019.html
+
+内网agent现在自主执行：
+
+1. 记录旧候选库SHA（已有失败库为`7d6312e4bf556951dc63f89c6b5b7d739b3f18f89a4a76b25ea588486e35d4b1`），
+   保留旧产物；用原成功的SDK/隔离build目录增量构建，仅归约ASC发生设备源码变化。不得覆盖原82us V4验证库。
+2. 新Python进程、新output，复用上次实际runner命令，Q4/W0,W128/S1,S2,S4先`--timing none`。
+   不升级依赖、不改ABI/tiling或算法，不跳过S1；所有math/partial/zero/graph控制必须通过。
+3. 若全绿，按下文原命令做graph 10轮同库V4配对，计时包含attention+reduce；保存所有原始轮次。
+4. 若仍失败，新runner自动生成`failure_small_w0_split1.json`和`failure_small_w128_split1.json`。
+   直接提交这两份，加实际库SHA/构建命令；不要只上传手工摘要。若S1通过但S2/S4失败，
+   用collector按实际失败case导出小JSON。设备故障则按既有规则停止，不能重置卡或停服务。
+5. 提交小型构建证据和完整正确性/配对计时JSON；大npz只留内网。只有实际门禁通过才能报修复成功。
+
+## 已完成的历史修复与证据
+
+- 1061f674：host补认native空片max精确`-FLT_MAX`（`0xff7fffff`）；仅sum=0且O=0才忽略该max。任意有限负数/NaN/+inf仍不接受。
+- 2b96044：归约统计量改为MTE2搬入UB，再等MTE2_S读Scalar，避免动态GM的GetValue DCache风险；这次修复未消除NPU大误差。
+- 90be220：失败时从已保存JSON/NPZ自动导出每份<=50KB的只读诊断，不导Torch、不访问NPU，不改变失败状态。
+- 8791d2e：完成W0/W128 S1原始取证。该轮不重编/不重跑的任务已经结束；当前按顶部同步修复任务构建验证。
+
+需要额外case时使用现有CPU工具，不能手工改写或四舍五入原始失败指标：
 
 ```bash
-python experimental/single_pass/collect_kv_split_failure.py /actual/v3-failed/results.json \
-  --case w0_split1 > experimental/single_pass/evidence/kv_split_v3_w0_split1_raw.json
-python experimental/single_pass/collect_kv_split_failure.py /actual/v3-failed/results.json \
-  --case w128_split1 > experimental/single_pass/evidence/kv_split_v3_w128_split1_raw.json
-```
-
-这两个生成文件各<=50KB，可直接git add/commit/push，**不再人工重写或四舍五入**。
-若路径不明，自主查当次run.log、shell命令和/tmp结果，用户不负责逐项中转。
-文件若缺失，提交工具生成的NOT_AVAILABLE及实际文件清单，不伪造数字。
-
-必要判别字段已经由工具提供：
-
-1. `cases.w0_split1.split1_identity_checks.saved_final_vs_bf16_partial0`：设备final对CPU直接BF16(partial0)。
-2. 同层`partial0_vs_matching_math`：partial0对完整数学参考。
-3. 原`mathematical`/`npu_vs_cpu_partial_merge`的完整实际误差、query/head norm与cosine。
-4. `bridge_build.library_sha256`及源文件hash，比较DMA前后的库是否确实变化；只写commit_tested不能证明新库被加载。
-
-工具按同一实际main调用匹配数组；无对应数组明确NOT_AVAILABLE。A失败说明producer/partial布局已有问题；
-A通过而B失败才指向归约/传输（这里A=partial0_vs_matching_math，B=final_vs_bf16_partial0）。
-S1不需要max/sum加权，能把两段问题直接区分。当前尚无证据定罪新的POD或Cube traits。
-
-新runner未来失败会自动在输出目录生成`failure_small_w0_split1.json`及`failure_small_w128_split1.json`，
-只做CPU读取，不占卡、不改原状态，不放宽任何门禁。当前旧失败无需为生成这些文件重跑。
-
-### 前一轮背景（不是本轮重编或重跑指令）
-
-22ab74b反馈主数学误差0.2–1.2，尚无性能结果。不能据S4误差较低就猜ABI或tiling错。
-连S1也失败，先将producer与reducer分开检查；**不要重跑旧版本来收集已存在的数据**。
-
-```bash
-# 读取实际完整results.json，不能给它15行的手工摘要文件。
 python experimental/single_pass/collect_kv_split_failure.py /actual/failed-run/results.json \
-  > experimental/single_pass/evidence/kv_split_failure_details.json
+  --case w0_split1 > experimental/single_pass/evidence/kv_split_failure_details.json
 ```
 
-该工具只读既有JSON/NPZ，不导Torch、不运行NPU，默认输出<=50KB合法JSON。若需拆分，
-加`--case w0_split1` / `--case w128_split1`，提交各小文件；不上传npz。
-完整保留原reported误差及source SHA，缺实际数组时明确NOT_AVAILABLE，不凭摘要补造值。
-S1优先三项：final_vs_full_math、final_vs_direct_BF16(partialO[:,0])、partialO_vs_full_math，
-并保存query/head norm/cosine。如果final与partial直接转换不符，先查归约/传输；
-partial本身偏离全数学，才进一步定位producer。任何仅FAIL的标记都需要其真实误差量级。
-
-本次归约中已移除动态GM统计量的Scalar GetValue，改为MTE2搬入UB并等待MTE2_S后读取。
-官方约束明确GetValue可能读取过期DCache：
-https://asc.gitcode.com/api/SIMD-API/basic_api/cache_control/DataCacheCleanAndInvalid.html 。
-这是确定需修的一致性风险，**尚未证明它是本轮数值失败的唯一根因**。VF数学、ABI2/112B、
-GM布局、MXFP4/BF16格式均不改。与上一轮纯Python修复不同，这次需要编译归约ASC。
-
-先备份失败候选旧库并记录SHA，复用此前成功的隔离build目录增量构建；不覆盖原82us验证库，
-不换SDK/vendor。每次用新Python进程/新output，先Q4 `--timing none`全矩阵，
-所有数学/partial/zero/graph门禁通过后才跑graph性能。若仍失败，自动提取同一工具的小JSON，
-根据真实S1三项和partial证据继续定位，不放宽阈值、不反复给用户截断traceback。
-
-## 前一轮说明：空片哨兵兼容修复
-
-229d296反馈A5编译已成功，运行停在zero-query padded257的host空片max检查。
-源码的`NEGATIVE_MIN_VALUE_FP32=0xFF7FFFFF`是有限`-FLT_MAX`；`ZeroInvalidLseVF`
-空片写sum0/max=-FLT_MAX，旧校验仅认0/-inf，属于host合同遗漏。
-
-本次只修改Python校验/诊断，不修改设备kernel、ABI或桥接。**直接复用刚编译成功的同一.so，先不要重编。**
-拉最新源码，沿原实际命令使用全新output目录先`--timing none`。合法空态仅限O严格0/sum0，
-max为0、-inf或精确位模式0xff7fffff；任意负值/NaN/+inf仍拒绝。active finite、zero计数和所有误差阈值不变。
-新runner在每次partial门禁前保存本机diagnostic npz及空max位模式直方图小JSON，即使失败也保留证据。
-
-全部数值控制通过后再跑原Q4 graph矩阵。若仍失败，自主从新诊断导出原始位模式、counts、
-对应case和误差到小JSON，连同实际库SHA提交；不要只发截断traceback，不上传大npz，不删门禁。
+工具缺少实际数组时明确NOT_AVAILABLE。source SHA、真实库SHA和失败状态必须保留；大npz留内网。
 本任务不实施用户规划的两套attention后端或DSL缓存布局迁移。
 
 ## 合同和隔离

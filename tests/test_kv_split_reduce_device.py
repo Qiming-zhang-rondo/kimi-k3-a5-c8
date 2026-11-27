@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import re
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "experimental/single_pass/kv_split_reduce.asc"
@@ -44,7 +45,7 @@ STUB = r'''
 void require(bool good, const char* what) { if (!good) throw std::runtime_error(what); }
 namespace AscendC {
 constexpr unsigned PIPE_V=1, EVENT_ID0=0;
-enum class HardEvent { MTE2_V,V_MTE3,MTE3_V,MTE2_S,S_MTE2 };
+enum class HardEvent { MTE2_V,V_MTE3,MTE3_V,MTE2_S,S_MTE2,V_MTE2 };
 enum class TPosition { VECCALC };
 enum class RoundMode { CAST_RINT };
 enum class CMPMODE { GT };
@@ -53,8 +54,16 @@ size_t currentRowHead=0, inputFloats=0, scalarCount=0;
 float *inputBase=nullptr, *maximumBase=nullptr, *sumBase=nullptr;
 std::vector<bool> activeHeads;
 std::vector<float> beforeCast;
-unsigned pending[5]={}, maximumReads=0, outputReads=0, exponentials=0, vfLoads=0;
+unsigned pending[6]={}, maximumReads=0, outputReads=0, exponentials=0, vfLoads=0;
 unsigned gmScalarReads=0,statsDmaReads=0,statsDmaEpoch=0,scalarReadyEpoch=0;
+// A checked asynchronous ownership model: VF arithmetic is evaluated on the
+// host, but its UB reads remain in flight with respect to future MTE2 writes.
+// Neither a V-only barrier nor MTE3->V orders MTE2. Only the V->MTE2 handshake
+// releases these ranges before a later DMA may overwrite them.
+bool simulateAsyncReuse=false;
+unsigned vectorToMte2Fences=0;
+struct PendingVfRead { uintptr_t first,last; };
+std::vector<PendingVfRead> unfinishedVfReads;
 struct ScalarSlot { bool maximum;size_t index;unsigned epoch; };
 std::map<const float*,ScalarSlot> scalarSlots;
 unsigned statWrites=0;
@@ -66,6 +75,9 @@ template<HardEvent E> void SetFlag(unsigned id) {
 template<HardEvent E> void WaitFlag(unsigned id) {
  require(id==0 && pending[unsigned(E)]--==1,"unmatched event wait");
  if constexpr(E==HardEvent::MTE2_S) scalarReadyEpoch=statsDmaEpoch;
+ if constexpr(E==HardEvent::V_MTE2) {
+  unfinishedVfReads.clear(); ++vectorToMte2Fences;
+ }
 }
 template<unsigned> void PipeBarrier() {}
 struct bfloat16_t { uint16_t bits=0; };
@@ -126,6 +138,13 @@ template<class T> void DataCopy(LocalTensor<T> destination,GlobalTensor<T> sourc
   const size_t offset=source.p-inputBase;
   require(offset<inputFloats && offset+count<=inputFloats && offset%512==0 && count==512,"partial O bounds");
   require(activeHeads[offset/512],"empty/poison O was loaded"); ++outputReads;
+  if(simulateAsyncReuse) {
+   const uintptr_t first=reinterpret_cast<uintptr_t>(destination.p);
+   const uintptr_t last=first+count*sizeof(T);
+   for(const auto& read:unfinishedVfReads)
+    require(last<=read.first || first>=read.last,
+            "MTE2 overwrites partial UB while previous VF read is still pending");
+  }
  }
  std::memcpy(destination.p,source.p,count*sizeof(T));
 }
@@ -174,6 +193,10 @@ template<class T,MaskPattern> MaskReg CreateMask() { MaskReg mask;mask.x.fill(tr
 template<class T> void Duplicate(RegTensor<T>& output,T value) { output.x.fill(value); }
 template<class T,LoadDist> void LoadAlign(RegTensor<T>& output,T* source) {
  require(source!=nullptr,"absent VF input");++vfLoads;
+ if(simulateAsyncReuse) {
+  const uintptr_t first=reinterpret_cast<uintptr_t>(source);
+  unfinishedVfReads.push_back({first,first+64*sizeof(T)});
+ }
  for(unsigned i=0;i<64;++i) output.x[i]=source[i];
 }
 template<class T,StoreDist> void StoreAlign(T* destination,RegTensor<T>& value,MaskReg& mask) {
@@ -214,8 +237,8 @@ struct Fixture {
  std::vector<float> partial,maximum,sum;
  std::vector<double> expected;
 };
-Fixture make(unsigned splits,unsigned present,float offset,bool normalized=false) {
- Fixture f;f.splits=splits;
+Fixture make(unsigned splits,unsigned present,float offset,bool normalized=false,unsigned queries=2) {
+ Fixture f;f.splits=splits;f.queries=queries;
  const unsigned count=f.queries*splits*64;
  f.partial.assign(count*512,std::numeric_limits<float>::quiet_NaN());
  f.maximum.assign(count,0.0f);f.sum.assign(count,0.0f);
@@ -274,8 +297,12 @@ template<unsigned Splits> std::vector<float> execute(Fixture f,unsigned blocks,b
  inputBase=f.partial.data();inputFloats=f.partial.size();maximumBase=f.maximum.data();sumBase=f.sum.data();
  scalarCount=f.sum.size();currentSplits=Splits;blockCount=blocks;
  maximumReads=outputReads=exponentials=vfLoads=statWrites=gmScalarReads=statsDmaReads=0;
+ vectorToMte2Fences=0;
  statsDmaEpoch=scalarReadyEpoch=0;scalarSlots.clear();
  for(blockIndex=0;blockIndex<blocks;++blockIndex) {
+  // Separate AIVs own physically separate UB, even if host allocators reuse
+  // the same address after the preceding simulated block returns.
+  unfinishedVfReads.clear();
   QsfaKvSplitReduction::Run<Splits>(reinterpret_cast<uint8_t*>(f.partial.data()),
     reinterpret_cast<uint8_t*>(f.maximum.data()),reinterpret_cast<uint8_t*>(f.sum.data()),
     reinterpret_cast<uint8_t*>(output.data()+1),stats?reinterpret_cast<uint8_t*>(outM.data()+1):nullptr,
@@ -291,6 +318,7 @@ template<unsigned Splits> std::vector<float> execute(Fixture f,unsigned blocks,b
  require(gmScalarReads==0 && statsDmaReads==2*rowHeads*Splits,
          "producer statistics used stale scalar GM cache instead of DMA");
  require(statWrites==(stats?2*rowHeads:0),"optional stats copy count");
+ if(simulateAsyncReuse) require(vectorToMte2Fences==rowHeads,"missing per-row V->MTE2 ownership handoff");
  for(unsigned row=0;row<rowHeads;++row) {
   const unsigned q=row/64,h=row%64;
   double maximum=-std::numeric_limits<double>::infinity(),sum=0;
@@ -335,6 +363,12 @@ int main(int argc,char** argv) {
  try {
   require(argc==2,"suite argument");std::string suite=argv[1];
   if(suite=="empty") { empty_suite<1>();empty_suite<2>();empty_suite<4>(); }
+  else if(suite=="async_reuse") {
+   simulateAsyncReuse=true;
+   execute<1>(make(1,1,-7.0f,false,4),16,true,0);
+   execute<2>(make(2,3,-7.0f,false,4),3,false,0);
+   execute<4>(make(4,15,-7.0f,false,4),1,true,0);
+  }
   else if(suite=="shifts") { shifts_suite<1>();shifts_suite<2>();shifts_suite<4>(); }
   else if(suite=="normalized") {
    execute<1>(make(1,1,0.0f,true),1,true,0);
@@ -359,14 +393,20 @@ class KvSplitReduceDeviceModelTests(unittest.TestCase):
         actual = SOURCE.read_text()
         functions = actual_function(actual, "__simd_vf__ void ReduceVf(") + "\n" + actual_function(
             actual, "__aicore__ inline void Run(")
-        cpp = root / "actual_reduce.cpp"
-        cpp.write_text(STUB + functions + DRIVER)
         cls.binary = root / "actual_reduce"
-        built = subprocess.run([compiler, "-std=c++17", "-O1", "-ffp-contract=off",
-                                "-fsanitize=undefined", "-fno-sanitize-recover=all",
-                                str(cpp), "-o", str(cls.binary)], capture_output=True, text=True)
-        if built.returncode:
-            raise AssertionError(built.stderr)
+        cls.without_fence = root / "without_input_reuse_fence"
+        mutant = functions.replace("        SetFlag<HardEvent::V_MTE2>(EVENT_ID0);\n", "").replace(
+            "        WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);\n", "")
+        if mutant == functions:
+            raise AssertionError("Negative control must remove the actual V_MTE2 fence")
+        for binary, body in ((cls.binary, functions), (cls.without_fence, mutant)):
+            cpp = binary.with_suffix(".cpp")
+            cpp.write_text(STUB + body + DRIVER)
+            built = subprocess.run([compiler, "-std=c++17", "-O1", "-ffp-contract=off",
+                                    "-fsanitize=undefined", "-fno-sanitize-recover=all",
+                                    str(cpp), "-o", str(binary)], capture_output=True, text=True)
+            if built.returncode:
+                raise AssertionError(built.stderr)
 
     def run_suite(self, suite):
         result = subprocess.run([str(self.binary), suite], capture_output=True, text=True)
@@ -384,6 +424,15 @@ class KvSplitReduceDeviceModelTests(unittest.TestCase):
 
     def test_dynamic_stats_ignore_simulated_stale_global_scalar_cache(self):
         self.run_suite("normalized")
+
+    def test_input_ub_reuse_waits_for_prior_vf_reads_across_grid_stride_rows(self):
+        self.run_suite("async_reuse")
+
+    def test_missing_reverse_fence_is_rejected_by_async_ownership_model(self):
+        result = subprocess.run([str(self.without_fence), "async_reuse"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("MTE2 overwrites partial UB while previous VF read is still pending", result.stderr)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
-# 当前只取证：定位KV-split的S1大误差
+# 当前任务：验证KV-split归约的UB复用同步修复
 
-最新e93c460报告DMA修复后仍失败，原V4正常。**现在先不重编、不重跑NPU、不改tiling或换算法。**
+8791d2e已交付原始S1诊断：partial0对数学参考L2约0.00094，final对BF16(partial0)约1.14–1.16。
+分片计算在这两项S1检查中正常，故优先修归约。已补每行MTE2搬入前的V_MTE2反向依赖，
+防止下一行覆盖上一行VF尚未读完的partialUb；**尚未在A5验证修复效果**。
 按 [experimental/single_pass/KV_SPLIT_TASK.md](experimental/single_pass/KV_SPLIT_TASK.md)
-最顶部任务，从已有完整results.json/outputs.npz/partial_diagnostics只读提取
-S1原始三项，直接提交生成的JSON，不能再用手工摘要替代。
+最顶部任务，保留旧库SHA，增量重编隔离候选，先精度门禁、通过后同轮配对计时。
+不改producer/ABI/cache布局，不换SDK/vendor，不覆盖已验证V4。
 
 下面保留候选背景，不是本轮重新扫描指令。
 
