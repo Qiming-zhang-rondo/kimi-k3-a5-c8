@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-27 17:35",
+  "status": "MAJOR_PROGRESS_THEN_BLOCKED",
+  "progress": {
+    "single_pass_kernel": "ACCEPTED (no more kernel rejection)",
+    "reader": "ACCEPTED",
+    "source_root": "ACCEPTED",
+    "library_dir": "ACCEPTED",
+    "diagnostics_path": "ACCEPTED",
+    "window": "ACCEPTED (128)"
+  },
+  "new_error": {
+    "message": "recent128 accuracy_eager requires an already selected NATIVE path; PROLOG_V3 has no original BF16 KV output here and is not silently disabled",
+    "location": "runtime.py line 127 -> contract.py line 101 validate_runtime_contract",
+    "timestamp": "17:24:36"
+  },
+  "root_cause": "Production model uses PROLOG_V3 (fused prolog operator that does RMSNorm+RoPE+quantization in one step). PROLOG_V3 does NOT expose raw BF16 KV intermediate output. The hot window TAP needs to capture BF16 KV AFTER RMSNorm/RoPE but BEFORE MXFP4 quantization. This intermediate does not exist in the PROLOG_V3 output.",
+  "error_chain": {
+    "worker_load": "Worker_DP1 loading weights OK",
+    "hooks_init": "hooks.py line 46 weights() called OK",
+    "runtime_init": "runtime.py line 127 Recent128Runtime.__init__ called OK",
+    "contract_check": "contract.py line 101 validate_runtime_contract FAILS because PROLOG_V3 selected but execution=accuracy_eager requires NATIVE"
+  },
+  "options": [
+    "1. Change preprocess to native_accuracy in additional_config (disables PROLOG_V3, uses native path, slower but exposes BF16). This is an accuracy experiment, not production.",
+    "2. Adapt hooks to work with PROLOG_V3 (requires modifying PROLOG_V3 operator to expose BF16 output, or finding an alternative capture point).",
+    "3. Add a new execution mode that works with PROLOG_V3 (e.g. production_eager without full math reference)."
+  ],
+  "production_context": "User wants to run GPQA accuracy test with hot window enabled. PROLOG_V3 is the production preprocessing path. Using native_accuracy changes the performance profile but allows accuracy testing."
+}
