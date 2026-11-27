@@ -1,0 +1,11 @@
+{
+  "status": "BLOCKED",
+  "issue": "run_model_probe.py cannot create LLM in production container mxllm_glm5.3c4_z00957521",
+  "blockers": [
+    "VllmConfig pydantic rejects sfa_recent128 as unexpected keyword argument",
+    "mla_kv_quant_mode not in AttentionConfig during LLM constructor",
+    "patch.worker import triggers ASCEND_VLLM_KV_CONTIG missing error"
+  ],
+  "environment": "production container on 178, PR199 applied, vllm 0.30.0",
+  "need": "Fix probe script integration with MXLLM patch system"
+}
