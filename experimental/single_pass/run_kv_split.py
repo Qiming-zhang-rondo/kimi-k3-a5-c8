@@ -6,7 +6,9 @@ No CPU mathematical work, quantization or cache write is timed. This is an A5
 prototype harness; host tests do not establish device correctness or speed.
 """
 import argparse
+import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 import traceback
@@ -21,6 +23,9 @@ from run_single_pass import select_aic_count
 FAULT_CODES=("507015","507035","507053","507036","507011",
              "ACL_ERROR_RT_AICORE_EXCEPTION","GM invalid")
 FAILURE_CASES=("w0_split1","w128_split1")
+VERIFICATION_PAIRS=(("installed_c4","w0_v4"),("installed_c4","w0_split4"),
+    ("installed_c4","w128_split4"),("w0_v4","w0_split4"),
+    ("w128_v4","w128_split4"),("w0_split4","w128_split4"))
 
 
 class ControlFailed(RuntimeError):
@@ -126,6 +131,73 @@ def measure_candidates(calls,specs,controls,graph_controls,args,benchmark,paired
         result[name+"_vs_v4"]=timing
         persist()
     return result
+
+
+def validate_verification_options(args):
+    if not getattr(args,"verify_comparison",False):
+        return
+    if set(args.windows)!={0,128} or 4 not in args.splits:
+        raise ValueError("--verify-comparison requires both --windows 0 128 and --splits including 4")
+    if args.return_stats or args.repeats<20 or args.timing not in ("graph","eager"):
+        raise ValueError("Verification requires stats off, --repeats >=20 and --timing graph or eager")
+
+
+def measure_verification(calls,controls,graph_controls,args,benchmark,paired_benchmark,
+                         persist=lambda:None,results=None):
+    """Direct pairs, including the actual installed C4 operator as an anchor."""
+    require(all_passed(controls),"Verification requires all original accuracy controls")
+    if args.timing=="graph":
+        require(all_passed(graph_controls),"Verification requires all graph/poison controls")
+    require(args.repeats>=20,"Verification needs at least 20 complete alternating rounds")
+    require(all(name in calls for pair in VERIFICATION_PAIRS for name in pair),
+        "Verification needs installed C4, old W0/V4 and both split4 windows")
+    result={} if results is None else results
+    for baseline,candidate in VERIFICATION_PAIRS:
+        timing=paired_benchmark(calls[baseline],calls[candidate],args,benchmark)
+        require(set(timing)=={args.timing},"Verification timing mode missing or substituted")
+        for item in timing.values():
+            rounds=item.get("rounds",[])
+            require(item.get("status")=="MEASURED" and len(rounds)==args.repeats,
+                "Incomplete verification pair cannot be MEASURED")
+            for index,pair in enumerate(rounds):
+                expected=["baseline","candidate"] if index%2==0 else ["candidate","baseline"]
+                require(pair.get("round")==index and pair.get("order")==expected,
+                    "Verification rounds must alternate AB/BA without dropping rounds")
+                for clock in ("event_us","wall_us"):
+                    original=pair.get("baseline",{}).get(clock,{}).get("median")
+                    updated=pair.get("candidate",{}).get(clock,{}).get("median")
+                    require(all(isinstance(x,(int,float)) and not isinstance(x,bool) and
+                        math.isfinite(x) and x>0 for x in (original,updated)),
+                        "Verification needs positive finite raw event AND wall times")
+                    ratio=pair.get(clock+"_ratio")
+                    require(isinstance(ratio,(int,float)) and not isinstance(ratio,bool) and
+                        math.isclose(ratio,updated/original,rel_tol=1e-9),
+                        "Verification ratio must match its own raw pair")
+        result[candidate+"_vs_"+baseline]=dict(baseline=baseline,candidate=candidate,
+            ratio_definition="candidate / baseline per round; median of ratios, not ratio of medians",
+            timing=timing)
+        persist()
+    return result
+
+
+def check_saved_verification_outputs(output_readers,partial_readers,windows,references,host,compare,acceptable,
+                                     partial_host=None):
+    """Read the last timed buffers; never rerun an operator to refresh them."""
+    checks,snapshots={},{}
+    partial_host=host if partial_host is None else partial_host
+    for name,read in output_readers.items():
+        actual=host(read())
+        snapshots[name]=actual
+        metric=compare(actual,references[windows[name]])
+        metric.update(passed=bool(acceptable(metric,.01)),tolerance=.01)
+        item=dict(mathematical=metric)
+        if name in partial_readers:
+            partials=tuple(partial_host(x) for x in partial_readers[name]())
+            item["partial_reduce"],_=host_partial_control(partials,actual,compare,acceptable)
+            for suffix,value in zip(("partial_o","partial_max","partial_sum"),partials):
+                snapshots[name+"_"+suffix]=value
+        checks[name]=item
+    return checks,snapshots
 
 
 def host_partial_control(partials,final,compare,acceptable):
@@ -264,6 +336,15 @@ def execute(args,report,persist):
 
     calls={f"w{window}_v4":lambda window=window:baseline_call(window) for window in args.windows}
     calls.update({name:lambda name=name:plans[name].run(*inputs,specs[name]["window"])[0] for name in specs})
+    installed_outputs={}
+    if args.verify_comparison:
+        def installed_c4_call():
+            # Retain the actual captured/timed output. A post-timing eager
+            # refresh could hide a failure in graph replay.
+            value=base._read("c4",base.indices,cache=ring.cold_cache,statistics=False)[0]
+            installed_outputs["installed_c4"]=value
+            return value
+        calls["installed_c4"]=installed_c4_call
     report["entries"]={f"w{window}_v4":dict(window=window,
         reader="same-library measured V4 load_variant4" if window else "same-library unchanged native W0 cold entry",
         attention_aic_tasks=args.aic_count,attention_launches=1,reduction_launches=0,return_stats=args.return_stats)
@@ -271,9 +352,23 @@ def execute(args,report,persist):
     report["entries"].update({name:dict(spec,attention_aic_tasks=args.queries*spec["splits"],
         attention_launches=1,reduction_launches=1,timed_reduction_included=True,
         normalized_partial_dtype="FP32",return_stats=args.return_stats) for name,spec in specs.items()})
+    if args.verify_comparison:
+        report["entries"]["installed_c4"]=dict(window=0,reader="actual installed cloud_kv_quant_sparse_flash_attention",
+            same_query_cache_indices_table_lengths_scale=True,return_stats=False,
+            attention_aic_tasks="selected by installed operator; not forced",
+            python_entry="base._read('c4',base.indices,cache=ring.cold_cache,statistics=False)[0]")
+        report["comparison_contract"]=dict(pairs=[dict(baseline=a,candidate=b) for a,b in VERIFICATION_PAIRS],
+            attention_and_reduction_included=True,writes_included=False,original_topk_unchanged=True,
+            installed_c4_baseline_included=True,return_stats=False,
+            reported_active_cores="task mapping only; profiler not measured")
     raw_arrays=dict(query=host(base.query),cold_packed=ring.cold_cache.view(torch.uint8).cpu().numpy(),
         block_table=table_cpu,topk=ids,positions=positions_cpu,
         hot_latent=host(ring.hot_cache),hot_rope=host(ring.hot_rope),hot_tags=tags_cpu)
+    if args.verify_comparison:
+        report["input_identity"]={name:dict(shape=list(value.shape),dtype=str(value.dtype),
+            sha256=hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest())
+            for name,value in raw_arrays.items()}
+        report["input_identity_scope"]="logical host snapshots shared by all arms; cold_packed is raw cache bytes"
 
     def reference(window,*,zero=False,prefix=None):
         arrays=dict(raw_arrays)
@@ -308,6 +403,19 @@ def execute(args,report,persist):
             metric.update(passed=bool(acceptable(metric,.01)),tolerance=.01,
                 reference="Independent FP64 whole-selected-set softmax over actual packed C4/original BF16 ring")
             report["controls"]["mathematical"][name]=metric
+            persist()
+        if args.verify_comparison:
+            tensor=calls["installed_c4"]()
+            require(tensor.dtype==torch.bfloat16,"Installed C4 must use the same BF16 final output contract")
+            actual=host(tensor)
+            arrays["installed_c4"]=actual
+            metric=compare(actual,references[0])
+            metric.update(passed=bool(acceptable(metric,.01)),tolerance=.01,
+                reference="Same actual packed C4 and original TopK; independent FP64 whole-set attention")
+            report["controls"]["mathematical"]["installed_c4"]=metric
+            alignment=compare(actual,baseline_outputs[0])
+            alignment.update(passed=bool(acceptable(alignment,.01)),tolerance=.01)
+            report["controls"]["installed_c4_alignment"]=alignment
             persist()
         for name,spec in specs.items():
             tensor=calls[name]()
@@ -376,6 +484,10 @@ def execute(args,report,persist):
                 report["graph_controls"][name]=graph_replay_control(calls[name],baselines[window].outputs,
                     torch,host,dict(compare=compare,acceptable=acceptable))
                 persist()
+            if args.verify_comparison:
+                report["graph_controls"]["installed_c4"]=graph_replay_control(calls["installed_c4"],
+                    lambda:(),torch,host,dict(compare=compare,acceptable=acceptable))
+                persist()
             for name in specs:
                 plan=plans[name]
                 buffers=lambda plan=plan:(*plan.outputs(),*plan.partial_outputs())
@@ -400,6 +512,24 @@ def execute(args,report,persist):
         if args.timing!="none":
             measure_candidates(calls,specs,report["controls"],report["graph_controls"],args,benchmark,
                 paired_benchmark,persist,results=report["timings"])
+            if args.verify_comparison:
+                report["verification_timings"]={}
+                measure_verification(calls,report["controls"],report["graph_controls"],args,benchmark,
+                    paired_benchmark,persist,results=report["verification_timings"])
+                torch.npu.synchronize()
+                readers={f"w{window}_v4":lambda window=window:baselines[window].outputs()[0]
+                    for window in args.windows}
+                readers.update({name:lambda name=name:plans[name].outputs()[0] for name in specs})
+                readers["installed_c4"]=lambda:installed_outputs["installed_c4"]
+                windows={name:specs[name]["window"] if name in specs else
+                    (128 if name=="w128_v4" else 0) for name in readers}
+                report["post_timing_controls"],snapshots=check_saved_verification_outputs(readers,
+                    {name:plans[name].partial_outputs for name in specs},windows,references,
+                    host,compare,acceptable,partial_host=partial_host)
+                np.savez_compressed(args.output/"post_timing_outputs.npz",**snapshots)
+                report["post_timing_scope"]="saved final timed graph/eager buffers; no refreshing operator call"
+                persist()
+                require(all_passed(report["post_timing_controls"]),"Post-timing mathematical/partial controls failed")
     require(np.array_equal(base.indices.detach().cpu().numpy(),ids),"Original device TopK mutated")
     report.update(status="VALIDATED_ONLY" if args.timing=="none" else "MEASURED",
         performance_scope="NOT_MEASURED" if args.timing=="none" else
@@ -421,6 +551,8 @@ def parser():
     p.add_argument("--windows",type=int,nargs="+",choices=(0,128),default=[0,128])
     p.add_argument("--splits",type=int,nargs="+",choices=(1,2,4),default=[1,2,4])
     p.add_argument("--return-stats",action="store_true")
+    p.add_argument("--verify-comparison",action="store_true",
+        help="Add actual installed C4 and six direct AB/BA pairs; needs windows 0/128, split4, stats off, >=20 rounds")
     p.add_argument("--seed",type=int,default=20261120)
     p.add_argument("--timing",choices=("none","eager","graph"),default="none")
     p.add_argument("--warmup",type=int,default=20)
@@ -440,6 +572,7 @@ def main(argv=None):
             raise ValueError("KV-split prototype requires Q*split_count <= 16")
         if args.warmup<0 or min(args.iterations,args.repeats)<1:
             raise ValueError("Invalid timing counts")
+        validate_verification_options(args)
     except ValueError as error:
         parser().error(str(error))
     args.output=args.output.expanduser().resolve()
@@ -447,7 +580,7 @@ def main(argv=None):
     if marker.exists():
         parser().error("Existing device-fault marker blocks another NPU run")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-kv-split-a5-v1.1-native-empty-sentinel",status="STARTED",
+    report=dict(version="qsfa-recent128-kv-split-a5-v1.2-direct-baseline-verification",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED",
         scope="prepared read including partial attention plus device reduction; no writes")

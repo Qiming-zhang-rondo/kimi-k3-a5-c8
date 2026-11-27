@@ -1,5 +1,9 @@
 # V4 KV-split：真实代码已交付，执行构建和A5单算子验证
 
+**当前任务已转到 [KV_SPLIT_FAIR_AB_TASK.md](KV_SPLIT_FAIR_AB_TASK.md)**：用户要求核实50us与80us，
+复用cfdb6c3所述已成功库，运行`--verify-comparison`五臂六组同轮20轮配对。
+下面保留构建/修复历史与合同，不是本轮要求重编设备库。
+
 用户要在保留MXFP4主缓存+BF16 recent128格式的前提下，尝试沿KV分片提高Q1/Q4核利用率。
 本次不是参数建议；已新增候选attention入口、FP32 partial写出、归约kernel、host/bridge与runner。
 **尚未在外部Mac上做CANN编译/NPU运行，不预报40–50us。**

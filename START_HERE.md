@@ -1,11 +1,12 @@
-# 当前任务：验证KV-split归约的UB复用同步修复
+# 当前任务：复测新版50us是否真的快于原生纯C4
 
-8791d2e已交付原始S1诊断：partial0对数学参考L2约0.00094，final对BF16(partial0)约1.14–1.16。
-分片计算在这两项S1检查中正常，故优先修归约。已补每行MTE2搬入前的V_MTE2反向依赖，
-防止下一行覆盖上一行VF尚未读完的partialUb；**尚未在A5验证修复效果**。
-按 [experimental/single_pass/KV_SPLIT_TASK.md](experimental/single_pass/KV_SPLIT_TASK.md)
-最顶部任务，保留旧库SHA，增量重编隔离候选，先精度门禁、通过后同轮配对计时。
-不改producer/ABI/cache布局，不换SDK/vendor，不覆盖已验证V4。
+用户对cfdb6c3摘要的50us vs旧80us提出质疑，明确要求内网AI实测比较。
+立即按 [experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md](experimental/single_pass/KV_SPLIT_FAIR_AB_TASK.md)
+执行：复用已有成功库，只更新Python测试，**无需重编kernel**。
+五臂同输入：实际installed C4、同库旧C4、旧V4热窗、新S4纯C4、新S4热窗。
+新增`--verify-comparison`做六组直接20轮AB/BA；全部精度/graph门禁先通过，计时后直接读取
+最后timed buffer再验（不能先调用算子刷新）。交付完整原始JSON和SHA，不再只交手工摘要。
+空闲卡、同scope，所有candidate计时包含attention+reduce；不换CANN/vendor、不停业务。
 
 下面保留候选背景，不是本轮重新扫描指令。
 

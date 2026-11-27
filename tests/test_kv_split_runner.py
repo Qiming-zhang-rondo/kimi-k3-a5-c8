@@ -1,6 +1,7 @@
 """Host-only gates for the new KV-split runner; never imports Torch/NPU."""
 from pathlib import Path
 from types import SimpleNamespace
+import copy
 import hashlib
 import json
 import sys
@@ -204,6 +205,145 @@ class KvSplitRunnerTest(unittest.TestCase):
                 np.testing.assert_array_equal(saved["partial_maximum"].view(np.uint32),maxima.view(np.uint32))
                 np.testing.assert_array_equal(saved["partial_output"],output)
                 np.testing.assert_array_equal(saved["partial_sum"],sums)
+
+
+class KvSplitVerificationTest(unittest.TestCase):
+    def arguments(self,**changes):
+        values=dict(verify_comparison=True,windows=[0,128],splits=[1,2,4],return_stats=False,
+            timing="graph",repeats=20)
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def calls(self):
+        names={name for pair in runner.VERIFICATION_PAIRS for name in pair}
+        result={}
+        for name in names:
+            def call(name=name):
+                raise AssertionError("The host pair fixture must not invoke an operator: "+name)
+            call.arm=name
+            result[name]=call
+        return result
+
+    def timing(self):
+        rounds=[]
+        for index in range(20):
+            baseline_event=80.+index*.17
+            candidate_event=63.+index*.11
+            rounds.append(dict(round=index,
+                order=["baseline","candidate"] if index%2==0 else ["candidate","baseline"],
+                baseline=dict(event_us=dict(median=baseline_event,samples=[baseline_event-.01,baseline_event+.01]),
+                    wall_us=dict(median=baseline_event+2)),
+                candidate=dict(event_us=dict(median=candidate_event,samples=[candidate_event-.01,candidate_event+.01]),
+                    wall_us=dict(median=candidate_event+3)),
+                event_us_ratio=candidate_event/baseline_event,
+                wall_us_ratio=(candidate_event+3)/(baseline_event+2)))
+        return dict(graph=dict(status="MEASURED",rounds=rounds,unmodified_raw_marker="retain-this-field"))
+
+    def test_verification_options_reject_incomplete_or_mismatched_contract_before_device(self):
+        runner.validate_verification_options(self.arguments())
+        runner.validate_verification_options(self.arguments(timing="eager"))
+        for changes in (dict(windows=[128]),dict(splits=[1,2]),dict(repeats=19),
+                        dict(return_stats=True),dict(timing="none")):
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                runner.validate_verification_options(self.arguments(**changes))
+
+    def test_exact_six_pairs_keep_twenty_event_wall_rounds_and_raw_order(self):
+        expected=(("installed_c4","w0_v4"),("installed_c4","w0_split4"),
+            ("installed_c4","w128_split4"),("w0_v4","w0_split4"),
+            ("w128_v4","w128_split4"),("w0_split4","w128_split4"))
+        self.assertEqual(runner.VERIFICATION_PAIRS,expected)
+        calls=self.calls();trace=[];raw=[]
+        def paired(baseline,candidate,args,benchmark):
+            trace.append((baseline.arm,candidate.arm))
+            item=self.timing();raw.append(copy.deepcopy(item))
+            return item
+        results={};persisted=[]
+        actual=runner.measure_verification(calls,{"math":{"passed":True}},{"poison":{"passed":True}},
+            self.arguments(),None,paired,lambda:persisted.append(len(results)),results=results)
+        self.assertIs(actual,results)
+        self.assertEqual(trace,list(expected))
+        self.assertEqual(persisted,[1,2,3,4,5,6])
+        for index,(baseline,candidate) in enumerate(expected):
+            item=results[candidate+"_vs_"+baseline]
+            self.assertEqual((item["baseline"],item["candidate"]),(baseline,candidate))
+            self.assertEqual(item["timing"],raw[index])
+            self.assertEqual(len(item["timing"]["graph"]["rounds"]),20)
+
+    def test_no_verification_pair_runs_when_any_required_gate_or_arm_is_missing(self):
+        calls=self.calls();trace=[]
+        def paired(*unused):
+            trace.append(True)
+            return self.timing()
+        cases=((calls,{"math":{"passed":False}},{"poison":{"passed":True}},self.arguments()),
+               (calls,{"math":{"passed":True}},{"poison":{"passed":False}},self.arguments()),
+               (calls,{"math":{"passed":True}},{"poison":{"passed":True}},self.arguments(repeats=19)),
+               ({k:v for k,v in calls.items() if k!="installed_c4"},
+                {"math":{"passed":True}},{"poison":{"passed":True}},self.arguments()))
+        for selected,controls,graphs,args in cases:
+            with self.assertRaises(runner.ControlFailed):
+                runner.measure_verification(selected,controls,graphs,args,None,paired)
+        self.assertEqual(trace,[])
+
+    def test_dropped_round_clock_ratio_or_abba_order_cannot_claim_verification(self):
+        def damage(payload,kind):
+            rounds=payload["graph"]["rounds"]
+            if kind=="missing_round": rounds.pop()
+            elif kind=="missing_wall": del rounds[0]["candidate"]["wall_us"]
+            elif kind=="missing_event": del rounds[2]["baseline"]["event_us"]
+            elif kind=="missing_ratio": del rounds[3]["wall_us_ratio"]
+            elif kind=="wrong_ratio": rounds[4]["event_us_ratio"]*=.5
+            elif kind=="wrong_order": rounds[1]["order"]=["baseline","candidate"]
+            elif kind=="wrong_round_index": rounds[2]["round"]=3
+            elif kind=="nonfinite": rounds[3]["candidate"]["event_us"]["median"]=float("nan")
+            elif kind=="nonpositive": rounds[3]["baseline"]["wall_us"]["median"]=0
+            elif kind=="wrong_mode": payload["eager"]=payload.pop("graph")
+        for kind in ("missing_round","missing_wall","missing_event","missing_ratio","wrong_ratio",
+                     "wrong_order","wrong_round_index","nonfinite","nonpositive","wrong_mode"):
+            payload=self.timing();damage(payload,kind)
+            with self.subTest(kind=kind),self.assertRaises(runner.ControlFailed):
+                runner.measure_verification(self.calls(),{"math":{"passed":True}},
+                    {"poison":{"passed":True}},self.arguments(),None,lambda *unused:payload)
+
+    def test_posttiming_reads_wrong_saved_output_without_rerunning_to_repair_it(self):
+        class Prepared:
+            def __init__(self,value):
+                self.value=np.full((1,64,512),value,np.float32)
+                self.reads=self.runs=0
+            def saved(self):
+                self.reads+=1
+                return self.value
+            def run(self):
+                self.runs+=1
+                self.value.fill(1)
+                raise AssertionError("posttiming validation must not repair output by rerunning")
+        broken=Prepared(0);correct=Prepared(2)
+        references={0:np.ones((1,64,512),np.float64),128:np.full((1,64,512),2,np.float64)}
+        compare=lambda actual,reference:dict(error=float(np.max(np.abs(np.asarray(actual)-reference))))
+        checks,snapshots=runner.check_saved_verification_outputs(
+            {"w0_v4":broken.saved,"installed_c4":broken.saved,"w128_split4":correct.saved},
+            {},{"w0_v4":0,"installed_c4":0,"w128_split4":128},references,
+            lambda value:np.asarray(value).copy(),compare,lambda metric,limit:metric["error"]<=limit)
+        self.assertFalse(runner.all_passed(checks))
+        self.assertTrue(snapshots)
+        self.assertEqual((broken.reads,correct.reads),(2,1))
+        self.assertEqual((broken.runs,correct.runs),(0,0))
+        np.testing.assert_array_equal(broken.value,0)
+
+    def test_posttiming_correct_final_does_not_hide_corrupted_saved_partial_state(self):
+        final=np.full((1,64,512),2,np.float32)
+        partial_o=np.full((1,4,64,512),9,np.float32)
+        maximum=np.zeros((1,4,64),np.float32)
+        total=np.ones_like(maximum)
+        trace=[]
+        def get_partial():
+            trace.append("read_partial")
+            return partial_o,maximum,total
+        compare=lambda actual,reference:dict(error=float(np.max(np.abs(np.asarray(actual)-reference))))
+        checks,_=runner.check_saved_verification_outputs({"w128_split4":lambda:final},
+            {"w128_split4":get_partial},{"w128_split4":128},{128:final.copy()},
+            lambda value:np.asarray(value).copy(),compare,lambda metric,limit:metric["error"]<=limit)
+        self.assertFalse(runner.all_passed(checks))
+        self.assertEqual(trace,["read_partial"])
 
 
 if __name__=="__main__":
