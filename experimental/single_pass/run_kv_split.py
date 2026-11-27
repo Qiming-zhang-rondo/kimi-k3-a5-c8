@@ -26,6 +26,8 @@ FAILURE_CASES=("w0_split1","w128_split1")
 VERIFICATION_PAIRS=(("installed_c4","w0_v4"),("installed_c4","w0_split4"),
     ("installed_c4","w128_split4"),("w0_v4","w0_split4"),
     ("w128_v4","w128_split4"),("w0_split4","w128_split4"))
+FULL_PRECISION_PAIRS=(("installed_c4","installed_bf16"),
+    ("installed_c4","w128_split4"),("installed_bf16","w128_split4"))
 
 
 class ControlFailed(RuntimeError):
@@ -134,25 +136,28 @@ def measure_candidates(calls,specs,controls,graph_controls,args,benchmark,paired
 
 
 def validate_verification_options(args):
+    if getattr(args,"compare_bf16",False) and (not args.verify_comparison or args.splits!=[4]):
+        raise ValueError("--compare-bf16 requires --verify-comparison and --splits 4; use run_attention_compare.py")
     if not getattr(args,"verify_comparison",False):
         return
     if set(args.windows)!={0,128} or 4 not in args.splits:
         raise ValueError("--verify-comparison requires both --windows 0 128 and --splits including 4")
-    if args.return_stats or args.repeats<20 or args.timing not in ("graph","eager"):
+    timing_modes=("none","graph","eager") if getattr(args,"compare_bf16",False) else ("graph","eager")
+    if args.return_stats or args.repeats<20 or args.timing not in timing_modes:
         raise ValueError("Verification requires stats off, --repeats >=20 and --timing graph or eager")
 
 
 def measure_verification(calls,controls,graph_controls,args,benchmark,paired_benchmark,
-                         persist=lambda:None,results=None):
+                         persist=lambda:None,results=None,pairs=VERIFICATION_PAIRS):
     """Direct pairs, including the actual installed C4 operator as an anchor."""
     require(all_passed(controls),"Verification requires all original accuracy controls")
     if args.timing=="graph":
         require(all_passed(graph_controls),"Verification requires all graph/poison controls")
     require(args.repeats>=20,"Verification needs at least 20 complete alternating rounds")
-    require(all(name in calls for pair in VERIFICATION_PAIRS for name in pair),
+    require(all(name in calls for pair in pairs for name in pair),
         "Verification needs installed C4, old W0/V4 and both split4 windows")
     result={} if results is None else results
-    for baseline,candidate in VERIFICATION_PAIRS:
+    for baseline,candidate in pairs:
         timing=paired_benchmark(calls[baseline],calls[candidate],args,benchmark)
         require(set(timing)=={args.timing},"Verification timing mode missing or substituted")
         for item in timing.values():
@@ -262,12 +267,19 @@ def execute(args,report,persist):
     report["payload"]=activate_payload(args.payload_dir)
     from kv_native_twopass import NativeTwoPassBackend
     from variable_bf16_runner import VariableBf16HotRunner,validate_variable_case
-    from kv_window_common import save_case,synthetic_case
+    from kv_window_common import save_case,synthetic_case,attention_reference
     from test_kv_hot_fused_a5 import compare,acceptable,paired_benchmark
     from kv_window_backend import benchmark
     from run_direct_ab import graph_replay_control
     from load_single_pass import load_single_pass
     from host_contract import SinglePassContract,dense_attention_reference
+
+    full_comparison=getattr(args,"compare_bf16",False)
+    if full_comparison:
+        # In this experiment a row is one query/head's D512 output vector.
+        # Quantization quality is reported separately from these strict gates.
+        from attention_compare_metrics import compare_outputs as compare
+        from attention_compare_report import build_accuracy_report
 
     specs=candidate_specs(args.windows,args.splits)
     require(args.queries*max(args.splits)<=16,"KV-split prototype requires Q*split_count <= 16")
@@ -345,6 +357,16 @@ def execute(args,report,persist):
             installed_outputs["installed_c4"]=value
             return value
         calls["installed_c4"]=installed_c4_call
+    if full_comparison:
+        require(args.verify_comparison,"Full BF16 comparison needs the actual installed C4 anchor")
+        require(base.full_bf16_plan.uniform_count==2048 and
+            base.full_bf16_plan.summary["operator_calls"]==1,
+            "Full BF16 must use a single native call with all 2048 indices valid")
+        def installed_bf16_call():
+            value=base._read("bf16",base.indices,statistics=False)[0]
+            installed_outputs["installed_bf16"]=value
+            return value
+        calls["installed_bf16"]=installed_bf16_call
     report["entries"]={f"w{window}_v4":dict(window=window,
         reader="same-library measured V4 load_variant4" if window else "same-library unchanged native W0 cold entry",
         attention_aic_tasks=args.aic_count,attention_launches=1,reduction_launches=0,return_stats=args.return_stats)
@@ -361,9 +383,23 @@ def execute(args,report,persist):
             attention_and_reduction_included=True,writes_included=False,original_topk_unchanged=True,
             installed_c4_baseline_included=True,return_stats=False,
             reported_active_cores="task mapping only; profiler not measured")
+    if full_comparison:
+        report["entries"]["installed_bf16"]=dict(window="full_bf16",reader="actual installed cloud_sparse_flash_attention",
+            same_query_indices_table_lengths_scale=True,return_stats=False,
+            attention_launches=1,reduction_launches=0,
+            python_entry="base._read('bf16',base.indices,statistics=False)[0]",
+            read_plan=dict(base.full_bf16_plan.summary))
+        report["comparison_contract"].update(
+            pairs=[dict(baseline=a,candidate=b) for a,b in FULL_PRECISION_PAIRS],
+            quality_reference="shared original BF16 inputs, FP64 mathematical attention AND actual native BF16 output",
+            metrics="relative L2 and cosine per query/head; different reference names never conflated",
+            scope="single-layer controlled synthetic input, all 128 recent tokens selected; fixed TopK, no QLI")
     raw_arrays=dict(query=host(base.query),cold_packed=ring.cold_cache.view(torch.uint8).cpu().numpy(),
         block_table=table_cpu,topk=ids,positions=positions_cpu,
         hot_latent=host(ring.hot_cache),hot_rope=host(ring.hot_rope),hot_tags=tags_cpu)
+    if full_comparison:
+        raw_arrays["original_bf16_latent_paged"]=host(base.kv)
+        raw_arrays["original_bf16_rope_paged"]=host(base.rope)
     if args.verify_comparison:
         report["input_identity"]={name:dict(shape=list(value.shape),dtype=str(value.dtype),
             sha256=hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest())
@@ -371,7 +407,9 @@ def execute(args,report,persist):
         report["input_identity_scope"]="logical host snapshots shared by all arms; cold_packed is raw cache bytes"
 
     def reference(window,*,zero=False,prefix=None):
-        arrays=dict(raw_arrays)
+        # Only the kernel contract's declared inputs belong in this reference.
+        arrays={name:raw_arrays[name] for name in
+            ("query","cold_packed","block_table","topk","positions","hot_latent","hot_rope","hot_tags")}
         if zero:
             arrays["query"]=np.zeros_like(raw_arrays["query"])
         if prefix is not None:
@@ -382,6 +420,10 @@ def execute(args,report,persist):
         return dense_attention_reference(contract,**arrays)["output"]
 
     references={window:reference(window) for window in args.windows}
+    if full_comparison:
+        # synthetic_case rounds all original Q/K/RoPE to BF16 before any
+        # quantization. This is not a second NPU attention masquerading as math.
+        references["full_bf16"]=attention_reference(data)
     arrays={f"w{window}_matching_math":value for window,value in references.items()}
     report["controls"]=dict(mathematical={},partial_reduce={},zero_query={})
     report["cross_checks"]={}
@@ -416,6 +458,16 @@ def execute(args,report,persist):
             alignment=compare(actual,baseline_outputs[0])
             alignment.update(passed=bool(acceptable(alignment,.01)),tolerance=.01)
             report["controls"]["installed_c4_alignment"]=alignment
+            persist()
+        if full_comparison:
+            tensor=calls["installed_bf16"]()
+            require(tensor.dtype==torch.bfloat16,"Native BF16 comparison must retain BF16 final output")
+            actual=host(tensor)
+            arrays["installed_bf16"]=actual
+            metric=compare(actual,references["full_bf16"])
+            metric.update(passed=bool(acceptable(metric,.01)),tolerance=.01,
+                reference="Original BF16 Q/K/V/RoPE, independent FP64 whole-selected-set attention")
+            report["controls"]["mathematical"]["installed_bf16"]=metric
             persist()
         for name,spec in specs.items():
             tensor=calls[name]()
@@ -470,6 +522,14 @@ def execute(args,report,persist):
                 section[name]=dict(passed=metric["passed"] and merge_gate["passed"] and count_gate["passed"],
                     mathematical=metric,cpu_partial_merge=merge_gate,zero_query_counts=count_gate,not_timed=True)
                 persist()
+        arm_reference_keys={name:specs[name]["window"] if name in specs else
+            ("full_bf16" if name=="installed_bf16" else 128 if name=="w128_v4" else 0)
+            for name in calls}
+        if full_comparison:
+            report["precision_comparison"]=build_accuracy_report(
+                {name:arrays[name] for name in calls},
+                {name:references[key] for name,key in arm_reference_keys.items()},
+                references["full_bf16"])
         np.savez_compressed(args.output/"outputs.npz",**arrays)
         report["all_accuracy_controls_passed"]=all_passed(report["controls"])
         persist()
@@ -477,6 +537,11 @@ def execute(args,report,persist):
 
         # Restore original complete inputs by calling their immutable closures;
         # no hot/cold cache, source query or original indices were mutated.
+        if full_comparison:
+            # W0 split is a diagnostic arm, not one of the three timed pairs.
+            # Restore it BEFORE timing; after timing we only read saved buffers.
+            for call in calls.values():
+                call()
         report["graph_controls"]={}
         if args.timing=="graph":
             for window in args.windows:
@@ -486,6 +551,10 @@ def execute(args,report,persist):
                 persist()
             if args.verify_comparison:
                 report["graph_controls"]["installed_c4"]=graph_replay_control(calls["installed_c4"],
+                    lambda:(),torch,host,dict(compare=compare,acceptable=acceptable))
+                persist()
+            if full_comparison:
+                report["graph_controls"]["installed_bf16"]=graph_replay_control(calls["installed_bf16"],
                     lambda:(),torch,host,dict(compare=compare,acceptable=acceptable))
                 persist()
             for name in specs:
@@ -510,24 +579,33 @@ def execute(args,report,persist):
             require(all_passed(report["graph_controls"]),"KV-split graph replay/partial poison control failed")
         report["timings"]={}
         if args.timing!="none":
-            measure_candidates(calls,specs,report["controls"],report["graph_controls"],args,benchmark,
-                paired_benchmark,persist,results=report["timings"])
+            if not full_comparison:
+                measure_candidates(calls,specs,report["controls"],report["graph_controls"],args,benchmark,
+                    paired_benchmark,persist,results=report["timings"])
             if args.verify_comparison:
                 report["verification_timings"]={}
                 measure_verification(calls,report["controls"],report["graph_controls"],args,benchmark,
-                    paired_benchmark,persist,results=report["verification_timings"])
+                    paired_benchmark,persist,results=report["verification_timings"],
+                    pairs=FULL_PRECISION_PAIRS if full_comparison else VERIFICATION_PAIRS)
                 torch.npu.synchronize()
                 readers={f"w{window}_v4":lambda window=window:baselines[window].outputs()[0]
                     for window in args.windows}
                 readers.update({name:lambda name=name:plans[name].outputs()[0] for name in specs})
                 readers["installed_c4"]=lambda:installed_outputs["installed_c4"]
-                windows={name:specs[name]["window"] if name in specs else
-                    (128 if name=="w128_v4" else 0) for name in readers}
+                if full_comparison:
+                    readers["installed_bf16"]=lambda:installed_outputs["installed_bf16"]
+                windows={name:arm_reference_keys[name] for name in readers}
                 report["post_timing_controls"],snapshots=check_saved_verification_outputs(readers,
                     {name:plans[name].partial_outputs for name in specs},windows,references,
                     host,compare,acceptable,partial_host=partial_host)
                 np.savez_compressed(args.output/"post_timing_outputs.npz",**snapshots)
-                report["post_timing_scope"]="saved final timed graph/eager buffers; no refreshing operator call"
+                if full_comparison:
+                    report["post_timing_precision_comparison"]=build_accuracy_report(
+                        {name:snapshots[name] for name in readers},
+                        {name:references[key] for name,key in windows.items()},references["full_bf16"])
+                report["post_timing_scope"]=("Three primary arms: saved final timed graph/eager buffers; other diagnostic arms: "
+                    "untimed restore/graph-control buffers. No refreshing operator call after timing."
+                    if full_comparison else "saved final timed graph/eager buffers; no refreshing operator call")
                 persist()
                 require(all_passed(report["post_timing_controls"]),"Post-timing mathematical/partial controls failed")
     require(np.array_equal(base.indices.detach().cpu().numpy(),ids),"Original device TopK mutated")
@@ -553,6 +631,8 @@ def parser():
     p.add_argument("--return-stats",action="store_true")
     p.add_argument("--verify-comparison",action="store_true",
         help="Add actual installed C4 and six direct AB/BA pairs; needs windows 0/128, split4, stats off, >=20 rounds")
+    p.add_argument("--compare-bf16",action="store_true",
+        help="Add native full BF16 and per-query/head L2/cosine; prefer run_attention_compare.py for its defaults")
     p.add_argument("--seed",type=int,default=20261120)
     p.add_argument("--timing",choices=("none","eager","graph"),default="none")
     p.add_argument("--warmup",type=int,default=20)
@@ -563,8 +643,9 @@ def parser():
     return p
 
 
-def main(argv=None):
-    args=parser().parse_args(argv)
+def main(argv=None,*,argument_parser=None):
+    cli=argument_parser or parser()
+    args=cli.parse_args(argv)
     try:
         args.aic_count=select_aic_count(args.queries,args.aic_count)
         candidate_specs(args.windows,args.splits)
@@ -574,16 +655,21 @@ def main(argv=None):
             raise ValueError("Invalid timing counts")
         validate_verification_options(args)
     except ValueError as error:
-        parser().error(str(error))
+        cli.error(str(error))
     args.output=args.output.expanduser().resolve()
     marker=(args.fault_marker or args.output.parent/"DEVICE_FAULT.json").expanduser().resolve()
     if marker.exists():
-        parser().error("Existing device-fault marker blocks another NPU run")
+        cli.error("Existing device-fault marker blocks another NPU run")
     args.output.mkdir(parents=True,exist_ok=False)
-    report=dict(version="qsfa-recent128-kv-split-a5-v1.2-direct-baseline-verification",status="STARTED",
+    report=dict(version="qsfa-attention-threeway-a5-v1" if args.compare_bf16 else
+            "qsfa-recent128-kv-split-a5-v1.2-direct-baseline-verification",status="STARTED",
         args={k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         model_accuracy="NOT_MEASURED",serving_performance="NOT_MEASURED",
         scope="prepared read including partial attention plus device reduction; no writes")
+    if args.compare_bf16:
+        report["runner_sources"]={name:hashlib.sha256((HERE/name).read_bytes()).hexdigest()
+            for name in ("run_attention_compare.py","run_kv_split.py","attention_compare_metrics.py",
+                "attention_compare_report.py")}
     def persist():
         (args.output/"results.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n")
     persist()
@@ -598,13 +684,17 @@ def main(argv=None):
             marker.write_text(json.dumps(dict(status="DEVICE_FAULT",results=str(args.output/"results.json")))+"\n")
             report["device_fault_marker"]=str(marker)
     failed=report["status"] in ("ERROR","CONTROL_FAILED")
-    if failed:
+    if failed and not args.compare_bf16:
         report["failure_diagnostic_files"]=[str(path) for path in
             failure_diagnostic_paths(args.output/"results.json")]
     if args.verify_comparison:
         report["verification_evidence_directory"]=str(args.output/"verification_evidence")
+    if args.compare_bf16:
+        from attention_compare_report import write_summary
+        write_summary(report,args.output)
+        report["summary_files"]=[str(args.output/name) for name in ("summary.json","summary.csv","summary.txt")]
     persist() # Freeze source bytes before read-only collectors hash them.
-    if failed:
+    if failed and not args.compare_bf16:
         write_failure_diagnostics(args.output/"results.json")
     evidence_export={}
     if args.verify_comparison:
@@ -615,7 +705,10 @@ def main(argv=None):
         except Exception as error:
             evidence_export["verification_evidence_export_error"]=str(error)
     print(json.dumps(dict(status=report["status"],results=str(args.output/"results.json"),
-        failure_diagnostic_files=report.get("failure_diagnostic_files",[]),**evidence_export)))
+        failure_diagnostic_files=report.get("failure_diagnostic_files",[]),
+        summary_files=report.get("summary_files",[]),**evidence_export)))
+    if args.compare_bf16:
+        print((args.output/"summary.txt").read_text())
     return 0 if report["status"] in ("VALIDATED_ONLY","MEASURED") else 1
 
 

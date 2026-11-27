@@ -1,5 +1,10 @@
 # 当前任务：先接自研hotwindow V4最新融合版，检查整体精度
 
+用户最新补充要求：先用新脚本同轮比较纯C4、纯BF16与最新融合版的精度/读取性能，按
+[experimental/single_pass/ATTENTION_COMPARE_TASK.md](experimental/single_pass/ATTENTION_COMPARE_TASK.md)
+直接跑一组Q4/K8192。复用已成功库，不重编内核；结果自动输出L2、cosine、恢复比例与完整配对记录。
+完成后继续下面的框架精度接入。
+
 用户已明确先接我们自己的MXFP4+BF16路线，DSL cache迁移暂不实施。
 按 [framework_integration/KV_SPLIT_VA_TASK.md](framework_integration/KV_SPLIT_VA_TASK.md) 一次执行：
 先在实际目标容器收集环境/预检格式，再自主完成隔离安装、真实模型smoke及原GLM评分。
