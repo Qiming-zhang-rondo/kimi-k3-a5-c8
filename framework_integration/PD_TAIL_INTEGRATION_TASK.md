@@ -1,5 +1,25 @@
 # 当前任务：识别真实 Mooncake 通道，接通 P→D BF16 recent128
 
+## 最新 e01b953：修复运行中新注册区域与多接收者释放，先测两条 P/D 请求
+
+最新错误已到真实RDMA read；`13312`字节正是13token的BF16 latent。D本地注册地址与P的源地址不同是正常现象，不能据此断言P漏注册。旧代码先对每个源clone注册并检查ret0再发布READY；但公开旧HCCL后端在首次peer连接时交换/缓存内存描述符，并要求注册区2MiB对齐，逐请求注册新clone仍可能不被已有连接识别。部署二进制根因尚未实证钉死，本轮消除此依赖。
+
+**现在直接执行本节，不再使用逐请求clone注册的59e0df9版本：**
+
+1. P、D都拉取本分支，沿下方原manifest备份/更新runtime流程部署。两边必须使用新版本、启动新worker：arena必须在原native KV注册/线程/peer连接之前注册；只把文件拷进已建链旧进程不能生效。保持原CANN/算子库/权重和生产参数，不重编attention、不重置NPU、不关闭APC/Graph/MTP。
+2. 启动日志应出现 `Recent128 BF16 PD arena registered before native KV startup`，包含bytes/slots/layers。P和D各有一个持久、有界、起点和长度都按2MiB对齐的arena；原KV缓存dict和Store兄弟分支不变。请求payload地址全部来自该已注册区域，不再逐请求register/unregister。
+3. 先用本次失败的短prompt跑原P→D curl，再用另一个不同前缀短prompt跑第二条，让两次传输复用已建立的连接。第二条验证固定注册区和槽位复用；APC命中路径随后单独验收，APC开关保持原值。
+4. **直接传输通过才算本轮通过**：D日志应有 `Recent128 BF16 PD tail imported`；实际worker的`recent128_pd`摘要应 `successful_reads>0`、`completed_imports>0`、`failed_reads=0`，两次curl正常完成且无sticky faults。现有RPC探针已能输出这些不含指针的计数；无RPC就看本轮实际worker导入日志和异常。`Recovered from KV load failure` 后重算成功不能记作PD修复成功。
+5. 只推小报告：commit、实际P/D PID、arena bytes/slots/layers、两次是否直接导入、RDMA read/import/failure计数和首错。指针/nonce/descriptor/完整配置和大日志留内网，不让用户继续搬材料。
+
+这次也修了多D共享源的问题：D以真实engine/handshake/request身份订阅，精确ACK只完成该接收者；源必须同时等原native传输完成及全部已发descriptor的接收者ACK后才能复用槽。不能第一个ACK到就注销所有读者的内存。arena注册保留至进程结束，缓冲槽位有界；失败的RDMA目的槽保留防止仍在进行的写与复用冲突，不以无限分配掩盖失败。
+
+本轮202项框架＋23项传输/arena宿主检查通过，未在A5验证。新增的是请求传输边界的缓冲管理，不改变attention计算；额外持久arena的实际显存由启动日志报告，P/D延迟仍需实测。
+
+公开源码依据：[HCCL transport](https://github.com/kvcache-ai/Mooncake/blob/main/mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/hccl_transport.cpp)、[连接与内存描述符交换](https://github.com/kvcache-ai/Mooncake/blob/main/mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/hccl_transport_mem_c.cpp)、[Ascend transport文档](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/transport/ascend_transport.md)。这支持修复方向，不是部署backend已确认的证明。
+
+下面0d9421f章节保留原部署命令与首轮接线背景；以本节为当前任务。
+
 ## 最新 0d9421f：已提供真实 legacy 子通道接线候选，直接部署验证
 
 两节点的 AscendMultiConnector 源码 SHA 已与公开 c09d3e20 完全匹配。外壳下真实 MooncakeConnectorV1 子对象才是传输位置，Store兄弟分支保持原流程。本轮新增 `pd_connector.py`、`pd_mooncake.py` 并接入 config初始化和runner释放前边界，**不再停留在身份采集**。

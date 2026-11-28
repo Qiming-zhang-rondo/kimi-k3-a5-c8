@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sfa_recent128 import pd_mooncake as pd
+from sfa_recent128.pd_lifetime import PublicationTracker
 
 
 class Codec:
@@ -92,9 +93,50 @@ class TransportHookTests(unittest.TestCase):
     def test_pending_source_is_not_released_after_descriptor_escapes(self):
         bridge=object.__new__(pd.LegacyTailBridge)
         bridge.lock=__import__("threading").RLock()
-        bridge.pending={"unused":object(),"active":object()};bridge.publishers={"active":object()}
+        freed=[]
+        bridge.arena=SimpleNamespace(release=lambda rid:freed.append(rid))
+        bridge.pending={"unused":object(),"active":object()};bridge.descriptors={}
+        bridge.lifetime=PublicationTracker(2)
+        bridge.lifetime.add("unused");bridge.lifetime.add("active")
+        bridge.lifetime.subscribe("active","D1","nonce")
+        bridge.lifetime.subscribe("active","D2","nonce")
         bridge.discard_unrequested({"unused","active"})
         self.assertEqual(set(bridge.pending),{"active"})
+        self.assertEqual(freed,["unused"])
+        self.assertEqual(bridge.control(dict(action="ack",request_id="active",receiver_id="D1",nonce="nonce"))["status"],"ACK")
+        self.assertIn("active",bridge.pending)
+        bridge.control(dict(action="ack",request_id="active",receiver_id="D2",nonce="nonce"))
+        self.assertNotIn("active",bridge.pending)
+        self.assertEqual(freed,["unused","active"])
+
+    def test_arena_is_prepared_before_native_registration_creates_threads(self):
+        calls=[];vc=object()
+        bridge=SimpleNamespace(prepare_arena=lambda:calls.append("aligned-arena-register"))
+        class Worker:
+            def __init__(self,config):self.vllm_config=config
+            def register_kv_caches(self,caches):calls.append("native-register-and-start-threads")
+            def start_load_kv(self,metadata):pass
+        class Send:
+            def __init__(self,vllm_config):pass
+            def run_busy_loop(self,socket):pass
+            def get_and_clear_finished_requests(self):return set()
+        class Receive:
+            def __init__(self,vllm_config):pass
+            def _transfer_kv_cache_all_groups(self,meta):pass
+            def _reformat_pending_kv_caches(self,rid):pass
+        module=SimpleNamespace(MooncakeConnectorWorker=Worker,KVCacheSendingThread=Send,
+            KVCacheRecvingThread=Receive,msgspec=SimpleNamespace(msgpack=Codec),GET_META_MSG="get")
+        # Simulate installation from inside the CURRENT original constructor:
+        # this existing instance never passes through our new init wrapper.
+        worker=Worker(vc)
+        pd.install_worker_hooks(module)
+        try:
+            with patch.object(pd,"is_serving_config",return_value=True),patch.object(pd,"LegacyTailBridge",return_value=bridge):
+                worker.register_kv_caches({})
+            self.assertIs(worker._recent128_tail_bridge,bridge)
+            self.assertIs(pd._BRIDGES[id(vc)],bridge)
+        finally:pd._BRIDGES.pop(id(vc),None)
+        self.assertEqual(calls,["aligned-arena-register","native-register-and-start-threads"])
 
     def test_runner_boundary_finds_only_legacy_child(self):
         calls=[]

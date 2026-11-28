@@ -1,5 +1,10 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口：修复 e01b953 的注册区域错误
+
+执行 [PD_TAIL_INTEGRATION_TASK 最新节](PD_TAIL_INTEGRATION_TASK.md)。已改为P/D建链前注册2MiB对齐固定arena，消除逐请求动态clone MR；并修多D读者的独立ACK/native完成双重释放门。
+202项框架＋23项传输/arena宿主检查通过。两边更新runtime并启动新worker，原参数先跑本次短prompt，再不同前缀短prompt复用连接。必须真实BF16导入通过，重算fallback成功不算本轮通过。
+
 ## 当前入口：真实 Multi→MooncakeV1 BF16 PD 候选，直接验证一条 curl
 
 执行 [PD_TAIL_INTEGRATION_TASK 顶部](PD_TAIL_INTEGRATION_TASK.md)。已按0d9421f匹配源码实现scheduler committed边界、释放前固定快照、既有Mooncake控制socket、D导入与独立ACK。

@@ -19,6 +19,10 @@ _METHODS = ("register_kv_caches", "build_connector_worker_meta", "update_connect
 def describe(value):
     cls = value if inspect.isclass(value) else type(value)
     result = dict(module=cls.__module__, qualname=cls.__qualname__, methods={})
+    bridge = getattr(value, "_recent128_tail_bridge", None)
+    report = getattr(bridge, "diagnostics", None)
+    if callable(report):
+        result["recent128_pd"] = report()
     module = sys.modules.get(cls.__module__)
     filename = getattr(module, "__file__", None)
     result["module_file"] = filename

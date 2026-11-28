@@ -1,9 +1,7 @@
-# 当前任务：真实 P→D BF16 recent128 接线候选已完成，先跑一条 curl
+# 当前任务：修复 e01b953 的 BF16 PD 注册区域错误
 
-内网 agent 执行 [PD_TAIL_INTEGRATION_TASK 顶部](framework_integration/PD_TAIL_INTEGRATION_TASK.md)，不再重复身份采集。
+内网 agent 直接执行 [PD_TAIL_INTEGRATION_TASK 最新节](framework_integration/PD_TAIL_INTEGRATION_TASK.md)。新代码已把P/D都改为启动建链前注册2MiB对齐的持久有界arena，payload使用区内槽位，不再按请求动态注册clone；同时修复多D共享源时第一个ACK过早释放的问题。
 
-0d9421f 的 AscendMultiConnector 源码SHA已匹配公开c09d3e20。候选递归连接其真实MooncakeConnectorV1子对象，保留Store、原C4传输和attention内核：scheduler提交边界→P释放前固定BF16尾窗→沿既有控制socket/RDMA传输→D导入完成→精确ACK→原接收完成信号。
+202项框架和23项传输/arena宿主检查通过；A5仍待验证。沿原manifest流程备份更新两节点runtime，再以原参数启动新worker，让注册早于native KV/peer连接。不改attention/CANN/Cloud包，不关闭Graph/MTP/APC/并发/QLI。
 
-本轮195项框架及18项传输核心宿主检查通过；A5尚未验证。按任务备份并更新两节点runtime，以原服务参数启动新worker，先原单curl走真实P→D，再短prompt。不重编kernel/CANN/Cloud包，不关闭Graph/MTP/APC/并发/QLI。当前传输边界同步成本尚未测量，Store/APC任意前缀侧缓存仍是单独适配项。
-
-只推本轮实际PID、curl结果、首错与日志位置的小报告，不上传私有源/大日志，不让用户继续转述问题。通过后继续既定性能和GPQA任务。
+先本次失败短prompt，再不同前缀短prompt，两次走真实P→D并复用连接。必须出现真实BF16 tail imported，实际worker统计successful_reads/completed_imports增加、failed_reads为0；重算fallback后输出成功不算本轮通过。只回传PID、arena字节数/槽数/层数、实际计数、curl结果和首错，不上传指针/descriptor/私有源或大日志。

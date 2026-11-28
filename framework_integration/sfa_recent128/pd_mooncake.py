@@ -7,15 +7,20 @@ This is an A5 candidate: host protocol tests do not validate the NPU transport.
 from functools import wraps
 import importlib
 import inspect
+import secrets
 import threading
 import time
 
 from .pd_connector import LEGACY_MODULE, is_serving_config, iter_legacy_connectors
-from .pd_tail import PDSidecarPublisher, PDSidecarReceiver, TailDescriptor
+from .pd_arena import Arena
+from .pd_lifetime import PublicationTracker
+from .pd_tail import PD_TAIL_VERSION, TensorDescriptor, TailDescriptor
 from .pd_worker import WorkerTailRegistry, validate_tail
+from .serving_state import TailSnapshot
 
 _BRIDGES = {}
-_EXT = "recent128_tail_v1"
+_EXT = "recent128_tail_v2"
+_FIELDS = ("latent", "rope", "position_tags", "epoch_tags")
 
 
 def _require(value, message):
@@ -67,10 +72,36 @@ class LegacyTailBridge:
         self.lock = threading.RLock()
         self.pending = {}
         self.incoming = {}
-        self.publishers = {}
-        self.receivers = {}
+        self.descriptors = {}
+        self.generations = {}
+        self.arena = None
+        self.lifetime = None
         self.completed = set()
-        self.acknowledged = []
+        self.successful_reads = 0
+        self.failed_reads = 0
+
+    def diagnostics(self):
+        extent = self.arena.registered_extent if self.arena is not None else {}
+        return dict(protocol=_EXT, startup_arena_registered=self.arena is not None,
+            arena_bytes=extent.get("nbytes"), arena_slots=extent.get("slots"),
+            arena_layers=extent.get("layers"), pending_sources=len(self.pending),
+            successful_reads=self.successful_reads, failed_reads=self.failed_reads,
+            completed_imports=len(self.completed))
+
+    def prepare_arena(self):
+        """Must precede native KV registration, thread startup and peer links."""
+        with self.lock:
+            if self.arena is not None:
+                return
+            state = self.state()
+            with state.torch.npu.device(state.device):
+                self.arena = Arena(self.worker.engine, state.torch, state.device,
+                    tuple(state.layers), state.request_pool_size)
+            self.lifetime = PublicationTracker(state.request_pool_size)
+            import logging
+            logging.getLogger(__name__).info(
+                "Recent128 BF16 PD arena registered before native KV startup: bytes=%d slots=%d layers=%d",
+                self.arena.registered_extent["nbytes"], state.request_pool_size, len(state.layers))
 
     def state(self):
         from .contract import parse_recent128_config
@@ -95,59 +126,79 @@ class LegacyTailBridge:
                 _require(self.pending[request_id].end == end, "Changed committed PD boundary")
                 return
             state = self.state()
-            _require(len(self.pending) < state.request_pool_size,
-                     "BF16 PD sidecar pool full: unfinished transfers must be acknowledged")
+            _require(self.arena is not None, "BF16 PD arena must be registered before native KV startup")
             with state.torch.npu.device(state.device):
                 snapshots = WorkerTailRegistry((state,)).export_request(request_id,
                     committed_end=end, completion=self.completion(state))
-            _require(len(snapshots) == 1, "Expected one local recent128 pool owner")
-            self.pending[request_id] = snapshots[0]
+                _require(len(snapshots) == 1, "Expected one local recent128 pool owner")
+                snapshot = snapshots[0]
+                layers = self.arena.acquire(request_id, snapshot.end - snapshot.start)
+                try:
+                    for layer, source in snapshot.layers.items():
+                        for field in _FIELDS:
+                            getattr(layers[layer], field).copy_(getattr(source, field))
+                    owned = TailSnapshot(snapshot.start, snapshot.end, snapshot.source_epoch, layers)
+                    validate_tail(state, owned)
+                    self.completion(state)
+                    self.lifetime.add(request_id)
+                except BaseException:
+                    self.completion(state)
+                    self.arena.release(request_id)
+                    raise
+            self.pending[request_id] = owned
+
+    def _reclaim(self, request_id):
+        if request_id in self.pending and self.lifetime.releasable(request_id):
+            self.arena.release(request_id)
+            self.lifetime.release(request_id)
+            self.pending.pop(request_id, None)
+            self.descriptors.pop(request_id, None)
 
     def control(self, command):
         # Runs in the native source control thread; no extra listener/port.
         request_id = command.get("request_id")
+        receiver_id = command.get("receiver_id")
+        _require(isinstance(receiver_id, str) and bool(receiver_id), "BF16 control requires receiver identity")
         with self.lock:
             if command.get("action") == "ack":
-                identity = (request_id, command.get("nonce"))
-                if identity in self.acknowledged:
-                    return dict(status="ACK")
-                publisher = self.publishers.get(request_id)
-                accepted = publisher is not None and publisher.acknowledge(request_id, command.get("nonce"))
+                accepted = self.lifetime.ack(request_id, receiver_id, command.get("nonce"))
                 if accepted:
-                    self.publishers.pop(request_id, None)
-                    self.pending.pop(request_id, None)
-                    self.acknowledged.append(identity)
-                    del self.acknowledged[:-256]
+                    self._reclaim(request_id)
                 return dict(status="ACK" if accepted else "STALE_ACK")
             _require(command.get("action") == "describe", "Unknown BF16 PD control action")
             snapshot = self.pending.get(request_id)
             if snapshot is None:
                 return dict(status="NOT_READY")
-            state = self.state()
-            with state.torch.npu.device(state.device):
-                publisher = self.publishers.get(request_id)
-                if publisher is None:
-                    _require(callable(getattr(self.worker.engine, "unregister_memory", None)),
-                             "BF16 PD adapter requires real unregister_memory for bounded registrations")
-                    def validate(rid, value):
-                        validate_tail(state, value)
-                        self.completion(state)
-                        return True
-                    publisher = PDSidecarPublisher(self.worker.engine,
-                        str(self.worker.engine_id), validate_snapshot=validate,
-                        rank=int(self.worker.tp_rank), expected_layers=state.layers)
-                    self.publishers[request_id] = publisher
-                publication = publisher._active.get(request_id)
-                descriptor = (publication.descriptor if publication is not None else
-                              publisher.publish(request_id, snapshot))
-            return dict(status="READY", descriptor=descriptor.to_dict())
+            descriptor = self.descriptors.get(request_id)
+            if descriptor is None:
+                generation = self.generations.get(request_id, 0) + 1
+                buffers = []
+                for layer, tail in snapshot.layers.items():
+                    for field in _FIELDS:
+                        tensor = getattr(tail, field)
+                        nbytes = tensor.numel() * tensor.element_size()
+                        _require(self.arena.contains(tensor.data_ptr(), nbytes),
+                                 "BF16 descriptor escaped startup registration")
+                        buffers.append(TensorDescriptor(layer, field,
+                            "bfloat16" if field in ("latent", "rope") else "int64",
+                            tuple(tensor.shape), nbytes, tensor.data_ptr()))
+                descriptor = TailDescriptor(PD_TAIL_VERSION, request_id, snapshot.source_epoch,
+                    snapshot.start, snapshot.end, int(self.worker.tp_rank), generation,
+                    secrets.token_hex(16), tuple(buffers)).validate()
+                self.generations[request_id] = generation
+                self.descriptors[request_id] = descriptor
+            self.lifetime.subscribe(request_id, receiver_id, descriptor.nonce)
+            return dict(status="READY", descriptor=descriptor.to_dict(),
+                        registered_extent=dict(self.arena.registered_extent))
 
     def discard_unrequested(self, request_ids):
         with self.lock:
             for request_id in request_ids:
-                # No descriptor has escaped; no remote reader has its addresses.
-                if request_id not in self.publishers:
-                    self.pending.pop(request_id, None)
+                # Every reader subscribes before its C4 DONE. Native aggregate
+                # completion closes the subscriber set; all exact ACKs gate reuse.
+                if self.lifetime is not None:
+                    self.lifetime.native_done(request_id)
+                    self._reclaim(request_id)
 
     def prepare_receive(self, metadata):
         with self.lock:
@@ -157,7 +208,8 @@ class LegacyTailBridge:
                 end = getattr(meta, "recent128_end", None)
                 _require(type(end) is int and end > 0,
                          "P transfer parameters lack the actual recent128_end; update both P and D")
-                self.incoming.setdefault(request_id, dict(end=end, peers={}))
+                self.incoming.setdefault(request_id, dict(end=end, peers={},
+                    receiver_id=f"{self.worker.engine_id}:{self.worker.handshake_port}:{request_id}"))
 
     def note_pull(self, thread, meta):
         with self.lock:
@@ -169,7 +221,8 @@ class LegacyTailBridge:
             # Pin the remote descriptor BEFORE native C4 can send its per-shard
             # DONE. The source must not reclaim a tail before our final import.
             peer = dict(meta)
-            command = dict(protocol=_EXT, action="describe", request_id=peer["remote_request_id"])
+            command = dict(protocol=_EXT, action="describe", request_id=peer["remote_request_id"],
+                           receiver_id=plan["receiver_id"])
             deadline = time.monotonic() + min(float(getattr(thread, "timeout", 30)), 30.)
             while True:
                 metadata, response = self.exchange(thread, peer, command)
@@ -181,6 +234,14 @@ class LegacyTailBridge:
             descriptor = TailDescriptor.from_dict(response["descriptor"])
             _require(descriptor.request_id == peer["remote_request_id"] and descriptor.end == plan["end"],
                      "BF16 PD request or committed boundary mismatch")
+            extent = response.get("registered_extent", {})
+            base, length = extent.get("pointer"), extent.get("nbytes")
+            _require(type(base) is int and type(length) is int and length > 0 and
+                     base % (2 * 1024 * 1024) == 0 and length % (2 * 1024 * 1024) == 0,
+                     "Source lacks a startup-registered aligned BF16 arena; update and restart both peers")
+            _require(all(base <= b.pointer and b.pointer + b.nbytes <= base + length
+                         for b in descriptor.buffers), "Source descriptor is outside its registered arena")
+            _require(metadata.get("engine_id") == peer["remote_engine_id"], "BF16 source engine identity mismatch")
             plan["peers"][key] = (peer, metadata, descriptor)
 
     def exchange(self, thread, peer, command):
@@ -214,26 +275,48 @@ class LegacyTailBridge:
             peer, metadata, descriptor = next(iter(plan["peers"].values()))
             state = self.state()
             session = f"{peer['remote_host']}:{metadata['te_rpc_port']}"
-            receiver = self.receivers.get(session)
-            if receiver is None:
-                receiver = self.receivers[session] = PDSidecarReceiver(self.worker.engine, session,
-                    device=state.device, torch_module=state.torch,
-                    completion_factory=lambda desc, tail: self.completion(state),
-                    validate_received=lambda rid, tail: (validate_tail(state, tail) is tail))
+            _require(self.arena is not None, "Destination BF16 arena was not registered at startup")
+            _require(descriptor.layer_keys == frozenset(state.layers), "BF16 source must cover every local layer")
+            slot_key = (request_id, descriptor.nonce)
             with state.torch.npu.device(state.device):
-                snapshot = receiver.receive(descriptor, state=state)
-                WorkerTailRegistry((state,)).receive_request(request_id, (snapshot,),
-                    completion=snapshot.completion, source="pd")
-                self.completion(state)  # Import writes finish before ACK/source release.
+                layers = self.arena.acquire(slot_key, descriptor.end - descriptor.start)
+                arrays = [getattr(layers[buffer.layer], buffer.field) for buffer in descriptor.buffers]
+                _require(all(self.arena.contains(tensor.data_ptr(), buffer.nbytes)
+                             for tensor, buffer in zip(arrays, descriptor.buffers)),
+                         "Destination payload escaped startup registration")
+                try:
+                    result = self.worker.engine.batch_transfer_sync_read(session,
+                        [buffer.pointer for buffer in descriptor.buffers],
+                        [tensor.data_ptr() for tensor in arrays],
+                        [buffer.nbytes for buffer in descriptor.buffers])
+                    _require(type(result) is int and result == 0, "BF16 registered-arena RDMA read failed: " + repr(result))
+                except BaseException:
+                    self.failed_reads += 1
+                    # A failed transport may still own the destination slot.
+                    # Keep it pinned rather than risking concurrent slot reuse.
+                    raise
+                self.successful_reads += 1
+                completion = self.completion(state)
+                snapshot = TailSnapshot(descriptor.start, descriptor.end, descriptor.source_epoch,
+                                        layers, completion)
+                try:
+                    WorkerTailRegistry((state,)).receive_request(request_id, (snapshot,),
+                        completion=completion, source="pd")
+                finally:
+                    self.completion(state)  # No reuse before import copies drain.
+                    self.arena.release(slot_key)
             for source_peer, _, source_desc in plan["peers"].values():
                 # Unselected TP replicas were never read; selected read and
                 # import have completed. All source pointers are now quiescent.
                 _, ack = self.exchange(thread, source_peer, dict(protocol=_EXT, action="ack",
-                    request_id=source_desc.request_id, nonce=source_desc.nonce))
+                    request_id=source_desc.request_id, nonce=source_desc.nonce,
+                    receiver_id=plan["receiver_id"]))
                 _require(ack.get("status") == "ACK", "Source did not acknowledge exact BF16 import nonce")
-            receiver.release_received(descriptor.request_id, descriptor.nonce, rank=descriptor.rank)
             self.completed.add(request_id)
             self.incoming.pop(request_id, None)
+            import logging
+            logging.getLogger(__name__).info("Recent128 BF16 PD tail imported: tokens=%d layers=%d",
+                descriptor.end - descriptor.start, len(layers))
 
 
 def pin_finished_tails(group, metadata):
@@ -272,6 +355,7 @@ def install_worker_hooks(module=None):
             if bridge is None:
                 bridge = worker._recent128_tail_bridge = LegacyTailBridge(worker)
             _BRIDGES[id(worker.vllm_config)] = bridge
+            bridge.prepare_arena()
         return original_register(worker, *args, **kwargs)
     worker_cls.register_kv_caches = register
 
