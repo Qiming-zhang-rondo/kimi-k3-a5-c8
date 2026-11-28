@@ -1,0 +1,33 @@
+{
+  "date": "2026-11-28 12:18",
+  "status": "BLOCKED_ON_WRAPPER_INTERFACE",
+  "error": "TypeError: cloud_mla_prolog_v3_recent128() got multiple values for argument 'rope_sin'",
+
+  "call_chain": {
+    "step_1": "serving_prolog.py line 151: call_prolog_with_ring(None, args, kwargs, ring=active.binding, ...)",
+    "step_2": "prolog_provider.py line 134: result = provider(*args, **extended)",
+    "step_3": "TypeError: cloud_mla_prolog_v3_recent128() got multiple values for argument 'rope_sin'"
+  },
+
+  "root_cause": "The original PROLOG call (_sfa_preprocess_prolog_v3 -> _call_mxfp4_cloud_prolog) passes arguments BOTH positionally AND by keyword. When call_prolog_with_ring re-invokes the provider with provider(*args, **extended), the positional args map to named parameters (including rope_sin), AND the kwargs/extended dict also contains rope_sin as a key. Python raises 'got multiple values' when a parameter is supplied both positionally and by keyword.",
+
+  "fix_needed": "Either:",
+  "fix_options": [
+    "A: prolog_provider.py should convert positional args to keyword args before calling provider: sig.bind(*args, **kwargs) then provider(**bound.arguments)",
+    "B: The wrapper cloud_mla_prolog_v3_recent128 should accept *args, **kwargs and merge them (mapping positional to parameter names) before dispatching",
+    "C: serving_prolog.py should normalize the original call to all-keyword or all-positional before passing to call_prolog_with_ring"
+  ],
+
+  "current_wrapper_attempt": {
+    "issue": "I tried fixing the wrapper with *args, **kwargs and manual merge, but the merge logic is fragile because the original call passes 30+ parameters with a mix of positional and keyword, and optional parameters may be None or absent",
+    "question": "What is the correct merge strategy? Which parameters should win when both positional and keyword values are present? Should None keyword values be treated as absent?"
+  },
+
+  "context": {
+    "original_call": "_sfa_preprocess_prolog_v3 passes 30+ args to torch_npu.npu_mla_prolog_v3, some positional, some keyword",
+    "patch": "patch_sfa_v1_mxfp4.py line 338: return _call_mxfp4_cloud_prolog(kwargs) - note: passes kwargs dict",
+    "serving_prolog": "serving_prolog.py line 151: call_prolog_with_ring(None, args, kwargs, ring=...) - extracts args/kwargs from the original call"
+  },
+
+  "request": "Please fix either prolog_provider.py (option A: sig.bind approach) or provide a corrected wrapper that properly handles the mixed positional/keyword call pattern. The fix must preserve all original V3 arguments and add the ring binding keywords without conflicts."
+}
