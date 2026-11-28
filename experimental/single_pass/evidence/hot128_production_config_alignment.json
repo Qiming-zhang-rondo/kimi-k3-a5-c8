@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-28 10:05",
+  "status": "CONFIG_ALIGNMENT_IN_PROGRESS",
+
+  "gpqa_baseline_result": {
+    "test": "GPQA diamond 0-shot, normal C4 (mxfp4 main KV), PR199",
+    "accuracy": "82.98% (78/94 correct)",
+    "note": "Only 94/198 questions completed - production containers stopped (Exited 137) during test. Will re-run full test after config alignment.",
+    "answer_extraction": "Predictions are reasoning text; extracted final answer via 'The answer is (X)' pattern"
+  },
+
+  "config_differences_found_vs_mxllm_c4_reference": {
+    "critical_precision": {
+      "mla_kv_quant_mode": "reference=c8 (8bit), production=mxfp4 (4bit) — MAIN PRECISION SUSPECT"
+    },
+    "fixed_today": {
+      "reasoning_parser": "reference=glm45, production was glm47 → FIXED to glm45 on all 4 scripts",
+      "speculative_enforce_eager": "reference=no enforce_eager, production had enforce_eager:true → FIXED (removed) on D node and hot128 scripts",
+      "profiler_with_stack": "reference=false, production was true → FIXED to false"
+    },
+    "additional_config_differences_not_yet_aligned": {
+      "D_node": {
+        "enable_fused_mc2": "reference=2, production=0",
+        "finegrained_tp_config": "reference has {lmhead_tensor_parallel_size: 8}, production does not",
+        "multistream_overlap_shared_expert": "reference=not set, production=true",
+        "enable_dsa_cp": "reference=not set, production=false",
+        "enable_flashcomm1": "reference=not set, production=true (mentor says conflict was resolved, intentional)"
+      },
+      "P_node": {
+        "enable_flashcomm1": "reference=not set, production=true (intentional, same as D)"
+      }
+    }
+  },
+
+  "hot128_launch_error": {
+    "error": "ContractError: recent128 initial accuracy experiment requires max_num_seqs=1",
+    "cause": "sfa_recent128 overlay is accuracy-experiment prototype requiring single request. Production MAX_NUM_SEQS=8 exceeds limit.",
+    "question_for_codex": "The ring-writer smoke passed device validation (DEVICE_RING_WRITER_VALIDATED, commit b25593f). When can the full ABI1 producer support multi-request (max_num_seqs>1) and graph mode for production serving? User wants to run GPQA with hot128 in production-like conditions."
+  },
+
+  "infrastructure_status": {
+    "launch_chains_fully_separated": {
+      "normal_c4": "launch_d.sh → start_d.sh → run_d.sh (or launch_p.sh chain on 209)",
+      "hot128": "launch_hot_d.sh → start_d_hot128.sh → run_d_hot128.sh (or launch_hot_p.sh chain on 209)"
+    },
+    "all_4_run_scripts_updated": "run_d.sh, run_d_hot128.sh, run_p.sh, run_p_hot128.sh all have: glm45 parser, no enforce_eager (D), with_stack=false, hot128 versions additionally have sfa_recent128 config with diagnostics_path"
+  },
+
+  "next_steps_pending_user_decision": {
+    "option_1": "Align mla_kv_quant_mode to c8 and re-run full GPQA baseline (198 questions)",
+    "option_2": "Run hot128 with MAX_NUM_SEQS=1 for single-request accuracy comparison",
+    "option_3": "Wait for full producer integration (multi-request + graph) then production test"
+  }
+}
