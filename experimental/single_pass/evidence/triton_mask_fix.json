@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-28 15:48",
+  "error": "ValueError: Mask must have boolean scalar type in Triton tl.store",
+  "location": "native_writer.py Triton kernel, tl.store with mask=writable",
+  "root_cause": "writable is a scalar boolean expression (valid & bank>=0 & ...), but tl.store with vector pointers needs vector-shaped masks",
+  "fix": "Broadcast scalar to vector: mask=writable & (latent_col >= 0). latent_col >= 0 is always True for tl.arange, so this effectively broadcasts writable."
+}
