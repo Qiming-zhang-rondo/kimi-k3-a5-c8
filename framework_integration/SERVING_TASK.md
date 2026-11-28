@@ -1,5 +1,12 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 最新 562ca1ca：先修 CPU baseline 编译的两个问题
+
+现在已定位为 host 模板注册混入 direct device target，以及框架 GET_TILING_DATA_WITH_STRUCT 未在直调工程生成。
+内网直接执行 [BASELINE_COMPILE_FIX.md](../experimental/prolog_inplace_build/BASELINE_COMPILE_FIX.md)：
+工具在本地私有副本隔离注册块，并用真实 device POD 的显式加载替换宏调用；保留原SDK、混合任务、模板实例和tiling/launch合同。
+不要修改SDK，不再加无关include或空宏，不在这阶段加载模型/执行NPU。
+
 ## 最新 f23f328 / a139cb79：reader通过，集中完成真实Prolog和P/D
 
 已归档的11项独立 reader 对照（两轮）通过：B1Q1、B1Q4、B8Q4 的 eager/Graph，以及坏 epoch 锁存。

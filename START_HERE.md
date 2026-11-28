@@ -1,13 +1,13 @@
-# 当前任务：真实Prolog内部inline写环，保留P→D尾窗
+# 当前任务：应用562ca1ca的两个CPU baseline编译修复
 
-最新7ba01aa证明独立reader的B8Q4 eager/Graph/epoch通过；结合434b09d，分两轮完成B1/B8共11项。它不证明真实Prolog、原生量化器、生产execution lane、整服务或性能已验证。reader阶段不再重复跑。
+两个报错定位明确：host模板注册/printf混入独立ASC target；框架GET_TILING_DATA_WITH_STRUCT宏不在kernel直调工程生成。尚未进入NPU或模型执行。
 
-f23f328的UB输入来源早已定位：实际RmsNormAndQuantizeCkv内的最终QuantPerTileMxFp4输入LocalTensor。独立producer不能读另一个kernel的UB。现在直接走原定B路线，不再让用户选方案：同一Prolog内 FP32 UB→独立BF16 scratch→ring GM，没有FP32 GM中转或额外kernel。
+已交付 tools/prepare_prolog_direct.py 与 experimental/prolog_inplace_build/direct_tiling_load.h。内网直接执行[BASELINE_COMPILE_FIX.md](experimental/prolog_inplace_build/BASELINE_COMPILE_FIX.md)：脚本只处理新的本地私有副本，隔离host元数据注册，保留常量/原框架分支，按实际device POD显式加载tiling。不修改原私有源码/SDK/vendor，不发明Prolog字段和launch参数。6项宿主解析、预处理、原文件保护与C++17/UBSan检查通过；尚未真实CANN编译。
 
-已交付可复用inline代码 experimental/prolog_ring_smoke/prolog_ring_write_device.h，支持真实列分片、KR、bank/position/epoch/valid和独占事件。2项host shim/C++17+UBSan检查通过；helper不是完整Prologvariant，未在A5编译，也不提供/伪造私有tiling或hostlauncher。
+只在独立ASC target定义QSFA_ASC_DIRECT_BUILD=1。真实device常量必须保留，manifest列出待核验符号；原host tiler和模板key生成器不改。需要真实mode4模板实例和实际kernel产物，不能把未实例化模板.o编译成功当作算子完成。
 
-内网直接执行[PROLOG_INLINE_INTEGRATION.md](experimental/prolog_ring_smoke/PROLOG_INLINE_INTEGRATION.md)，在现有真实Prolog写点包含helper，保留原混合AIC/AIV任务、真实tiling/workspace/dispatch，CPU构建完成后一次验收producer矩阵。内部实现和原始构建资料留内网，不再要求上传。
+完成本轮CPU构建后，继续已确定的[Prolog内inline写环](experimental/prolog_ring_smoke/PROLOG_INLINE_INTEGRATION.md)，不增加FP32 GM中转或第二个writer kernel。真实Prolog构建和输出验证仍未完成；公共Python适配/reader通过不能合称整个Prolog完成。
 
-同时纠正a139cb79：长prompt初始decode也需要P→D尾窗。例如prompt8192、D刚写1个新KV，最近128仍有127个来自P。GPQA长题不能免除此项，不以部分回退C4冒充完整recent128。完整能力边界、公式和任务见[framework_integration/SERVING_TASK.md](framework_integration/SERVING_TASK.md)。
+独立reader的B1/B8 eager/Graph等11项已通过，不重复该阶段，不在编译阶段加载模型或运行NPU。APC/P-D真实尾窗自动接线仍须完成，长prompt初始decode同样需要P的尾窗；完整边界与任务见[SERVING_TASK.md](framework_integration/SERVING_TASK.md)。
 
-真实Prolog构建接通、APC/P-D自动尾窗传输、完整MTP/模型精度/性能仍未完成。公共Python适配、inline helper和独立reader的完成状态必须分别汇报，不再合称Prolog或服务已完成。
+私有staging树、常量文件、原始构建日志和DO_NOT_UPLOAD_manifest留内网，不再批量外传源码/schema/二进制。
