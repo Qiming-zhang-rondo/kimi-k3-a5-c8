@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-28 11:20",
+  "status": "BASELINE_COMPILE_2_ERRORS",
+
+  "progress": "Renamed .cpp to .asc so CMake uses ASC compiler. Got past arch22 header issue (now compiles with arch35). Down to 2 specific errors.",
+
+  "error_1_template_argument": {
+    "error": "template_argument.h:305: printf call to __aicore__ function from __host__ function",
+    "root_cause": "cloud_mla_prolog_template_tiling_key.h line 54 includes ascendc/host_api/tiling/template_argument.h (HOST header) in device compilation. This header has host-side printf that conflicts with device printf.",
+    "include_chain": "prolog_v3_baseline.asc -> kernel headers -> cloud_mla_prolog_template_tiling_key.h:54 -> ascendc/host_api/tiling/template_argument.h -> printf error",
+    "question": "How to handle this host header in device compilation? Remove the include? Guard it? Or is there a device-safe version?"
+  },
+
+  "error_2_get_tiling_data": {
+    "error": "GET_TILING_DATA_WITH_STRUCT(optiling::CloudMlaPrologTilingData, tilingDataIn, tiling) - expected '(' for function-style cast",
+    "root_cause": "GET_TILING_DATA_WITH_STRUCT is a TBE system macro not defined in standalone compilation. Found reference in common/atvoss/broadcast/broadcast_sch.h and REGISTER_TILING_DEFAULT in kernel_utils_macros.h but not sure of exact expansion for our tiling struct.",
+    "question": "How to define GET_TILING_DATA_WITH_STRUCT for standalone? The tiling struct is optiling::CloudMlaPrologTilingData with baseParams field. What does this macro expand to in TBE and how to replicate for standalone ASC?"
+  },
+
+  "macro_locations_found": {
+    "GET_TILING_DATA_WITH_STRUCT": "found in common/atvoss/broadcast/broadcast_sch.h (in PROLOG source tree)",
+    "REGISTER_TILING_DEFAULT": "found in kernel_utils_macros.h (in ASC impl)"
+  },
+
+  "compilation_setup": {
+    "source": "cloud_mla_prolog_v3.cpp copied as .asc (for ASC compiler)",
+    "cmake": "CMake ASC with dav-3510, include paths include PROLOG source tree + ASC_ROOT",
+    "compiler": "bisheng ASC (from CMake ASC language)"
+  }
+}
