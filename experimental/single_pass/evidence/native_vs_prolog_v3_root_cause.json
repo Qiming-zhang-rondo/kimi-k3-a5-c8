@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-28 14:58",
+  "status": "ARCHITECTURAL_MISMATCH_FOUND",
+  "root_cause": "Production model uses NATIVE preprocessing + DSA-CP. Ring write is in PROLOG_V3 (fused preprocessing). These are DIFFERENT code paths and are incompatible.",
+
+  "error_detail": {
+    "layer": "model.layers.0.self_attn.attn",
+    "implementation": "vllm_ascend.attention.context_parallel.sfa_cp.AscendSFADSACPImpl",
+    "selected_preprocessing": "NATIVE (not PROLOG_V3)",
+    "required": "PROLOG_V3 (where ring write is located)",
+    "error": "Fused preprocessing does not support DSA-CP"
+  },
+
+  "the_fundamental_issue": {
+    "production_path": "The production GLM-5.3 model uses AscendSFADSACPImpl with NATIVE preprocessing. This is the standard serving path.",
+    "hot128_ring_write": "We placed the BF16 ring write inside PROLOG_V3 (RmsNormAndQuantizeCkv in the fused PROLOG kernel).",
+    "mismatch": "PROLOG_V3 is NOT the selected path in production. The model uses NATIVE preprocessing instead.",
+    "consequence": "Even if we fix all contract checks, the ring write will never execute because PROLOG_V3 is not called."
+  },
+
+  "questions": [
+    "1. Is PROLOG_V3 ever used in production serving? Under what conditions is it selected vs NATIVE?",
+    "2. Can we switch the service to use PROLOG_V3 instead of NATIVE? What would break?",
+    "3. Or should the ring write be moved to the NATIVE preprocessing path instead?",
+    "4. What is the actual preprocessing path used by the mxllm-c4 reference deployment?",
+    "5. Is there a configuration option to force PROLOG_V3 selection?"
+  ],
+
+  "additional_config_note": "D node has enable_dsa_cp=false but still selects AscendSFADSACPImpl with NATIVE. P node has enable_dsa_cp=true. Both use NATIVE preprocessing. The enable_dsa_cp setting may not control the implementation selection as we assumed."
+}
