@@ -116,6 +116,40 @@ def metric(actual, expected):
                 max_abs=float(np.abs(delta).max(initial=0)), passed=finite and relative<=.01 and worst<=.02)
 
 
+DEFAULT_CASES = ((1,1),(1,4),(8,4))
+CASE_NAMES = {f"b{batch}_q{queries}":(batch,queries) for batch,queries in DEFAULT_CASES}
+
+
+def selected_cases(names=None):
+    """Default is the full matrix; an explicit subset is reported as a subset."""
+    if names is None:
+        return DEFAULT_CASES
+    if not names or len(set(names)) != len(names) or any(name not in CASE_NAMES for name in names):
+        raise ValueError("Select unique supported --case names")
+    return tuple(CASE_NAMES[name] for name in names)
+
+
+def stale_epoch_control(torch, reader, buffers, data, *, call, device, dtypes):
+    """Exercise and drain inference-tensor plans within their required mode."""
+    import numpy as np
+    with torch.inference_mode():
+        slot = int(data["positions"][0])%256
+        bank = int(data["banks"][0])
+        for key,value in data.items():
+            buffers[key].copy_(torch.as_tensor(value.view(np.int8) if key=="cold" else value,
+                                             device=device,dtype=dtypes[key]))
+        buffers["epoch_tags"][bank,slot] = -1
+        call();torch.npu.synchronize()
+        latched = any(bool(v.cpu().any()) for v in reader.fault_buffers())
+        buffers["epoch_tags"][bank,slot] = int(data["epochs"][0])
+        call();torch.npu.synchronize()
+        retained = any(bool(v.cpu().any()) for v in reader.fault_buffers())
+        result = dict(passed=latched and retained,detected=latched,retained_after_repair=retained)
+        if result["passed"]:
+            reader.reset_faults()
+        return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library-dir",type=Path,required=True)
@@ -123,12 +157,19 @@ def main(argv=None):
     parser.add_argument("--device",default="npu:0")
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--graph",action="store_true")
+    parser.add_argument("--case",action="append",choices=tuple(CASE_NAMES),
+                        help="Repeat for a subset; omit to run B1Q1/B1Q4/B8Q4")
     args = parser.parse_args(argv)
+    try:
+        cases = selected_cases(args.case)
+    except ValueError as error:
+        parser.error(str(error))
     if args.output.exists():parser.error("Use a fresh isolated output directory")
     args.output.mkdir(parents=True)
     report = dict(status="STARTED",scope="isolated_batched_reader_not_prolog_or_service",
         native_quantizer_tested=False,prolog_validated=False,latency="NOT_MEASURED",
-        graph_requested=args.graph,cases={})
+        graph_requested=args.graph,selected_shapes=[dict(batch=b,queries=q) for b,q in cases],
+        full_matrix_selected=cases==DEFAULT_CASES,cases={})
     def persist():
         (args.output/"results.json").write_text(json.dumps(report,indent=2,allow_nan=False)+"\n")
     persist()
@@ -141,7 +182,7 @@ def main(argv=None):
         torch.npu.set_device(args.device)
         config = SimpleNamespace(window=128,execution="serving",single_pass_kernel="batched_v4",
             source_root=str(args.source_root),library_dir=str(args.library_dir))
-        for batch,queries in ((1,1),(1,4),(8,4)):
+        for batch,queries in cases:
             data,reference,scale = make_data(batch,queries,0)
             impl = SimpleNamespace(kv_lora_rank=512,qk_rope_head_dim=64,num_kv_heads=1,
                                    local_num_heads=64,scale=scale)
@@ -198,27 +239,18 @@ def main(argv=None):
                         output.fill_(float("nan"))
                         graph.replay()
                         check(f"b{batch}_q{queries}_graph_phase{phase}",expected)
-            # Independent negative control: stale epoch must latch a device fault
-            # which stays set after the tags are repaired and another read runs.
+            # These plans may have been allocated by capture warmup under
+            # inference_mode. The helper owns that mode for every mutation and
+            # its explicit fault drain, even when this caller is outside it.
             if queries>1:
-                slot = int(data["positions"][0])%256
-                bank = int(data["banks"][0])
-                # Restore phase0 so the deliberately corrupted slot is selected.
-                for key,value in data.items():
-                    buffers[key].copy_(torch.as_tensor(value.view(np.int8) if key=="cold" else value,
-                                                     device=device,dtype=dtypes[key]))
-                buffers["epoch_tags"][bank,slot] = -1
-                call();torch.npu.synchronize()
-                latched = any(bool(v.cpu().any()) for v in reader.fault_buffers())
-                buffers["epoch_tags"][bank,slot] = int(data["epochs"][0])
-                call();torch.npu.synchronize()
-                retained = any(bool(v.cpu().any()) for v in reader.fault_buffers())
-                report["cases"][f"b{batch}_q{queries}_stale_epoch_latch"] = dict(
-                    passed=latched and retained,detected=latched,retained_after_repair=retained)
+                result = stale_epoch_control(torch,reader,buffers,data,call=call,
+                                             device=device,dtypes=dtypes)
+                report["cases"][f"b{batch}_q{queries}_stale_epoch_latch"] = result
                 persist()
-                if not(latched and retained):raise RuntimeError("Missing-hot epoch did not latch a fault")
-                reader.reset_faults()
-        report["status"] = "DEVICE_BATCHED_READER_VALIDATED"
+                if not result["passed"]:
+                    raise RuntimeError("Missing-hot epoch did not latch a fault")
+        report["status"] = ("DEVICE_BATCHED_READER_VALIDATED" if cases==DEFAULT_CASES else
+                            "DEVICE_BATCHED_READER_SELECTED_CASES_VALIDATED")
         persist()
         print(args.output/"results.json")
         return 0

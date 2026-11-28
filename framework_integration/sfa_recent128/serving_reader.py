@@ -5,7 +5,7 @@ NPU operations only; it never inspects device values on CPU. Each plan's fault
 latches survive replays until explicitly drained by request completion code.
 This implementation is a device-validation candidate, not a performance claim.
 """
-from functools import lru_cache
+from functools import lru_cache, wraps
 import hashlib
 import importlib.util
 import json
@@ -19,6 +19,23 @@ import threading
 
 _PLANS = {}
 _LOCK = threading.Lock()
+
+
+def _inference_context(function):
+    """Own the lifetime rule for mutating cached inference-tensor plans.
+
+    Plans prepared during graph warmup may contain inference tensors even if
+    this particular caller is outside inference_mode. Keep the original fixed
+    storages; cloning here would disconnect the captured graph's buffers.
+    """
+    @wraps(function)
+    def run(*args, **kwargs):
+        import torch
+        if torch.is_inference_mode_enabled():
+            return function(*args, **kwargs)
+        with torch.inference_mode():
+            return function(*args, **kwargs)
+    return run
 
 
 def _require(condition, message):
@@ -168,6 +185,7 @@ class ServingReader:
                     result.append(plan.faults())
         return tuple(result)
 
+    @_inference_context
     def read(self, query, q_rope, cold, topk, table, qcum, kvlen,
              ring_binding, request_banks, request_epochs):
         import torch
@@ -233,6 +251,7 @@ class ServingReader:
             cpu_device_value_reads=0, new_plans_created=0, validation="A5_PENDING")
         return scratch["output"]
 
+    @_inference_context
     def reset_faults(self):
         """Explicit lifecycle operation after fault drain, outside capture/forward."""
         seen = set()

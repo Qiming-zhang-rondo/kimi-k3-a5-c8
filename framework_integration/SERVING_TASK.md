@@ -1,5 +1,28 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 最新 434b09d：B1七项通过，修复清理上下文后只补跑B8
+
+实际 traceback 停在 B1Q4 的 reader.reset_faults，尚未进入 B8；不是多请求计算失败。
+Graph 预热创建的 plan 含 inference tensor，清理在退出 inference_mode 后原地 zero_，违反 PyTorch 的生命周期合同。
+reader.read 和 reset_faults 现在自己持有 inference_mode；已处于该模式时直接复用，不额外嵌套。
+smoke 的坏 epoch 整段控制也持有该模式，不 clone、不替换图绑定的 buffer、不改计算内核。
+原未保护方法在新增主机回归中能复现相同模式错误，保护后原缓存对象与地址不变；32项相关宿主检查通过。
+
+保留现有结果：B1Q1 eager/Graph两阶段 + B1Q4 eager/Graph两阶段/坏epoch锁存，共7项通过。
+B1Q1 phase1 的参考为全空/全padding，L2=0证明空输入处理，不能称作相同输入完美重放。
+
+本轮仍只更新 Python，复用 SHA256=64d4a94eb843d97b172ee1dcff61abbe7e83fa515d680138c59c3b5f02b83955 的库。
+可只补跑尚未开始的 B8，避免重复占用机时：
+
+```bash
+python experimental/single_pass/run_batched_smoke.py \
+  --library-dir /tmp/hot128_serving/reader-build --source-root "$PWD" \
+  --device npu:0 --graph --case b8_q4 --output "$NEW_RUN/b8-smoke"
+```
+
+不传 --case 则仍运行完整矩阵。选定B8通过时结果明确标为子集验证，不能冒充这次全部形状重新通过。
+不重编ASC、不加载模型、不修改vendor；沿用空闲测试设备和新的输出目录。
+
 ## 最新 7d0ee407：继续同一批 reader 验证，不重编内核
 
 新批量库已编译，B1Q1 eager 对独立数学参考通过：relative L2=0.0022918427、max_abs=9.98e-5、faults=0。
@@ -38,7 +61,7 @@ python experimental/single_pass/run_batched_smoke.py \
 | 原 MXFP4 主缓存 | 保留 packed400 写入和原 TopK 合同；OFF 不走新路径 | 真实新 Prolog ON/OFF 的 query、C4 packed/scale 尚无设备逐字节对照 |
 | 真实 PrologV3 | 公共调用适配、完整 ABI1、实际写点要求、已通过的独立 writer | 私有 producer variant 必须实际编译注册；独立 writer 不是 producer |
 | 并发8 | 稳定请求 bank/epoch、批量 TND reader、隔离路由；批量库已编译，B1Q1 eager 精度通过 | B8 尚未执行；不能外推 B1 或旧 P8 writer 成为并发 attention 已通过 |
-| Graph | 固定缓冲、按 device/stream/shape 准备 plan；新 smoke 覆盖动态元数据 | 所有 layer/lane/bucket 必须捕获前准备；新 serving 动态 replay 尚未设备验证 |
+| Graph | 固定缓冲与显式 execution lane；独立 reader 的 B1Q1/B1Q4 Graph 已通过 | 所有 layer/lane/bucket 必须捕获前准备；B8和完整服务的动态 replay 尚未设备验证 |
 | MTP | 修正后的 GPU 位置、draft lane 隔离、容量保护、事务 API | 完整接受/拒绝和提交链未验证；draft 层自己的历史 BF16 热窗来源仍须核实，不能拿 target 层就绪代替 |
 | APC / prefix cache | 实际 BF16 尾窗快照导出/导入 API | **尚未自动接通 prefix 命中、驱逐、抢占恢复。不是仅缺测试。** 非零位置新请求缺真实尾窗会报错 |
 | P/D | 实际尾窗导入及接收完成事件 API | **尚未接通 Mooncake 的 BF16 尾窗发送、接收和通知协议。不是仅缺测试。** C4 传输成功不足以证明 BF16 已到 |
@@ -50,7 +73,7 @@ R0/272、其他 TopK、页大小或格式没有实现。每64个 local heads 一
 新物理 ring 容量 C=align128(128+max_query_chunk-1)，不是固定128槽。
 max_query_chunk 必须覆盖实际每请求 prefill/verify chunk，不能只按 MTP 的4个 token 填写；总 token/pool/表宽也受预分配界限制。
 
-已完成的 A5 设备证据为旧独立 ring writer 8/8，加最新独立批量 reader 的 B1Q1 eager；它们不验证真实 Prolog、C4 量化或完整 MTP。
+已完成的 A5 设备证据为旧独立 ring writer 8/8，加独立批量 reader 的B1 eager/Graph共7项；它们不验证真实 Prolog、C4 量化或完整 MTP。
 同一次 Graph 中 valid mask 变化的测试覆盖，也不能用旧 writer 的固定 valid mask 重放替代。
 
 ## 一次准备、一次成批验收的执行约定
