@@ -1,0 +1,88 @@
+{
+  "date": "2026-11-28 12:05",
+  "type": "FINAL_COMPLEHENSIVE_FEEDBACK",
+  "summary": "Complete list of ALL problems encountered during PROLOG variant integration. Total: 10 problems across 3 rounds. Root cause: Codex instructions lacked precise types, compilation contexts, verification steps, and exact code blocks. Each problem cost 1 debugging round.",
+
+  "round_1_standalone_compilation": [
+    {
+      "problem": "GET_TILING_DATA_WITH_STRUCT macro not defined",
+      "solution": "Codex provided staging tool with direct tiling load (qsfa_direct::LoadTilingWords)"
+    },
+    {
+      "problem": "template_argument.h host printf in device compilation",
+      "solution": "Codex provided QSFA_ASC_DIRECT_BUILD guard for host template registration"
+    }
+  ],
+
+  "round_2_writer_integration": [
+    {
+      "problem": "event_t vs TEventID type mismatch",
+      "symptom": "assigning to 'event_t' from incompatible type 'AscendC::TEventID'",
+      "root_cause": "Codex's prolog_ring_write_device.h used event_t but AllocEventID returns TEventID. Header was never test-compiled against CANN 9.2.1.",
+      "solution": "Changed event_t to TEventID",
+      "codex_should": "Test-compile delivered headers against target SDK. Or document exact return types."
+    },
+    {
+      "problem": "VEC guard missing — Writer namespace not found in CUBE pass",
+      "symptom": "use of undeclared identifier 'QsfaPrologRingWrite'",
+      "root_cause": "Writer header guarded by __DAV_C310_VEC__ only. PROLOG kernel is MIX_AIC (CUBE+VEC). Integration code referenced Writer without VEC guard in both passes.",
+      "solution": "Added VEC guard around ALL Writer references in entry and header",
+      "codex_should": "PROLOG_INLINE_INTEGRATION.md must state: 'ALL Writer references in the mixed kernel MUST be wrapped in #if defined(__DAV_C310_VEC__). Here is the exact guard pattern for each location.'"
+    },
+    {
+      "problem": "Ring write call missing from initial integration",
+      "symptom": "recent128Writer_ count=2 (declaration + setter only, no write call in RmsNormAndQuantizeCkv)",
+      "root_cause": "Integration script's detection was fooled by 'Recent128 ring write' COMMENT string elsewhere in file. Actual write call never inserted.",
+      "solution": "Force-added after DataSyncBarrier. Verified with count=5.",
+      "codex_should": "Integration instructions must include verification: 'After integration, grep count of recent128Writer_ must be >= 5. If < 5, write call is missing.'"
+    }
+  ],
+
+  "round_3_tbe_installation": [
+    {
+      "problem": "LoadDataRepeatParam 4-arg vs 3-arg (old vs new API)",
+      "symptom": "LoadDataRepeatParam constructor requires 3 arguments, but 4 were provided",
+      "root_cause": "Source has #if ASC_DEVKIT_VERSION_NUM >= 90000000 conditional. ASC_DEVKIT_VERSION_NUM not defined in standalone, so old API branch taken. Old=4 args, new=3 args.",
+      "solution": "Removed conditional, used new API SetLoadDataRepeatWithStride directly",
+      "codex_should": "Staging tool should handle ALL version conditionals. Or document: 'ASC_DEVKIT_VERSION_NUM not defined standalone. Source has version conditionals needing manual resolution.'"
+    },
+    {
+      "problem": "ASCENDC_TPL_MIX_AIC_1_1 value not provided",
+      "symptom": "use of undeclared identifier ASCENDC_TPL_MIX_AIC_1_1",
+      "root_cause": "Staging manifest listed symbol names but NO VALUES. Found value (=4) ourselves from bisheng header.",
+      "solution": "Created qsfa_device_template_constants.h with ASCENDC_TPL_MIX_AIC_1_1=4",
+      "codex_should": "Manifest must provide ACTUAL VALUES: 'ASCENDC_TPL_MIX_AIC_1_1 = 4 (= KERNEL_TYPE_MIX_AIC_1_1)'. Not just names."
+    },
+    {
+      "problem": "Build cache produced false success",
+      "symptom": "Build reported SUCCESS but .so timestamp unchanged (cached .o)",
+      "root_cause": "cmake --build used cached .o after source modification",
+      "solution": "rm -rf build && full clean rebuild. Verified fresh [Building] line in output.",
+      "codex_should": "Build instructions must include: 'After source modifications, ALWAYS clean rebuild. Verify .so timestamp is fresh and [Building] line appears.'"
+    },
+    {
+      "problem": "ABI marker on function vs module level",
+      "symptom": "AttributeError when accessing cloud_mla_prolog_v3_recent128.recent128_abi_version",
+      "root_cause": "prolog_provider.py contract states 'FUNCTION must declare recent128_abi_version=1; module-level marker is insufficient'. But wrapper only had module-level marker.",
+      "solution": "Added cloud_mla_prolog_v3_recent128.recent128_abi_version = 1 as function attribute",
+      "codex_should": "When providing wrapper templates, include the function-attribute pattern: 'func.recent128_abi_version = 1' not just module-level variable."
+    }
+  ],
+
+  "final_requirements_for_codex": {
+    "mandatory_in_future_instructions": [
+      "1. Exact types: 'use TEventID not event_t' — never approximate",
+      "2. Compilation context guards: 'wrap in #if defined(__DAV_C310_VEC__)' with exact code",
+      "3. Verification steps: 'grep count must be N' after each integration step",
+      "4. Actual values for symbols: 'CONSTANT = 4 from specific header'",
+      "5. Known SDK incompatibilities: list all version conditionals in source",
+      "6. Clean rebuild instruction: 'rm -rf build && cmake && cmake --build'",
+      "7. Complete code blocks: provide exact code to insert, not descriptions",
+      "8. Function attributes: 'func.recent128_abi_version = 1' for ABI markers",
+      "9. Test-compile delivered headers against actual SDK before pushing",
+      "10. Expected file locations and installation paths"
+    ]
+  },
+
+  "final_status": "All 10 problems resolved. PROLOG_V3_recent128 variant fully integrated and installed on both nodes (178 + 209). Python wrapper registered with ABI=1. TBE operator ready for dynamic compilation on first call. Service start pending user."
+}
