@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-28 11:05",
+  "question": "How to handle short prompts (<128 tokens) where the hot window includes prompt tokens from P node?",
+
+  "analysis": {
+    "long_prompts_over_128": "Hot window (128 tokens) covers only decode-generated tokens. D computes PROLOG for each new token locally, writes BF16 ring locally. No P-to-D BF16 transfer needed. GPQA questions are all >128 tokens, so this is the common case.",
+    "short_prompts_under_128": "Hot window would include some prompt tokens. These tokens' KV was computed on P (during prefill). Their BF16 exists only on P. D needs P-to-D BF16 transfer to fill the hot window for these tokens. Without transfer, the hot window would be incomplete for the prompt portion."
+  },
+
+  "options_for_short_prompts": {
+    "A_fallback_to_c4": "When prompt < 128 tokens, fall back to normal C4 for the prompt portion of the hot window. BF16 only for decode-generated tokens. Simple but loses precision benefit for short prompts.",
+    "B_partial_hot_window": "Only use BF16 for the tokens that have BF16 available (decode tokens). Prompt portion stays C4. Hot window is partially BF16, partially C4.",
+    "C_pd_transfer": "Implement P-to-D BF16 tail window transfer. P snapshots the last 128 tokens' BF16 at prefill completion and transfers alongside regular KV. Full BF16 hot window even for short prompts. Most correct but requires PD lifecycle (Step 5).",
+    "D_eager_recompute": "D recomputes BF16 for prompt tokens when it detects missing hot window data. Wasteful (duplicate KV projection) but correct. Probably rejected per 'no second projection' rule."
+  },
+
+  "recommended_approach": "Start with option A or B for initial verification (GPQA has long prompts, so this is edge case). Implement option C (PD transfer) later for full production coverage. Option D violates no-duplicate-compute constraint.",
+
+  "user_question": "User asks: is fallback acceptable for short prompts, or should we implement PD transfer from the start? What is the recommended handling?"
+}
