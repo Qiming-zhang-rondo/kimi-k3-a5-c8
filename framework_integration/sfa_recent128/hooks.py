@@ -15,8 +15,10 @@ def capture_native_kv(impl, latent, rope):
     runtime = getattr(impl, "_recent128_runtime", None)
     if runtime is not None:
         if getattr(getattr(impl, "_recent128_config", None), "execution", None) == "serving":
-            # The serving producer writes its own BF16 ring in PrologV3.
-            # Never manufacture raw history from a native/packed-cache tap.
+            if getattr(runtime, "producer_kind", None) == "native":
+                from .native_cp import capture_native
+                if not capture_native(impl, latent, rope):
+                    raise RuntimeError("Native BF16 tap ran outside its scoped serving forward")
             return
         metadata = getattr(impl, "_recent128_write_metadata", None)
         if metadata is None:
@@ -83,7 +85,9 @@ def install():
         if runtime is None:
             return original_exec(impl, kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         if impl._recent128_config.execution == "serving":
-            raise RuntimeError("Serving recent128 expected its PrologV3 ring producer; native exec_kv fallback is not enabled")
+            if getattr(runtime, "producer_kind", None) != "native":
+                raise RuntimeError("Serving selected a Prolog producer; native exec_kv fallback is not enabled")
+            return original_exec(impl, kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         impl._recent128_write_metadata = attn_metadata
         try:
             return original_exec(impl, kv_no_split, cos, sin, kv_cache, slots, attn_metadata)

@@ -1,5 +1,50 @@
 # 按真实Native/DSACP路径接热环：一次实施任务
 
+## 当前70669eb：已经有真实Native/CP候选代码，按此验证
+
+本轮首请求停在`lane.binding`：全局runner行数与DSACP本rank query行数不同。
+本次提交补了实际代码，**不要继续安装2fb7562中`.modified`占位文件**：
+
+- `native_writer.py`：真实BF16 Triton写环，GPU bank/绝对position/epoch/valid驱动，同次写payload和tags，无逐token Python循环。
+- `native_cp.py`：原始BF16按TP原顺序交换、全局写环binding、本rank query路由；保持原packed gather不变。
+- `native_runtime.py/native_hooks.py`：scope贯穿原Native forward，tap只保留原始引用；原store完成后真实汇聚/写环，再交给原V4读取。
+- 实际Native路径不再要求Prolog producer；已选Prolog的层继续原provider。只有实际tap/forward/store接线齐全才接受Native，不能直接放开enum。
+
+此版本是正确性候选：TP>1每层增加一次BF16 collective和一个Native写环kernel，还没有A5或性能通过证据。
+169项framework宿主检查及9项controller检查通过，不能替代设备/模型验证。
+
+内网直接执行同一任务，不再让用户转发私有源码：
+
+1. 在原目标容器先执行小型真实writer检查，不加载模型、不编CANN/V4库：
+
+   ```bash
+   python framework_integration/run_native_writer_smoke.py \
+     --device npu:0 --graph --output "$NEW_RUN/native-writer"
+   ```
+
+   设备沿用内网已确认的测试设备；不停止或重置其他服务。首次Native Triton编译和Graph重放在这里验证。
+   成功仅证明独立writer，输出明确不是CP或模型验收。
+2. 同步整个新的公共runtime包，而不是继续拼接占位方法。已有209手工修改可用受控备份替换：
+
+   ```bash
+   python framework_integration/install_overlay.py \
+     --mxllm-root "$ACTUAL_MXLLM_CHECKOUT" --source-profile pr199 \
+     --apply --update-runtime --replace-edited-runtime \
+     --output "$NEW_RUN/overlay-backup"
+   ```
+
+   该参数只允许已管理runtime的手工修改；原3份MXLLM源的profile/marker/manifest检查仍必须通过。
+   实际旧runtime完整备份在外部目录，原量化源和vendor不改。新worker才会加载新代码，旧已加载进程不会自动更新。
+3. 用原生产参数重新启动本轮测试worker，重复同一条curl。缺少tap、scope、真实writer或CP路由会明确拒绝，不静默跳过。
+   保留并发、Graph、MTP、APC和P/D配置，不把它们关掉掩盖错误。
+4. 通过现有worker RPC在真实worker调用`serving_runtime.validate_worker_serving`，检查层producer/read计数与sticky faults。
+   不在另一个新Python进程调用空状态后宣称通过；`NOT_EXERCISED`不算通过，warmup计数也不代替真实payload/重放对照。
+5. 原量化/主缓存OFF/ON保持，先验证同一请求的真实Native写入、TP8跨rank热KV和本rank读取。
+   **P/D与APC自动BF16尾窗接收仍是已知未完成接线**，缺尾窗必须按原任务补传输/import，不能将其标ready或退C4。
+   相同生产请求端到端通过且无fault后，才执行同一套198题GPQA；不能把占位版或C4回退分数记为hot128。
+
+下面是本候选的源合同与实现依据，已实现项不再交给内网重新写一遍。
+
 41bef5c 的方向有可用部分，但“永远不选Prolog”“已有smoke可直接复用”“零风险支持DSACP”均未被证明。
 本轮保持生产原选路，给实际Native路径补producer，不强制关DSA-CP或改为Prolog。已有Prolog variant保留给真正选中它的分支。
 

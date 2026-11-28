@@ -1,5 +1,14 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口70669eb：修全局写环/本rank读取，安装真实Native候选
+
+执行 [NATIVE_DSACP_TASK顶部](NATIVE_DSACP_TASK.md)。本轮已有真实BF16 writer、TP交换、local query路由和实际forward/store接线，
+不采纳2fb7562的无writer占位、逐token循环、固定epoch0或仅放开contract方案。
+先运行独立writer eager/Graph检查，再用带外部备份的runtime更新流程同步手工改过的209，保持原生产配置测试同一curl。
+当前首错的原因是DSACP全局metadata与本rank query行数不同；Native reader现在使用独立local binding，不删除全局状态检查。
+169项框架+9项controller宿主检查通过；A5 Native/CP及完整P/D/APC/GPQA仍待实际验证。
+不能把服务启动或独立writer通过写成完整hot128生效，不能在新Python空进程检查fault后宣称服务无fault。
+
 ## 当前入口 41bef5c：支持真实Native路径，不扩大“从未使用Prolog”的结论
 
 执行 [NATIVE_DSACP_TASK.md](NATIVE_DSACP_TASK.md)。公开源核对已确认Native量化前BF16 `k_nope` 与post-RoPE `k_rope`可取，
@@ -319,7 +328,7 @@ max_query_chunk 必须覆盖实际每请求 prefill/verify chunk，不能只按 
    公共生命周期接口已提供，实际 connector 的私有接线在内网就地实施，不能把接口存在写成传输已完成。
 
 6. 按原生产并发8、Graph、MTP、prefix、P/D 参数拉起 hot128 专用服务，baseline 链不动。
-   缺私有 producer 就先完成第1步，不再回到 Native 或 max_num_seqs=1。
+   按实际Native/Prolog路径完成对应producer，不退回旧accuracy_eager或max_num_seqs=1。
    完成请求后通过 worker RPC 调用 serving_runtime.validate_serving_faults()，检查所有已准备 bucket 的 sticky 错误；
    此检查在计时外同步，不能每层 .tolist()。故障为零也不代替真实模型精度测试。
    再用相同 seed/请求集对比完整198题 GPQA；78/94 的中途结果仅保留为中途记录，不能归因成最终精度。

@@ -98,14 +98,14 @@ def parse_recent128_config(additional_config=None):
 def validate_runtime_contract(config, *, preprocess_type=None, max_num_seqs=None,
                               enforce_eager=None, prefix_caching=False,
                               pd_enabled=False, pcp_size=1, dcp_size=1,
-                              speculative_enabled=False, capturing=False):
+                              speculative_enabled=False, capturing=False, native_producer_available=False):
     """Fail explicitly instead of changing the framework's selected path."""
     if not config.enabled:
         return
     if config.execution == "serving":
         name = getattr(preprocess_type, "name", str(preprocess_type)).upper().rsplit(".", 1)[-1]
-        if name != "PROLOG_V3":
-            raise ContractError("serving recent128 requires selected preprocessing PROLOG_V3; actual=" + name +
+        if name != "PROLOG_V3" and not (name == "NATIVE" and native_producer_available is True):
+            raise ContractError("serving recent128 requires selected PROLOG_V3 or a wired NATIVE BF16 producer; actual=" + name +
                 ". This checks the framework route, not a TBE path or lazy compilation; provider ABI is checked separately")
         _integer("max_num_seqs", max_num_seqs, 1)
         # Batch, Graph and MTP are handled by the serving implementation.

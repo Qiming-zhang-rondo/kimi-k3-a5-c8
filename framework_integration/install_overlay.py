@@ -133,7 +133,9 @@ def install_overlay(mxllm_root, *, apply=False, output=None,
                     expected_source_sha256=PINNED_SOURCE_SHA256,
                     expected_worker_sha256=PINNED_WORKER_SHA256,
                     expected_platform_sha256=PINNED_PLATFORM_SHA256, runtime_root=None,
-                    update_runtime=False):
+                    update_runtime=False, replace_edited_runtime=False):
+    if replace_edited_runtime and not update_runtime:
+        raise ValueError("--replace-edited-runtime requires --update-runtime")
     root = Path(mxllm_root).resolve()
     if any(name in root.parts for name in ("site-packages", "dist-packages")):
         raise ValueError("Target an explicit source checkout, not installed site-packages")
@@ -174,15 +176,27 @@ def install_overlay(mxllm_root, *, apply=False, output=None,
         installed_hashes = {name: sha(data) for name, data in package_files(target).items()}
         if (state.get("original_sha256") != expected or
                 any(sha(original[name]) != expected[name] for name in expected) or
-                regenerated != current or state.get("installed_source_sha256") != actual or
-                installed_hashes != state.get("runtime_sha256")):
+                regenerated != current or state.get("installed_source_sha256") != actual):
             raise ValueError("Installed source/runtime differs from the reviewed manifest; restore and review before reinstall")
-        if installed_hashes != hashes:
+        previous_expected = state.get("runtime_sha256")
+        if (not isinstance(previous_expected, dict) or
+                not {"__init__.py", "hooks.py", "config_bridge.py"} <= previous_expected.keys() or
+                any(not isinstance(name, str) or not isinstance(digest, str) or
+                    not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    for name, digest in previous_expected.items())):
+            raise ValueError("Managed runtime manifest is missing valid expected runtime hashes")
+        edited = installed_hashes != previous_expected
+        if edited and not replace_edited_runtime:
+            raise ValueError("Installed source/runtime differs from the reviewed manifest; restore and review before reinstall")
+        edit_evidence = (dict(edited_runtime_sha256=installed_hashes,
+                              previous_expected_runtime_sha256=previous_expected) if edited else {})
+        if installed_hashes != hashes or edited:
             if not update_runtime:
                 raise ValueError("A newer runtime is available; use --update-runtime --output to back up and update only the managed runtime")
             if not apply:
-                return dict(status="RUNTIME_UPDATE_READY",changed=False,mxllm_root=str(root),
-                            original_runtime_sha256=installed_hashes,runtime_sha256=hashes,device_launched=False)
+                return dict(status="EDITED_RUNTIME_UPDATE_READY" if edited else "RUNTIME_UPDATE_READY",
+                            changed=False,mxllm_root=str(root), original_runtime_sha256=installed_hashes,
+                            runtime_sha256=hashes,device_launched=False,**edit_evidence)
             if output is None:
                 raise ValueError("Runtime update requires --output for a restorable runtime backup")
             destination=Path(output).resolve()
@@ -196,7 +210,8 @@ def install_overlay(mxllm_root, *, apply=False, output=None,
             try:
                 for name,data in contents.items():
                     path=staged/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
-                updated=dict(state,runtime_sha256=hashes,previous_runtime_backup=str(backup/"runtime"))
+                updated=dict(state,runtime_sha256=hashes,previous_runtime_backup=str(backup/"runtime"),
+                             **edit_evidence)
                 (staged/STATE).write_text(json.dumps(updated,indent=2)+"\n")
                 os.replace(target,old)
                 try:
@@ -209,7 +224,7 @@ def install_overlay(mxllm_root, *, apply=False, output=None,
                 if staged.exists():shutil.rmtree(staged)
             result=dict(status="RUNTIME_UPDATED",changed=True,mxllm_root=str(root),
                         backup_directory=str(backup),runtime_sha256=hashes,source_sha256=actual,
-                        source_changed=False,device_launched=False)
+                        source_changed=False,device_launched=False,**edit_evidence)
             (backup/"manifest.json").write_text(json.dumps(result,indent=2)+"\n")
             return result
         return dict(status="ALREADY_INSTALLED",changed=False,mode="apply" if apply else "check",
@@ -283,6 +298,7 @@ def main():
     mode.add_argument("--apply",action="store_true",help="Copy runtime and patch this source checkout")
     parser.add_argument("--output",type=Path,help="External experiment output for original-source backups/manifest")
     parser.add_argument("--update-runtime",action="store_true",help="Back up and update a verified managed runtime; leave all MXLLM source patches unchanged")
+    parser.add_argument("--replace-edited-runtime",action="store_true",help="With --update-runtime, back up and replace locally edited managed runtime files; source and manifest checks remain mandatory")
     parser.add_argument("--source-profile",choices=tuple(SOURCE_PROFILES),default="legacy",
         help="Exact reviewed MXLLM three-file source set; pr199 is head 342680fb, not a compatibility override")
     parser.add_argument("--expected-source-sha256")
@@ -295,7 +311,7 @@ def main():
             expected_source_sha256=args.expected_source_sha256 or source_hash,
             expected_worker_sha256=args.expected_worker_sha256 or worker_hash,
             expected_platform_sha256=args.expected_platform_sha256 or platform_hash,
-            update_runtime=args.update_runtime)
+            update_runtime=args.update_runtime,replace_edited_runtime=args.replace_edited_runtime)
         result["source_profile"]=args.source_profile
     except (ValueError,OSError,SyntaxError,json.JSONDecodeError) as error:
         parser.exit(2,f"Overlay refused: {error}\n")

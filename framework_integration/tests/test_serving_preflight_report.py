@@ -111,7 +111,8 @@ class ServingPreflightReportTests(unittest.TestCase):
         (self.lib / "CMakeCache.txt").write_text("SFA_SDK_ROOT:PATH=" + str(sdk) + "\n")
         report = MODULE.build_report(self.engine, environ={"ASCEND_HOME_PATH": str(self.root / "other-sdk")})
         checks = self.by_name(report)
-        for name in ("route.enable_dsa_cp", "route.mla_kv_quant_mode.attention_config", "sdk.identity"):
+        self.assertEqual(checks["route.enable_dsa_cp"]["status"], "PENDING")
+        for name in ("route.mla_kv_quant_mode.attention_config", "sdk.identity"):
             self.assertEqual(checks[name]["status"], "BLOCKED")
         self.assertTrue(self.engine["additional_config"]["enable_dsa_cp"])
 

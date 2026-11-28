@@ -75,5 +75,50 @@ class ServingOverlayUpdateTest(unittest.TestCase):
         self.assertEqual(worker.read_bytes(),original+b"# unreviewed source change\n")
         self.assertFalse((self.base/"rejected").exists())
 
+    def test_explicit_edited_runtime_replacement_preserves_backup_and_source_bytes(self):
+        target=self.root/"sfa_recent128/hooks.py"
+        edited=b"# local emergency runtime edit to preserve in backup\n"
+        target.write_bytes(edited)
+        state_path=self.root/"sfa_recent128"/installer.STATE
+        previous=json.loads(state_path.read_text())["runtime_sha256"]
+        with self.assertRaisesRegex(ValueError,"differs from the reviewed manifest"):
+            self.install(update_runtime=True)
+        with self.assertRaisesRegex(ValueError,"requires --update-runtime"):
+            self.install(replace_edited_runtime=True)
+        ready=self.install(update_runtime=True,replace_edited_runtime=True)
+        self.assertEqual(ready["status"],"EDITED_RUNTIME_UPDATE_READY")
+        self.assertFalse(ready["changed"])
+        self.assertEqual(target.read_bytes(),edited)
+        with self.assertRaisesRegex(ValueError,"requires --output"):
+            self.install(apply=True,update_runtime=True,replace_edited_runtime=True)
+        updated=self.install(apply=True,update_runtime=True,replace_edited_runtime=True,
+                             output=self.base/"edited-upgrade")
+        self.assertEqual(updated["status"],"RUNTIME_UPDATED")
+        self.assertEqual(updated["edited_runtime_sha256"]["hooks.py"],installer.sha(edited))
+        self.assertEqual(updated["previous_expected_runtime_sha256"],previous)
+        backup=Path(updated["backup_directory"])
+        self.assertEqual((backup/"runtime/hooks.py").read_bytes(),edited)
+        self.assertEqual(target.read_bytes(),(self.runtime/"hooks.py").read_bytes())
+        self.assertEqual({name:(self.root/name).read_bytes() for name in self.original_sources},self.original_sources)
+        self.assertEqual({name:(self.root/name).stat().st_mtime_ns for name in self.original_sources},self.original_times)
+        for manifest in (backup/"manifest.json",state_path):
+            recorded=json.loads(manifest.read_text())
+            self.assertEqual(recorded["edited_runtime_sha256"],updated["edited_runtime_sha256"])
+            self.assertEqual(recorded["previous_expected_runtime_sha256"],previous)
+        self.assertEqual(self.install()["status"],"ALREADY_INSTALLED")
+
+    def test_edited_runtime_flag_never_waives_source_or_manifest_integrity(self):
+        worker=self.root/installer.WORKER
+        worker.write_bytes(worker.read_bytes()+b"# source drift\n")
+        with self.assertRaisesRegex(ValueError,"differs from the reviewed manifest"):
+            self.install(apply=True,update_runtime=True,replace_edited_runtime=True,output=self.base/"refused")
+        self.assertFalse((self.base/"refused").exists())
+        worker.write_bytes(self.original_sources[str(installer.WORKER)])
+        state_path=self.root/"sfa_recent128"/installer.STATE
+        state=json.loads(state_path.read_text());state.pop("runtime_sha256")
+        state_path.write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError,"manifest is missing valid expected runtime hashes"):
+            self.install(update_runtime=True,replace_edited_runtime=True)
+
 
 if __name__=="__main__":unittest.main()

@@ -156,6 +156,30 @@ class ServingRuntimeTest(unittest.TestCase):
         self.assertTrue(any("layer_name" in error for error in report["errors"]))
         self.assertTrue(any("not a TBE path" in error for error in report["errors"]))
 
+    def test_native_dispatch_does_not_require_prolog_and_reader_uses_local_binding(self):
+        impl=self.impl();impl.preprocess_type="NATIVE"
+        native_hooks=ModuleType("sfa_recent128.native_hooks")
+        native_hooks.install_native_hooks=lambda value:{"producer":"native_bf16_candidate"}
+        native=ModuleType("sfa_recent128.native_runtime")
+        local_binding=object();calls=[]
+        class NativeProducer:
+            def __init__(controller,runtime):controller.runtime=runtime
+            def write(controller,scope):
+                calls.append(("write",scope));controller.runtime.producer_calls+=1
+            def reader_binding(controller,metadata,rows):
+                calls.append(("local_binding",metadata,rows));return local_binding
+        native.NativeProducer=NativeProducer
+        with patch.dict(sys.modules,{"sfa_recent128.native_hooks":native_hooks,"sfa_recent128.native_runtime":native}):
+            runtime=self.runtime.ServingRuntime(impl,self.config)
+        self.assertFalse(self.providers)
+        self.assertEqual(runtime.producer_kind,"native")
+        scope=object();runtime.native_write(scope)
+        values,_=self.inputs(runtime)
+        runtime.read(*values)
+        self.assertIn(("write",scope),calls)
+        self.assertIs(runtime.reader.reads[0][7],local_binding)
+        self.assertEqual(runtime.producer_calls,1)
+
     def inputs(self, runtime, *, tuple_cache=True):
         metadata=SimpleNamespace(recent128_state=runtime.state,max_query_len=4,block_size=128,
             block_table=Tensor((8,16),"int32"))

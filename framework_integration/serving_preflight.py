@@ -58,6 +58,12 @@ def _probe_original_prolog_exports():
     return "Both original Cloud Prolog exports are callable; Python layer selection still depends on the actual weights/role"
 
 
+def _probe_native_runtime():
+    if importlib.util.find_spec("triton") is None:
+        raise RuntimeError("Native BF16 writer requires the container's matched Triton runtime; no package was installed")
+    return "Triton module is discoverable; actual Native writer A5 compilation and Graph/CP execution remain pending"
+
+
 def _probe_library(path):
     handle = ctypes.CDLL(str(path), mode=ctypes.RTLD_LOCAL)
     version = handle.QsfaBatchedServingAbiVersion
@@ -111,8 +117,8 @@ def build_report(engine, *, check_host=False, environ=None):
     require("config.mapping", isinstance(config, Mapping), "sfa_recent128 must be an object")
     config = config if isinstance(config, Mapping) else {}
     dsa_cp = additional.get("enable_dsa_cp") if isinstance(additional, Mapping) else None
-    add("route.enable_dsa_cp", "BLOCKED" if dsa_cp is True else ("PASS" if dsa_cp is False else "UNKNOWN"),
-        "Reviewed VA enable_dsa_cp=True selects a path that disables fused preprocessing; serving requires PROLOG_V3. No setting was changed; the actual selected implementation still needs runtime evidence",
+    add("route.enable_dsa_cp", "PENDING" if dsa_cp is True else ("PASS" if dsa_cp is False else "UNKNOWN"),
+        "DSACP uses Native preprocessing. The new raw-BF16 writer/TP exchange/local-query adapter is a device-validation candidate; preserve the original selection and verify the actual worker implementation",
         dsa_cp)
     attention = options.get("attention_config")
     attention = attention if isinstance(attention, Mapping) else {}
@@ -299,8 +305,14 @@ def build_report(engine, *, check_host=False, environ=None):
     ):
         add(name, "PENDING", detail)
     if check_host:
-        run("host.provider_function_abi", _probe_provider)
-        run("host.original_prolog_exports", _probe_original_prolog_exports)
+        if dsa_cp is True:
+            run("host.native_writer_runtime", _probe_native_runtime)
+            add("host.provider_function_abi", "PENDING", "DSACP Native does not require the Prolog writer; verify it only for actually selected Prolog layers")
+            add("host.original_prolog_exports", "PENDING", "Original Prolog exports do not enable DSACP Native; the Native tap/TP route is checked at layer initialization")
+        else:
+            run("host.provider_function_abi", _probe_provider)
+            run("host.original_prolog_exports", _probe_original_prolog_exports)
+            add("host.native_writer_runtime", "PENDING", "Check the matched Triton runtime if the actual layer selects Native")
         if library is None:
             add("host.reader_abi", "UNKNOWN", "library_dir is absent; independent provider/tool checks still ran")
         else:

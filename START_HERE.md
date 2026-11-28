@@ -1,11 +1,18 @@
-# 当前任务：按真实Native/DSACP执行路径补热环producer
+# 当前任务：验证真实Native/DSACP候选，修复70669eb首请求行数错配
 
-最新报告41bef5c确认本轮Native路径，但其“永远不选Prolog”“已有smoke可直接复用”“零风险兼容DSACP”的结论过头。对应PR199公开源已独立核对：普通分支可选Prolog；DSACP禁用fused但Native tap有真实原BF16来源，方案可以适配。
+本轮已有实际代码，不采用2fb7562的`.modified`占位文件：Native原BF16 writer、TP BF16交换、全局写环、本rank query路由和原forward/store接线。原Native量化器/packed400不变，V4 attention库复用；Prolog层继续原provider，实际Native层不再要求Prolog。
 
-直接执行 [NATIVE_DSACP_TASK](framework_integration/NATIVE_DSACP_TASK.md)。原始数据在 `_mxfp4_custom_kv_rmsnorm_rope` 的 `k_nope` 和 `k_rope`，现有overlay已有量化前tap。新Native producer必须同时解决BF16输入ABI、DSACP TP本rank分片的真实高精度KV交换，以及reader的local-query/全局request路由；只删除guard会错误，不能用C4反量化冒充。
+直接执行 [NATIVE_DSACP_TASK顶部](framework_integration/NATIVE_DSACP_TASK.md)。先用目标容器的小型eager/Graph fixture验证新writer，再受控备份更新完整managed runtime并启动新worker，保持原生产配置重复同一curl。当前错误来自全局token绑定与TP本rank query行数不同，已通过独立local binding解决，不删行数检查。
 
-原Prolog variant保留给真正选择该路径的层，不再为Native错误重复编Prolog，不强制切换生产路径。D节点原JSON=false却实际DSACP，需核对worker生效配置和加载源码；当前失败诊断已新增dispatch_state，记录canonical/effective flags、TP/PCP/DCP、实际method链/模块文件与SHA。诊断留内网，不再要求用户上传私有源码。
+```bash
+python framework_integration/run_native_writer_smoke.py --device npu:0 --graph --output "$NEW_RUN/native-writer"
+python framework_integration/install_overlay.py --mxllm-root "$ACTUAL_MXLLM_CHECKOUT" --source-profile pr199 --apply --update-runtime --replace-edited-runtime --output "$NEW_RUN/overlay-backup"
+```
 
-Native/CP适配尚未实现或设备验收，不能宣称服务修通。内网agent按任务在本地完成隔离候选与控制后只回传允许的小表，保留Graph/MTP/APC/P-D、原量化器和packed400。新增GM读写/高精度通信有成本，须实测，不承诺零性能代价。
+设备/路径由内网沿现有真实环境填写。替换参数仅接管已管理runtime的手工修改并做实际旧文件备份，原MXLLM三源profile/markers仍检查，不覆盖vendor。不重编现有CANN/V4；新Native Triton kernel首调用编译和目标设备运行仍待验证。
 
-本轮2项新dispatch测试+7项runtime检查通过；没有NPU执行或性能结论。旧的aggregated预检和完整要求仍适用，但Native接受须等真正producer/CP路由实现，不能通过改enum或关开关绕过。
+169项framework宿主检查+9项controller检查通过。独立writer通过不等于TP8、模型或GPQA通过。TP>1候选每层增加一次BF16 collective和一个写环kernel，没有性能结论。
+
+请求后在实际worker用现有collective_rpc调用serving_runtime.validate_worker_serving，核对producer/read层计数与sticky faults；新Python空进程的NOT_EXERCISED不算通过。P/D和APC自动BF16尾窗仍是明确未完成接线，不可假造ready、静默退C4或关功能换通过。先通过真实生产请求端到端验证，再跑原198题GPQA。
+
+所有私有实现和原始日志留内网，只回传允许的首错、运行身份和控制/计时小表。不要让用户继续搬文件，不重新扩展性能摸高或DSL路线。

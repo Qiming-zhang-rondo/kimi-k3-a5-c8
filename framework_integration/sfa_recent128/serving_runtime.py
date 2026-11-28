@@ -28,7 +28,9 @@ def _preflight_serving(source_root, library_dir):
     root = Path(source_root).expanduser().resolve()
     if not library.is_file() or not (root / "experimental/single_pass/batched_serving_bridge.cpp").is_file():
         raise RuntimeError("Build the isolated batched_v4 reader and point source_root/library_dir at it before loading model weights")
-    producer = install_prolog_route()
+    # Weight preparation selects Native versus Prolog. Do not require a
+    # Prolog-only writer for a Native/DSACP worker before that decision.
+    producer = dict(status="CHECK_AFTER_ORIGINAL_WEIGHT_PREPARATION", routes=("native", "prolog"))
     try:
         handle = ctypes.CDLL(str(library), mode=ctypes.RTLD_LOCAL)
         abi = handle.QsfaBatchedServingAbiVersion
@@ -80,7 +82,7 @@ def get_state(vllm_config, config, device, *, create=False):
     return state
 
 
-def layer_contract_report(impl, config):
+def layer_contract_report(impl, config, *, native_producer_available=False):
     """Gather layer metadata, never resolve/force a new preprocessing path.
 
     The framework has already prepared weights. Its route must remain intact.
@@ -94,7 +96,8 @@ def layer_contract_report(impl, config):
     errors = []
     try:
         validate_runtime_contract(config, preprocess_type=selected,
-            max_num_seqs=getattr(scheduler, "max_num_seqs", None))
+            max_num_seqs=getattr(scheduler, "max_num_seqs", None),
+            native_producer_available=native_producer_available)
     except ContractError as error:
         errors.append(str(error))
     max_seqs = getattr(scheduler, "max_num_seqs", None)
@@ -121,7 +124,7 @@ def layer_contract_report(impl, config):
     if type(max_tokens) is not int or max_tokens <= 0:
         errors.append("scheduler.max_num_batched_tokens must be a positive resolved integer")
     reasons, probe_error = [], None
-    if name != "PROLOG_V3":
+    if name != "PROLOG_V3" and not native_producer_available:
         target = getattr(type(selected), "PROLOG_V3", None)
         probe = getattr(impl, "_get_fused_type_unsupported_reasons", None)
         if target is not None and callable(probe):
@@ -151,8 +154,11 @@ def layer_contract_report(impl, config):
         tbe_variant_compilation="NOT_TESTED_BY_ROUTE_CHECK", device_validation="NOT_PERFORMED")
 
 
-def require_layer_contract(impl, config):
-    report = layer_contract_report(impl, config)
+def require_layer_contract(impl, config, *, native_producer_available=False, extra_errors=()):
+    report = layer_contract_report(impl, config, native_producer_available=native_producer_available)
+    report["errors"].extend(extra_errors)
+    if report["errors"]:
+        report["status"] = "BLOCKED_LAYER_CONTRACT"
     if not report["errors"]:
         return report
     from .dispatch_diagnostics import collect_dispatch_state
@@ -183,9 +189,20 @@ class ServingRuntime:
     def __init__(self, impl, config):
         self.impl, self.config = impl, config
         vc = impl.vllm_config
-        self.layer_contract = require_layer_contract(impl, config)
+        selected = getattr(impl, "preprocess_type", None)
+        selected_name = getattr(selected, "name", str(selected)).upper().rsplit(".", 1)[-1]
+        self.producer_kind = "native" if selected_name == "NATIVE" else "prolog"
+        native_status, native_errors = None, []
+        if self.producer_kind == "native":
+            from .native_hooks import install_native_hooks
+            try:
+                native_status = install_native_hooks(impl)
+            except (RuntimeError, ImportError) as error:
+                native_errors.append("Native producer is not wired: " + str(error))
+        self.layer_contract = require_layer_contract(impl, config,
+            native_producer_available=native_status is not None, extra_errors=native_errors)
         # Verify the REAL provider before allocating sidecars or accepting requests.
-        self.producer = install_prolog_route()
+        self.producer = native_status if self.producer_kind == "native" else install_prolog_route()
         self.state = get_state(vc, config, impl.kv_a_layernorm.weight.device, create=True)
         self.layer_key = impl.layer_name
         self.state.register_layer(self.layer_key)
@@ -196,6 +213,10 @@ class ServingRuntime:
         self.state.runtime_layers.append(self)
         self.producer_calls = 0
         self.read_calls = 0
+        self.native_controller = None
+        if self.producer_kind == "native":
+            from .native_runtime import NativeProducer
+            self.native_controller = NativeProducer(self)
         self.report = Path(config.diagnostics_path) / (
             "serving-" + str(os.getpid()) + "-" + re.sub(r"[^A-Za-z0-9_.-]", "_", self.layer_key) + ".json")
         self.flush()
@@ -204,11 +225,15 @@ class ServingRuntime:
         self.report.parent.mkdir(parents=True, exist_ok=True)
         value = dict(execution="serving", status=("EXERCISED_NOT_DEVICE_VALIDATED" if self.read_calls else "WIRED_NOT_DEVICE_VALIDATED"),
             layer=self.layer_key, producer=self.producer, kernel="batched_v4",
+            producer_kind=self.producer_kind,
             layer_contract=self.layer_contract,
             ring_capacity=self.state.capacity, request_pool_size=self.state.request_pool_size,
             producer_calls=self.producer_calls, read_calls=self.read_calls,
             old_accuracy_runtime_used=False, original_c4_layout_preserved=True,
             performance_claim=False)
+        describe = getattr(self.native_controller, "configuration", None)
+        if callable(describe):
+            value["native_controller"] = describe()
         self.report.write_text(json.dumps(value, indent=2) + "\n")
 
     @contextmanager
@@ -226,7 +251,12 @@ class ServingRuntime:
         self.producer_calls += 1
 
     def capture(self, *args):
-        raise RuntimeError("serving uses the fused Prolog producer, not the eager Native raw-KV tap")
+        raise RuntimeError("Serving uses its scoped Native or Prolog producer, not the accuracy runtime capture")
+
+    def native_write(self, scope):
+        if self.producer_kind != "native" or self.native_controller is None:
+            raise RuntimeError("Native producer write entered a non-Native serving layer")
+        return self.native_controller.write(scope)
 
     def read(self, query, rope, cold, topk, metadata, q_lengths, kv_lengths, block_table=None):
         import torch
@@ -239,7 +269,9 @@ class ServingRuntime:
             raise RuntimeError("batched_v4 requires page128 packed C4 bytes")
         cold = cold.view(-1, page, *cold.shape[2:]).view(torch.int8)
         table = metadata.block_table if block_table is None else block_table
-        binding = lane.binding(self.layer_key, token_rows=query.shape[0])
+        binding = (self.native_controller.reader_binding(metadata, int(query.shape[0]))
+                   if self.producer_kind == "native" else
+                   lane.binding(self.layer_key, token_rows=query.shape[0]))
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         key = id(lane)
         if key not in self._readers_by_lane:
@@ -278,11 +310,13 @@ def validate_serving_faults(*, reset=False):
     """
     import torch
     seen = set()
-    reports = []
+    reports, layers = [], []
     for state in _STATES.values():
         torch.npu.synchronize(state.device)
         for runtime in state.runtime_layers:
             runtime.flush()
+            layers.append(dict(layer=runtime.layer_key, producer_kind=runtime.producer_kind,
+                producer_calls=runtime.producer_calls, read_calls=runtime.read_calls))
         for reader in state.runtime_readers:
             for fault in reader.fault_buffers():
                 pointer = (str(fault.device), fault.data_ptr())
@@ -297,4 +331,14 @@ def validate_serving_faults(*, reset=False):
     if any(item["fault_count"] for item in reports):
         raise RuntimeError("Recent128 reader encountered invalid bank/epoch/missing BF16 tail: " + str(reports))
     return dict(status="NO_LATCHED_READER_FAULTS" if reports else "NOT_EXERCISED", buffers=reports,
+                layers=layers,
                 model_accuracy_validated=False, performance_validated=False)
+
+
+def validate_worker_serving(worker):
+    """Callable for an existing vLLM collective_rpc, in the actual worker.
+
+    A fresh standalone Python process has no service state and cannot certify
+    a running worker. This callback is deliberately outside forward/timing.
+    """
+    return validate_serving_faults()

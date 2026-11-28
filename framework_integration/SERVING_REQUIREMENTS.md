@@ -19,21 +19,21 @@
 | library_dir | 包含实际`libqsfa_recent128_direct.so`的目录；batched serving导出ABI1、buffers160B，旧B1库不可代替 |
 | 诊断 | `diagnostics_path`为实际可写目录；路径名字不影响算法，例如`/tmp/sfa_diagnostics`有效 |
 | SDK/bridge | 活跃SDK与reader构建记录匹配；当前Python/Torch/torch_npu及compiler/ninja满足薄host bridge构建，实际bridge加载由原preflight执行 |
-| provider | `cloud_ops_turbo.cloud_mla_prolog_v3_recent128`可调用，最终函数属性是整数`recent128_abi_version=1` |
-| 原选路依赖 | 已审阅PR199仍要求原`cloud_mla_prolog_v3`和`cloud_mla_prolog_v3_functional`均可调用；安装新variant不能移除这两个导出 |
+| producer | 实际Prolog层要求`cloud_mla_prolog_v3_recent128`函数整数ABI1；实际Native层要求原始tap、真实BF16 writer与对应CP路由，不能互相冒充 |
+| 原选路依赖 | 选择Prolog时已审阅PR199要求原`cloud_mla_prolog_v3`和`cloud_mla_prolog_v3_functional`可调用；Native/DSACP不因缺少Prolog被强行切路 |
 
 环容量`C=ceil((128+max_query_chunk-1)/128)*128`，每层最低sidecar数据量约为`P*C*1168`字节，
 其中P是请求池大小；这不含reader workspace、allocator和其他模型显存。预留Q容量不等于已有MTP/APC/PD完整接线。
 
 `enable_dsa_cp`若按已审阅VA版本选择`AscendSFADSACPImpl`，该类原本关闭fused preprocessing，
-与仅通过Prolog写环的路径不兼容。预检应报告这个已知分支冲突；不能在权重转换后改enum，或静默关掉DSACP。
+不会执行Prolog写环。本轮新增Native/DSACP候选，预检标待设备验证；不能在权重转换后改enum，或静默关掉DSACP。
 
 ## 2. 层对象建立和原权重准备后必须核实
 
 `preprocess=preserve`的意思是保留框架原选择，**并不强制PROLOG_V3**。
 `contract.py`的选路检查只比较实际`impl.preprocess_type`，不检查安装目录或provider ABI；两者分别验证。
 
-- 实际层必须已选择`PROLOG_V3`，保留原mixed任务和该路径的权重准备。若选了NATIVE/MLAPO，诊断应给出实际值、层名/实现类和原框架的拒绝原因。
+- 保留实际层的原权重准备和选路。Prolog层走已有fused producer；Native层只有真实tap/forward/store、BF16 writer和对应路由接通后才接受；MLAPO仍未适配。
 - 主缓存为实际MXFP4路径：`enable_mxfp4_kv=True`；D512、RoPE64、KV-head1，稳定唯一`layer_name`。
 - `local_num_heads`为正，attention scale有限且大于0。query与原TopK/packedcache真实形状在首次输入时继续校验。
 - 上游Prolog选择还依赖层的量化方法、KV producer/consumer角色、norm及fused投影是否存在、indexer query是否有scale、q_proj是否分chunk、A5能力及原Cloud算子是否可调用。
@@ -47,6 +47,8 @@
 
 - 新provider以原Cloud字段名称接收输入；新增ring参数完整转发。显式None保留，无重复键覆盖。
 - 同一次Prolog中旁路写入真正最终量化输入的BF16_RNE latent，以及真实post-RoPE KR64；原FP32量化输入不改。
+- Native使用原RMSNorm的实际BF16输出和真实post-RoPE，不重算FP32 RMSNorm；本轮独立writer读取这些GM张量，DSACP TP>1另外交换原始BF16片。
+  该正确性候选增加kernel/通信，不承诺零性能成本；原C4量化器、packed400和store保持。
 - position/epoch tags唯一owner；token的bank/position/epoch/valid来自当前GPU元数据。无效和Graph padding不写。
 - reader等待整个producer完成；跨stream使用完成事件，不能把tag当同kernel内跨核ready flag。
 - OFF/ON原query及C4 packed/scale逐字节不变，ON sidecar与真实来源一致；首次TBE动态编译和实际mode4分支都需经过。
