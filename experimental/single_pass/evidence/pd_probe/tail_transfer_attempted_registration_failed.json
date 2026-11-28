@@ -1,0 +1,27 @@
+{
+  "date": "2026-11-28 17:53",
+  "status": "MAJOR_PROGRESS_TRANSFER_ATTEMPTED_BUT_REGISTRATION_FAILED",
+  "summary": "BF16 tail transfer code IS invoked (pd_mooncake.py working)! But RDMA read fails because P-side memory not registered. Service recovers gracefully via recompute fallback.",
+
+  "evidence_of_progress": {
+    "adapter_invoked": "pd_mooncake.py:331 reformat -> bridge.finish_receive -> pd_tail.py:368 receive -> batch_transfer_sync_read",
+    "service_survived": "Recovered from KV load failure: 1 request(s) rescheduled (13 tokens affected)",
+    "fallback_worked": "Request was recomputed successfully, service continues"
+  },
+
+  "root_cause": {
+    "error": "Server memory verification failed, memory is not registered, idx:0, server_addr:0x40004b515e00, buf_len:13312 bytes",
+    "meaning": "D-side tried to RDMA read from P-side address 0x40004b515e00 (13312 bytes), but this address was NOT registered on P-side transfer engine",
+    "d_side_registrations_seen": [
+      "0x40004c30f400, length:13312",
+      "0x400048637400, length:1664",
+      "0x400048637e00, length:104"
+    ],
+    "failing_address": "0x40004b515e00, length:13312 (NOT in registered list)",
+    "conclusion": "P-side BF16 tail buffer registration is missing or timing issue (D reads before P registers)"
+  },
+
+  "call_chain": "mooncake_connector.py:750 _handle_request -> _reformat_pending_kv_caches -> pd_mooncake.py:331 reformat -> bridge.finish_receive -> pd_mooncake.py:224 finish_receive -> receiver.receive -> pd_tail.py:368 -> batch_transfer_sync_read -> E19999",
+
+  "question": "How to fix the P-side registration timing? The BF16 tail buffer needs to be registered with the transfer engine BEFORE D tries to read. Possible issues: (1) registration order in producer, (2) registration before/after snapshot pin, (3) address mismatch between registered and descriptor."
+}
