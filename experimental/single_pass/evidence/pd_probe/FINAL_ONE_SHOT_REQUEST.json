@@ -1,0 +1,33 @@
+{
+  "date": "2026-11-28 18:30",
+  "status": "FINAL_REQUEST_ONE_SHOT_FIX_NEEDED",
+  "deadline": "User is leaving work. Please fix everything in ONE delivery.",
+
+  "the_only_remaining_blocker": "BF16 arena registration on P-side. C4 KV transfers succeed (mooncake connector registers C4 buffers with transfer engine). BF16 arena transfers fail (arena address not registered on P-side transfer engine).",
+
+  "complete_context": {
+    "environment": "GLM-5.3 PD serving, P node 209 (TP8, prefill), D node 178 (DP8xTP1, decode), Mooncake KV transfer, hot128 BF16 ring writer+reader",
+    "c4_transfer_works": "PULL-DBG shows C4 KV pulls succeed: AscendSFAIndexerCacheSpec raw_n=22/22, AscendMLAAttentionSpec raw_n=79/79, 279.59 ms, remote_session 172.18.121.165:15429",
+    "bf16_arena_fails": "BF16 registered-arena RDMA read failed: -1. Server memory verification failed, memory is not registered, server_addr:0x402f8ce00000, buf_len:23552 bytes, remote 172.18.121.165:20598",
+    "error_location": "pd_mooncake.py:292 finish_receive -> _require(result == 0, 'BF16 registered-arena RDMA read failed')",
+    "service_recovers": "Yes, recompute fallback works, requests complete"
+  },
+
+  "the_key_question": "C4 buffer registration succeeds with the SAME transfer engine. BF16 arena registration does not. What is DIFFERENT about how C4 buffers get registered vs how the BF16 arena gets registered?",
+
+  "likely_root_causes_to_check": [
+    "1. C4 buffers are registered via register_kv_caches() on the mooncake connector. BF16 arena might use a different registration path that doesn't actually reach the transfer engine.",
+    "2. The arena might be registered on a different engine instance (different port or engine index) than the one D connects to.",
+    "3. The registration might succeed but with wrong address (address in descriptor vs registered address mismatch).",
+    "4. The registration might happen but be silently dropped (no error, but not actually registered).",
+    "5. The transfer engine might require the memory to be registered per-remote-session, not globally.",
+    "6. The arena might be registered AFTER D's read attempt (timing issue still)."
+  ],
+
+  "delivery_requirements": {
+    "fix": "Make BF16 arena registration work the same way C4 registration works. Reuse the C4 registration path if possible.",
+    "verification": "Provide a single curl command + expected log output that confirms BF16 tail transfer succeeded (not just that service didn't crash).",
+    "diagnostic": "If it still fails, provide exact log lines to check that pinpoint WHERE the registration fails (before/after, which engine, which address).",
+    "no_more_iterations": "Please solve this completely. Every previous fix got us closer but this is the last blocker. The user cannot iterate more today."
+  }
+}
