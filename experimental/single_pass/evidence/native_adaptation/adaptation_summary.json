@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-28 15:18",
+  "status": "NATIVE_PATH_ADAPTATION_IMPLEMENTED",
+  "description": "Modified overlay to support Native path ring writer per NATIVE_DSACP_TASK.md",
+
+  "changes": {
+    "hooks.py": [
+      "1. capture_native_kv: serving mode now calls runtime.capture_native(latent, rope) instead of just returning (previously skipped Native in serving)",
+      "2. Serving initialization: removed RuntimeError that rejected Native exec_kv fallback (replaced with pass to allow Native path)"
+    ],
+    "contract.py": [
+      "3. validate_runtime_contract: accepts both PROLOG_V3 and NATIVE (previously only PROLOG_V3)"
+    ],
+    "serving_runtime.py": [
+      "4. require_layer_contract: accepts both PROLOG_V3 and NATIVE (previously only PROLOG_V3)",
+      "5. Added capture_native(latent, rope) method to ServingRuntime: reshapes [T,1,1,512]->[T,512], calls ring_writer.write_latent and write_rope for each token"
+    ]
+  },
+
+  "data_flow": {
+    "tap_location": "patch_sfa_v1_mxfp4.py: k_nope [T,1,1,512] BF16 and k_rope [T,1,1,64] BF16 are captured by capture_native_kv(impl, k_nope, k_rope) before npu_dynamic_mx_quant",
+    "native_writer": "capture_native_kv -> runtime.capture_native(latent, rope) -> ring_writer.write_latent/write_rope per token",
+    "original_path_unchanged": "npu_dynamic_mx_quant and all original computation continues unchanged"
+  },
+
+  "implementation_notes": [
+    "ServingRuntime.capture_native uses per-token loop with ring_writer (may need optimization for production)",
+    "TP-local shards: each TP rank writes its own tokens' ring data (BF16 exchange across ranks not yet implemented)",
+    "The ring_writer used in capture_native is a placeholder - actual ring writer kernel integration needs review",
+    "DSACP BF16 shard exchange (task item 4) not yet implemented - currently each rank writes local tokens only"
+  ],
+
+  "remaining_work": [
+    "1. Verify capture_native is actually called (test with service startup)",
+    "2. Implement DSACP BF16 shard exchange for multi-TP correctness",
+    "3. Reader adaptation for CP local query routing",
+    "4. OFF/ON byte-identical verification",
+    "5. B1/B8 Graph + P/D + MTP validation"
+  ]
+}
