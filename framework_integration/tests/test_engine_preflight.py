@@ -28,6 +28,14 @@ def engine(serving=False):
 
 
 class EnginePreflightTest(unittest.TestCase):
+    def test_unimplemented_serving_cp_is_reported_before_loading_without_changing_config(self):
+        for name in ("prefill_context_parallel_size", "decode_context_parallel_size"):
+            vc=engine(True)
+            setattr(vc.parallel_config,name,2)
+            with self.assertRaisesRegex(ContractError,"no matching PCP/DCP.*before loading weights"):
+                validate_engine_config(vc)
+            self.assertEqual(getattr(vc.parallel_config,name),2)
+
     def test_accuracy_static_errors_are_actionable_and_do_not_change_engine(self):
         changes=(("scheduler_config","max_num_seqs",8,"max_num_seqs=1"),
             ("model_config","enforce_eager",False,"enforce_eager=True"),

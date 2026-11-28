@@ -1,5 +1,41 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 使用 A5 之前一次说清楚的能力边界
+
+6486b3d 是生产接入**候选代码**，不是完整服务已可用的证明。130 项宿主测试不能代替设备或完整模型验证。
+以下是已知边界，必须先在内网解决未接线项，不能加载102个权重分片后再让用户逐个发现。
+
+| 特性 | 已有实现/证据 | 当前缺口或限制 |
+| --- | --- | --- |
+| 原 MXFP4 主缓存 | 保留 packed400 写入和原 TopK 合同；OFF 不走新路径 | 真实新 Prolog ON/OFF 的 query、C4 packed/scale 尚无设备逐字节对照 |
+| 真实 PrologV3 | 公共调用适配、完整 ABI1、实际写点要求、已通过的独立 writer | 私有 producer variant 必须实际编译注册；独立 writer 不是 producer |
+| 并发8 | 稳定请求 bank/epoch、批量 TND reader、隔离路由，宿主测试通过 | 新批量 ASC 尚未 A5 编译/运行；不能外推旧 P8 writer 成为并发 attention 已通过 |
+| Graph | 固定缓冲、按 device/stream/shape 准备 plan；新 smoke 覆盖动态元数据 | 所有 layer/lane/bucket 必须捕获前准备；新 serving 动态 replay 尚未设备验证 |
+| MTP | 修正后的 GPU 位置、draft lane 隔离、容量保护、事务 API | 完整接受/拒绝和提交链未验证；draft 层自己的历史 BF16 热窗来源仍须核实，不能拿 target 层就绪代替 |
+| APC / prefix cache | 实际 BF16 尾窗快照导出/导入 API | **尚未自动接通 prefix 命中、驱逐、抢占恢复。不是仅缺测试。** 非零位置新请求缺真实尾窗会报错 |
+| P/D | 实际尾窗导入及接收完成事件 API | **尚未接通 Mooncake 的 BF16 尾窗发送、接收和通知协议。不是仅缺测试。** C4 传输成功不足以证明 BF16 已到 |
+| PCP / DCP | 当前新 sidecar 未有对应 gather/shard/跨 rank 完成协议 | 当前不支持；现在在配置期明确指出，不能因 serving 配置被接受就列为已支持 |
+| 性能、显存、整模型精度 | 旧独立算子实验有历史数据 | 新 batched_v4 的速度/容量损失/TPOT/GPQA 均未测；不得引用 B1 KV-split4 的旧速度作为本实现结果 |
+
+硬格式合同一次列明：仅 latent512、RoPE64、KV-head1、page128、packed400 主缓存、BF16 query、INT32 TopK2048；
+R0/272、其他 TopK、页大小或格式没有实现。每64个 local heads 一组，不足补齐，多于64会多组调用。
+新物理 ring 容量 C=align128(128+max_query_chunk-1)，不是固定128槽。
+max_query_chunk 必须覆盖实际每请求 prefill/verify chunk，不能只按 MTP 的4个 token 填写；总 token/pool/表宽也受预分配界限制。
+
+已完成的 A5 设备证据仅为旧独立 ring writer 8/8，它不测试真实 Prolog、C4 量化、attention 或完整 MTP。
+同一次 Graph 中 valid mask 变化的测试覆盖，也不能用旧 writer 的固定 valid mask 重放替代。
+
+## 一次准备、一次成批验收的执行约定
+
+1. 上 A5 前，先完成上述 Prolog、APC、PD 和 draft 层热窗等已知实现缺口；主机检查/全部编译/ABI与配置问题一次收集，
+   能在 CPU 上解决的错误不占设备时段，不以关闭用户特性替代实现。
+2. 预先固定一份矩阵：B1/B8、Q1/Q4、eager/Graph、环回绕/padding/请求重排、MTP全接受/部分拒绝/全拒绝、
+   APC冷启动/命中、P→D首步/后续步。每项写清原配置、预期和输出位置，不能跑到一半再添加已知必要条件。
+3. 已有 run_batched_smoke 是**reader 部分**的成批设备门禁；APC/PD/真 Prolog/完整模型不在它的覆盖内。
+   完整矩阵须接好相应实现再执行；不能宣称一个 reader smoke 已经把所有特性一次验完。
+4. 同一套构建通过后再加载完整模型，保留原生产特性，完成 OFF/ON 对照和完整 GPQA。
+   新设备错误仍可能出现，但每次回传要包含所有已执行项和阻塞项，不能只返回下一处试错指令。
+
 目标固定为原 MXFP4 主 KV + BF16 recent128，保留并发8、Graph、MTP、prefix cache、P/D。
 不把 C4 改 C8，不把 max_num_seqs 改1，不强制 eager，不丢弃 PrologV3。
 旧 accuracy_eager 是单请求数学验证代码，不能仅删除其 guard 后用于服务。

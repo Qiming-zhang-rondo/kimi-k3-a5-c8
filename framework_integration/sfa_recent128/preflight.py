@@ -63,6 +63,15 @@ def validate_engine_config(vllm_config):
                 if type(value) is not int or value != 1:
                     raise ContractError("recent128 execution=accuracy_eager requires " + name + "=1 before loading weights")
                 checks.append(name + "=1")
+    if config.enabled and config.execution == "serving":
+        parallel = getattr(vllm_config, "parallel_config", None)
+        for name in ("prefill_context_parallel_size", "decode_context_parallel_size"):
+            value = getattr(parallel, name, _MISSING)
+            if value is not _MISSING:
+                if type(value) is not int or value != 1:
+                    raise ContractError("recent128 serving sidecar has no matching PCP/DCP gather/shard implementation: "
+                        + name + "=" + str(value) + "; detected before loading weights; do not change production settings to bypass this")
+                checks.append(name + "=1")
     return dict(status="STATIC_CONFIG_VALIDATED", execution=config.execution, enabled=config.enabled,
         preprocess=config.preprocess, checked=checks, scope="static_config_only",
         preprocessing_type="NOT_INFERRED_BEFORE_WEIGHT_PREPARATION", device_support="NOT_VERIFIED")
