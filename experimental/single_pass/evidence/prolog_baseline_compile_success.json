@@ -1,0 +1,34 @@
+{
+  "date": "2026-11-28 11:42",
+  "status": "BASELINE_COMPILE_SUCCESS",
+  "milestone": "PROLOG_V3 kernel compiles standalone with CMake ASC after staging + 2 API fixes",
+
+  "build_result": {
+    "library": "libprolog_direct.so (547KB)",
+    "aicore_binary_section": ".aicore_binary PROGBITS 0x5b800 (373KB) — device kernel code confirmed",
+    "kernel_source_traced": "cloud_mla_prolog_v3.asc (from strings)",
+    "launch_infrastructure": "LaunchAscendKernel, AscendLaunchKernelWithHostArgs, AscendDevBinaryLazyRegister present",
+    "cmake": "CMake ASC language, dav-3510, QSFA_ASC_DIRECT_BUILD=1"
+  },
+
+  "fixes_applied_after_staging": [
+    "1. Created qsfa_device_template_constants.h with ASCENDC_TPL_MIX_AIC_1_1=4 and other constants",
+    "2. Changed SetLoadDataRepeat old 4-arg API to SetLoadDataRepeatWithStride new API (removed SDK version conditional)"
+  ],
+
+  "staging_tool_result": {
+    "status": "LOCAL_STAGE_PREPARED",
+    "source_bytes": 6319304,
+    "tiling_load_statements": 1,
+    "guarded_template_registration_blocks": 2,
+    "remaining_template_symbols_resolved": "ASCENDC_TPL_MIX_AIC_1_1 defined as 4 (=KERNEL_TYPE_MIX_AIC_1_1 from bisheng header)"
+  },
+
+  "next_steps": [
+    "1. Integrate inline prolog_ring_write_device.h Writer into the staged PROLOG variant",
+    "2. Compile variant with Writer",
+    "3. Device test OFF/ON + B1/B8 + Graph",
+    "4. Register as cloud_mla_prolog_v3_recent128 in cloud_ops_turbo",
+    "5. Start production service and run GPQA"
+  ]
+}
