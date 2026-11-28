@@ -8,10 +8,12 @@ from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 import json
+import math
+from numbers import Integral, Real
 import os
 import re
 
-from .contract import validate_runtime_contract
+from .contract import ContractError, validate_runtime_contract
 from .serving_prolog import install_prolog_route, prolog_scope
 from .serving_state import ServingState
 
@@ -78,22 +80,108 @@ def get_state(vllm_config, config, device, *, create=False):
     return state
 
 
+def layer_contract_report(impl, config):
+    """Gather layer metadata, never resolve/force a new preprocessing path.
+
+    The framework has already prepared weights. Its route must remain intact.
+    Existing reason probes are used only on a failed selection; no selector,
+    weight conversion, tensor value extraction or device kernel is executed.
+    """
+    vc = getattr(impl, "vllm_config", None)
+    scheduler = getattr(vc, "scheduler_config", None)
+    selected = getattr(impl, "preprocess_type", None)
+    name = getattr(selected, "name", str(selected)).upper().rsplit(".", 1)[-1]
+    errors = []
+    try:
+        validate_runtime_contract(config, preprocess_type=selected,
+            max_num_seqs=getattr(scheduler, "max_num_seqs", None))
+    except ContractError as error:
+        errors.append(str(error))
+    max_seqs = getattr(scheduler, "max_num_seqs", None)
+    if not isinstance(max_seqs, Integral) or isinstance(max_seqs, bool) or max_seqs <= 0:
+        errors.append("scheduler.max_num_seqs must be a positive resolved integer")
+    if not getattr(impl, "enable_mxfp4_kv", False):
+        errors.append("Original MXFP4 main KV path is not enabled")
+    geometry = {key: getattr(impl, key, None) for key in
+                ("num_kv_heads", "kv_lora_rank", "qk_rope_head_dim")}
+    if tuple(geometry.values()) != (1, 512, 64):
+        errors.append("batched_v4 requires D512/R64/KV-head1 packed400 cache")
+    heads = getattr(impl, "local_num_heads", None)
+    if not isinstance(heads, Integral) or isinstance(heads, bool) or heads <= 0:
+        errors.append("Positive local_num_heads is required")
+    scale = getattr(impl, "scale", None)
+    if not isinstance(scale, Real) or isinstance(scale, bool) or not math.isfinite(float(scale)) or scale <= 0:
+        errors.append("Attention scale must be a finite positive host number")
+    layer = getattr(impl, "layer_name", None)
+    if not isinstance(layer, str) or not layer:
+        errors.append("Stable nonempty unique layer_name is required")
+    if getattr(getattr(getattr(impl, "kv_a_layernorm", None), "weight", None), "device", None) is None:
+        errors.append("Original kv_a_layernorm weight/device is unavailable")
+    max_tokens = getattr(scheduler, "max_num_batched_tokens", None)
+    if type(max_tokens) is not int or max_tokens <= 0:
+        errors.append("scheduler.max_num_batched_tokens must be a positive resolved integer")
+    reasons, probe_error = [], None
+    if name != "PROLOG_V3":
+        target = getattr(type(selected), "PROLOG_V3", None)
+        probe = getattr(impl, "_get_fused_type_unsupported_reasons", None)
+        if target is not None and callable(probe):
+            try:
+                result = probe(target)
+                if isinstance(result, (list, tuple)) and all(isinstance(x, str) for x in result):
+                    reasons = list(result)
+                else:
+                    probe_error = "Upstream reason probe did not return a string list"
+            except Exception as error:
+                probe_error = type(error).__name__ + ": " + str(error)
+        else:
+            probe_error = "Actual preprocessing enum or upstream reason probe is unavailable; no enum was guessed"
+    def metadata(value):
+        return value if type(value) in (str, int, float, bool, type(None)) else type(value).__name__
+    qt = getattr(impl, "_quant_type", None)
+    return dict(status="BLOCKED_LAYER_CONTRACT" if errors else "LAYER_CONTRACT_ACCEPTED_NOT_DEVICE_VALIDATED",
+        layer=metadata(layer), implementation=type(impl).__module__ + "." + type(impl).__qualname__,
+        selected_preprocess=name, errors=errors, upstream_prolog_reasons=reasons,
+        upstream_reason_probe_error=probe_error,
+        quant_type=(qt.__module__ + "." + qt.__qualname__) if isinstance(qt, type) else metadata(qt),
+        geometry={key: metadata(value) for key, value in geometry.items()},
+        selection_context={key: metadata(getattr(impl, key, None)) for key in
+            ("is_kv_producer", "is_kv_consumer", "enable_mlapo", "enable_mxfp4_kv")},
+        dcp_group_present=getattr(impl, "dcp_group", None) is not None,
+        selection_note="Empty reason list does not prove outer quant-method/role/DSACP gates passed. Never change the selected route after weight conversion.",
+        tbe_variant_compilation="NOT_TESTED_BY_ROUTE_CHECK", device_validation="NOT_PERFORMED")
+
+
+def require_layer_contract(impl, config):
+    report = layer_contract_report(impl, config)
+    if not report["errors"]:
+        return report
+    diagnostic = None
+    try:
+        directory = Path(config.diagnostics_path)
+        directory.mkdir(parents=True, exist_ok=True)
+        label = re.sub(r"[^A-Za-z0-9_.-]", "_", str(report["layer"]))
+        diagnostic = directory / ("serving-contract-" + str(os.getpid()) + "-" + label + ".json")
+        diagnostic.write_text(json.dumps(report, indent=2) + "\n")
+    except (OSError, TypeError, ValueError) as error:
+        report["diagnostic_write_error"] = str(error)
+    detail = "; ".join(report["errors"] + report["upstream_prolog_reasons"])
+    if report["upstream_reason_probe_error"]:
+        detail += "; reason_probe=" + report["upstream_reason_probe_error"]
+    raise RuntimeError("Recent128 layer contract failed before sidecar allocation: layer=" + str(report["layer"]) +
+        ", implementation=" + report["implementation"] + ", selected=" + report["selected_preprocess"] +
+        "; " + detail + "; diagnostics=" + str(diagnostic) +
+        ("; diagnostic_write_error=" + report["diagnostic_write_error"] if "diagnostic_write_error" in report else ""))
+
+
 class ServingRuntime:
     def __init__(self, impl, config):
         self.impl, self.config = impl, config
         vc = impl.vllm_config
-        validate_runtime_contract(config, preprocess_type=impl.preprocess_type,
-            max_num_seqs=vc.scheduler_config.max_num_seqs)
-        if not getattr(impl, "enable_mxfp4_kv", False):
-            raise RuntimeError("recent128 serving preserves and requires the original MXFP4 main KV path")
-        if impl.num_kv_heads != 1 or impl.kv_lora_rank != 512 or impl.qk_rope_head_dim != 64:
-            raise RuntimeError("batched_v4 requires the original D512/R64/KV-head1 packed400 cache")
+        self.layer_contract = require_layer_contract(impl, config)
         # Verify the REAL provider before allocating sidecars or accepting requests.
         self.producer = install_prolog_route()
         self.state = get_state(vc, config, impl.kv_a_layernorm.weight.device, create=True)
-        self.layer_key = str(getattr(impl, "layer_name", ""))
-        if not self.layer_key:
-            raise RuntimeError("recent128 serving requires a stable unique layer_name")
+        self.layer_key = impl.layer_name
         self.state.register_layer(self.layer_key)
         from .serving_reader import ServingReader
         self.reader = ServingReader(config, impl)
@@ -110,6 +198,7 @@ class ServingRuntime:
         self.report.parent.mkdir(parents=True, exist_ok=True)
         value = dict(execution="serving", status=("EXERCISED_NOT_DEVICE_VALIDATED" if self.read_calls else "WIRED_NOT_DEVICE_VALIDATED"),
             layer=self.layer_key, producer=self.producer, kernel="batched_v4",
+            layer_contract=self.layer_contract,
             ring_capacity=self.state.capacity, request_pool_size=self.state.request_pool_size,
             producer_calls=self.producer_calls, read_calls=self.read_calls,
             old_accuracy_runtime_used=False, original_c4_layout_preserved=True,

@@ -21,8 +21,9 @@ def require_explicit_config(additional_config,environ=None):
             "recent128 was requested only through unsupported environment variables "
             +", ".join(names)+". This overlay reads VllmConfig.additional_config['sfa_recent128']; "
             "these environment variables do not activate it. Pass the explicit framework config "
-            "(window, reader='single_pass', single_pass_kernel='kv_split4', source_root, "
-            "library_dir, diagnostics_path) via run_model_probe.py / --additional-config. "
-            "Current execution='accuracy_eager' is an isolated single-request validation path, "
-            "not a PD/graph serving integration. No environment fallback was applied."
+            "via --additional-config: serving uses window=128, execution='serving', "
+            "preprocess='preserve', reader='single_pass', single_pass_kernel='batched_v4', "
+            "source_root, library_dir, diagnostics_path and the actual max_query_chunk. "
+            "The separate execution='accuracy_eager' mode (including kv_split4) is an isolated "
+            "single-request validation path. No environment fallback was applied."
         )

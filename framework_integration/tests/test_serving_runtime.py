@@ -1,6 +1,7 @@
 """Production runtime dispatch with fake device metadata, no Torch/NPU imports."""
 from contextlib import contextmanager
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -104,10 +105,56 @@ class ServingRuntimeTest(unittest.TestCase):
 
     def impl(self,layer="layer.0"):
         return SimpleNamespace(vllm_config=self.vc,preprocess_type="PROLOG_V3",enable_mxfp4_kv=True,
-            num_kv_heads=1,kv_lora_rank=512,qk_rope_head_dim=64,
+            num_kv_heads=1,kv_lora_rank=512,qk_rope_head_dim=64,local_num_heads=64,scale=0.125,
             kv_a_layernorm=SimpleNamespace(weight=Tensor((512,))),layer_name=layer)
 
     def initialized(self):return self.runtime.ServingRuntime(self.impl(),self.config)
+
+    def test_bad_selection_gathers_actual_reasons_and_geometry_before_any_allocation(self):
+        from enum import Enum
+        class Preprocess(Enum):
+            NATIVE=0
+            PROLOG_V3=1
+        impl=self.impl()
+        impl.preprocess_type=Preprocess.NATIVE
+        impl.enable_mxfp4_kv=False
+        impl.qk_rope_head_dim=0
+        impl.local_num_heads=0
+        impl.scale=float("nan")
+        impl.dcp_group=object()
+        probes=[]
+        def reasons(target):
+            probes.append(target)
+            return ["quantized indexer query projection is unavailable"]
+        impl._get_fused_type_unsupported_reasons=reasons
+        with self.assertRaisesRegex(RuntimeError,"selected=NATIVE.*quantized indexer"):
+            self.runtime.ServingRuntime(impl,self.config)
+        self.assertIs(impl.preprocess_type,Preprocess.NATIVE)
+        self.assertEqual(probes,[Preprocess.PROLOG_V3])
+        self.assertFalse(self.allocations)
+        self.assertFalse(self.providers)
+        files=list(Path(self.directory.name).glob("serving-contract-*.json"))
+        self.assertEqual(len(files),1)
+        report=json.loads(files[0].read_text())
+        self.assertEqual(report["selected_preprocess"],"NATIVE")
+        self.assertGreaterEqual(len(report["errors"]),5)
+        self.assertTrue(report["dcp_group_present"])
+        self.assertEqual(report["tbe_variant_compilation"],"NOT_TESTED_BY_ROUTE_CHECK")
+
+    def test_reason_probe_failure_and_missing_layer_do_not_hide_route_error(self):
+        from enum import Enum
+        class Preprocess(Enum):
+            NATIVE=0
+            PROLOG_V3=1
+        impl=self.impl(None)
+        impl.preprocess_type=Preprocess.NATIVE
+        def reasons(target):raise RuntimeError("upstream probe unavailable")
+        impl._get_fused_type_unsupported_reasons=reasons
+        report=self.runtime.layer_contract_report(impl,self.config)
+        self.assertEqual(report["selected_preprocess"],"NATIVE")
+        self.assertIn("upstream probe unavailable",report["upstream_reason_probe_error"])
+        self.assertTrue(any("layer_name" in error for error in report["errors"]))
+        self.assertTrue(any("not a TBE path" in error for error in report["errors"]))
 
     def inputs(self, runtime, *, tuple_cache=True):
         metadata=SimpleNamespace(recent128_state=runtime.state,max_query_len=4,block_size=128,

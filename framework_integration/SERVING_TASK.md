@@ -1,5 +1,24 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口 79334045：先取得真实选路原因，不再猜测安装状态
+
+此次`contract.py`报错只说明实际层的`preprocess_type`不是PROLOG_V3，**没有检查ring producer是否安装**。
+`window=128`开功能，`preprocess=preserve`保留原框架选路；安装新provider/设置ABI不会使原层自动选择Prolog。
+已审阅实现中类型在原`process_weights_after_loading`内决定，可能被量化方法、indexer、A5/Cloud能力、DCP或DSACP子类拦下。
+当前报告没有实际选择值、层名或拒绝原因，因此不能据此指定某个参数，更不能在权重转换后强改enum。
+
+先在现有启动环境完成 [完整检查范围](SERVING_REQUIREMENTS.md) 与聚合预检。
+内网agent自行定位本轮实际engine JSON，用新目录运行`framework_integration/serving_preflight.py`；
+配置/文件错误一次收齐，`--check-host`只在实际worker依赖环境运行，不改SDK或重编reader。
+所有动态条件明确留在pending，不把脚本无异常当作服务已支持。
+
+同步本轮runtime诊断后，若层的实际选路仍非PROLOG_V3，错误将包含实际类型、实现类/层名和可取得的原框架原因，
+并把同层其他已知几何/主缓存条件一起汇总。内网以这些实际值修复正确选路前提或完成相应producer接线，
+不关闭Graph/MTP/APC/P-D、不改量化配方、不绕过guard，也不要求用户转发私有源码。
+如果enable_dsa_cp选中原本禁用fused的P实现，应识别该路径的真实生产写点；不能假装安装Prolog即可生效。
+
+本轮先做CPU/宿主检查，不重新跑已过reader矩阵；保存当前成功库和私有variant。然后继续既有producer与服务任务。
+
 ## 当前入口 52db594：修复Python参数转发，不重编内核
 
 本次首错是`cloud_mla_prolog_v3_recent128() got multiple values for argument 'rope_sin'`，

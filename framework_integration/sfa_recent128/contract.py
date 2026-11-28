@@ -105,7 +105,8 @@ def validate_runtime_contract(config, *, preprocess_type=None, max_num_seqs=None
     if config.execution == "serving":
         name = getattr(preprocess_type, "name", str(preprocess_type)).upper().rsplit(".", 1)[-1]
         if name != "PROLOG_V3":
-            raise ContractError("serving recent128 requires the original PROLOG_V3 path with its explicit ring producer")
+            raise ContractError("serving recent128 requires selected preprocessing PROLOG_V3; actual=" + name +
+                ". This checks the framework route, not a TBE path or lazy compilation; provider ABI is checked separately")
         _integer("max_num_seqs", max_num_seqs, 1)
         # Batch, Graph and MTP are handled by the serving implementation.
         # This is configuration acceptance, never evidence of device support.

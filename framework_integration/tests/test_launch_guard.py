@@ -15,7 +15,7 @@ class LaunchGuardTests(unittest.TestCase):
     def test_each_environment_only_request_raises_before_silent_off(self):
         for name in ("SFA_RECENT128_CONFIG","SFA_RECENT128_LIB_DIR"):
             env={name:"caller-only-value"}
-            with self.subTest(name=name),self.assertRaisesRegex(RuntimeError,"additional_config.*accuracy_eager.*PD/graph"):
+            with self.subTest(name=name),self.assertRaisesRegex(RuntimeError,"additional_config.*execution='serving'.*batched_v4.*accuracy_eager"):
                 require_explicit_config({},environ=env)
             self.assertEqual(env,{name:"caller-only-value"})
 
