@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-28 14:33",
+  "status": "BLOCKED_ON_CONTRACT_CHAIN",
+  "error": "ContractError: serving recent128 requires the original PROLOG_V3 path with its explicit ring producer",
+
+  "location": "contract.py line 108, validate_runtime_contract, called from serving_runtime.py line 85 ServingRuntime.__init__",
+
+  "context": {
+    "previous_errors_resolved": [
+      "1. max_num_seqs=1 (resolved: serving mode allows multi-request)",
+      "2. source_root/library_dir (resolved: pointed to repo + reader library)",
+      "3. experimental/torch/load_sfa_direct.py (resolved: synced full repo to 209)",
+      "4. rope_sin duplicate (resolved: Codex 725a28d positional names routing)"
+    ],
+    "current_error": "serving recent128 requires the original PROLOG_V3 path with its explicit ring producer",
+    "question": "What does this check expect? We have: (a) the original PROLOG_V3 path exists in sfa_v1.py, (b) the variant source is installed in TBE directory, (c) the Python wrapper has recent128_abi_version=1. What is 'the explicit ring producer' check looking for?"
+  },
+
+  "chain_of_errors": "We've been fixing one contract error at a time. Each fix reveals the next check. Is there a list of ALL contract requirements for serving mode? Or can you provide a diagnostic script that checks ALL requirements at once?",
+
+  "request": "Please provide: (1) explanation of what line 108 checks, (2) a complete list of ALL serving-mode contract requirements, (3) a preflight script that validates ALL of them at once so we don't discover them one error at a time"
+}
