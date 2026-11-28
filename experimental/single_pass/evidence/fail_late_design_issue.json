@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-28 10:25",
+  "issue": "FAIL_LATE_DESIGN: contract validation happens after full model loading, wasting 2+ minutes on unsupported configs",
+  "severity": "UX/engineering improvement, not correctness",
+
+  "current_flow_wasteful": {
+    "step_1": "Service starts, begins loading model",
+    "step_2": "Loads 102 safetensors shards (~2 minutes)",
+    "step_3": "Model loading completes",
+    "step_4": "process_weights_after_loading → hooks.weights() → Recent128Runtime.__init__",
+    "step_5": "validate_runtime_contract fails: 'requires max_num_seqs=1'",
+    "step_6": "Crash. Total: 2+ minutes wasted before error is shown."
+  },
+
+  "expected_flow_fail_fast": {
+    "step_1": "Service starts, parses --additional-config",
+    "step_2": "Detects sfa_recent128 present + max_num_seqs=8 in engine config",
+    "step_3": "Immediately error: 'hot128 accuracy experiment requires max_num_seqs=1'",
+    "step_4": "Fail in seconds, not minutes. No model loading wasted."
+  },
+
+  "user_feedback": "这些限制都放在加载完模型之后，我费劲半天加载起来模型然后和我说不支持，理论上完全可以放到初期。The contract checks (max_num_seqs, execution mode, graph compatibility) should be validated at config parsing time, before any model loading begins.",
+
+  "where_to_add_early_validation": {
+    "option_1": "In config_bridge.py install() — already runs at config parsing, could check engine config constraints",
+    "option_2": "In contract.py parse_recent128_config() — add cross-field validation against engine-level config",
+    "option_3": "In launch_guard.py — extend to validate max_num_seqs/execution against sfa_recent128 requirements",
+    "recommended": "Any of these, as long as it fails before model loading starts"
+  },
+
+  "constraint_to_move_early": [
+    "max_num_seqs=1 requirement (the one that just failed late)",
+    "execution=accuracy_eager requirement (PROLOG_V3 guard — also fails late at process_weights_after_loading)",
+    "graph mode compatibility (currently only checked when Recent128Runtime is constructed)",
+    "any other runtime contract checks that don't need model weights to validate"
+  ]
+}
