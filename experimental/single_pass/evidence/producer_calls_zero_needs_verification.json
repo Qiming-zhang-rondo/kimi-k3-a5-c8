@@ -1,0 +1,25 @@
+{
+  "date": "2026-11-28 17:05",
+  "status": "NEEDS_VERIFICATION",
+  "finding": "Diagnostic JSON shows producer_calls: 0 and read_calls: 0, but user is skeptical this means the hot window is not being used. We need to verify whether the counters are from the current session or a stale file.",
+
+  "diagnostic_evidence": {
+    "file": "/tmp/hot128_serving/layers/serving-38851-model.layers.0.self_attn.attn.json",
+    "content": "producer_calls: 0, read_calls: 0, status: WIRED_NOT_DEVICE_VALIDATED",
+    "file_pid": "38851",
+    "current_session_pid": "APIServer 63180, EngineCore 63302",
+    "file_timestamp": "Nov 28 15:21",
+    "successful_inference_time": "Nov 28 16:51",
+    "concern": "The diagnostic file with pid 38851 is from an OLDER session (15:21). The successful inference was at 16:51 in a DIFFERENT session (pid 63180/63302). The counters may be stale."
+  },
+
+  "questions": [
+    "1. Are the producer_calls/read_calls counters updated continuously during inference, or only written once at ServingRuntime initialization?",
+    "2. If a new session runs inference, does it create new diagnostic files with the new pid, or reuse old ones?",
+    "3. How can we verify the hot window path is actually being exercised during inference? Is there a runtime log or counter we can check AFTER a successful curl?",
+    "4. Could the Triton writer and reader be called but not incrementing these diagnostic counters (e.g., counters only track Python-level calls, not Triton kernel invocations)?",
+    "5. Is there a way to add a one-time log message when the writer/reader is first called, so we can verify activation?"
+  ],
+
+  "context": "P node successfully generates text with hot128 config. All errors were fixed. But diagnostic shows 0 calls. User believes the hot window IS being used (many errors were fixed to get here). Need to reconcile the evidence."
+}
