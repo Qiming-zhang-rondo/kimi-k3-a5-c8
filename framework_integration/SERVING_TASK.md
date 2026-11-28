@@ -1,5 +1,68 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口 fd7a60d6：沿用两节点已安装的variant，完成真实调用对照
+
+最新提交只新增了汇总报告：称178/209均已安装variant，Python函数ABI=1已确认，TBE将在首次调用动态编译。
+这推进了安装状态，但尚无真实producer执行或服务启动结果；报告中的“全部解决”不能替代这些结果。
+**不重做已经成功的SDK配置/standalone baseline，不重编已通过的reader，也不另搭第二套bridge。**
+沿当前已安装wrapper和私有variant，一次执行：
+
+1. 在内网本地核实真实调用包含latent、post-RoPE KR64及position/epoch发布，而不是按成员名grep次数判定。
+   可先运行下面的只读工具；它屏蔽注释/字符串，仅报告调用位置，报告留内网，不要求上传私有源或报告。
+
+   ```bash
+   python tools/audit_prolog_writer_calls.py \
+     --source-root "$PROLOG_VARIANT_SOURCE" \
+     --output "/tmp/prolog-writer-audit-$(date +%Y%m%d-%H%M%S)"
+   ```
+
+   有多组writer时追加`--writer-name`，指明各个真实变量/指针别名；工具不能证明模板被实例化或分支可达。
+   `WriteLatentSlice`、`WriteRopeSlice`、`PublishTags`都要真正执行；核实源与目标行/列偏移、唯一tag owner和同步。
+   若使用等价自定义函数，由内网在实际分支核实对应副作用，不能为了通过工具添加无效调用。
+2. 在实际wrapper核实原9参/5项返回与新增8地址+4scalar逐项转发，原tiler/workspace/blockDim及mixed任务保持匹配。
+   函数本身必须有`cloud_mla_prolog_v3_recent128.recent128_abi_version = 1`；模块变量或仅能import不证明真实写环。
+   当前首次服务调用仍会走TBE编译，因此standalone编译成功不能当作TBE实际分支已成功。
+3. 复用现有producer小测入口，一次完成OFF/ON、B1Q1/B1Q4/B8Q4、回绕/padding/重排、动态Graph输入。
+   OFF/ON的原query与C4 packed/scale逐字节不变；ON的真实BF16 latent/KR及position/epoch正确。
+   读环在整个producer完成之后；不通过独立writer或旧Cloud入口冒充这次variant测试。
+4. producer对照通过后，继续已有服务启动任务，保留并发8、Graph、MTP、APC和P/D原配置。
+   APC和P/D真实BF16尾窗回填仍须接通，下方能力矩阵没有因安装报告而自动变绿；不静默关闭特性或退回C4。
+
+后续只修真实首错，并保留已通过产物；不要求用户继续搬运私有文件。下面的旧提交章节是历史依据，不是重新构建指令。
+
+## 最新 d0190621：variant报告编译成功，先核实完整副作用再执行设备矩阵
+
+新的私有报告说明 Writer variant clean rebuild 成功，追加了8个GM地址和4个scalar；但其调用证据只列
+declaration/setter/null-check/ResolveRow/WriteLatentSlice，尚未列出实际RoPE写入和tag发布。
+**这不是已经证明它们缺失，而是报告不足以确认完整producer。** 内网在本地一次核实并补齐以下已知检查，再运行NPU；不要求上传私有实现：
+
+1. latent使用全局token行、正确列切片和实际最终QuantPerTileMxFp4输入，原FP32不改。
+   若isPertile分支内在tap后还有scale/clip/rotation，tap必须移到这些处理之后、实际量化调用之前。
+2. 真实post-RoPE KR64有WriteRopeSlice等实际写入调用；position/epoch有唯一owner发布。
+   不能只有8个地址在签名中却没有真实KR/tag副作用。reader等整个producer完成后再启动。
+3. SetRingWriter之前Init结果有效，Process之后Release；事件用SDK的TEventID。
+   核对原Prolog是否有未登记的硬编码event ID，不能假定AllocEventID自动避开它们；也核对原UB预算加1216B后的总量。
+4. 使用独立variant产物名称、真实文件SHA和对应mode4实例，避免复用相同libprolog_direct.so名字却在进程中加载旧baseline。
+   只看到LaunchAscendKernel等通用基础设施符号或源码调用次数，不足以证明真实新入口已可调用。
+5. 设备测试前必须已有真正的host测试入口/薄桥，传入完整原参数+新增12参数、真实tiling、blockDim和workspace，
+   并与实际kernel签名逐项一致。不能先调用旧Cloud接口测一遍，再宣称测到了新variant。
+   这个入口不必先完成正式wheel发布，但必须真的启动新kernel。
+
+以上静态接线齐全后，一次完成原已约定OFF/ON+B1/B8+Graph producer控制：原query与C4 packed/scale逐字节不变，
+真实BF16 latent/KR和位置/epoch正确，padding/回绕/重排有效。不是重新测试已通过的独立reader。
+正式注册为cloud_mla_prolog_v3_recent128后再接服务；APC/P-D自动尾窗和完整MTP仍是已知单独接线项。
+
+## 最新 be040494 / 4940380a：baseline已生成设备代码，冻结后接Writer
+
+本轮报告未接热环的 Prolog baseline 编译成功：库约547KB、设备代码段约373KB。
+先保留该成功副本、同一SDK和全部已通过编译参数；从它复制一个variant，只增加已经交付的inline Writer。
+不要重新staging回旧源码或丢弃刚修好的LoadData API/模板常量，不重编已通过的reader。
+baseline构建成功不等于Writer variant或真实producer已运行通过，也不能单凭launch基础设施符号判断mode4实例完全正确。
+
+已知SDK差异和完整定义/路径核验见 [SDK_COMPATIBILITY.md](../experimental/prolog_inplace_build/SDK_COMPATIBILITY.md)。
+两处具体差异已列出：版本宏未定义误选旧LoadData分支、实际9.2.1模板1:1常量值4。
+不要猜造ASC_DEVKIT_VERSION_NUM来强迫分支；沿当前已验证的新API和真实常量定义继续。
+
 ## 最新 562ca1ca：先修 CPU baseline 编译的两个问题
 
 现在已定位为 host 模板注册混入 direct device target，以及框架 GET_TILING_DATA_WITH_STRUCT 未在直调工程生成。

@@ -33,7 +33,7 @@ struct Route {
 };
 
 template <HardEvent Event>
-__aicore__ inline void Fence(event_t id)
+__aicore__ inline void Fence(TEventID id)
 {
     SetFlag<Event>(id);
     WaitFlag<Event>(id);
@@ -174,7 +174,7 @@ private:
     bool configured_ = false, enabled_ = false;
     TPipe *pipe_ = nullptr;
     uint32_t rows_ = 0, pools_ = 0, capacity_ = 0;
-    event_t mte2s_{}, smte2_{}, vmte3_{}, mte3v_{}, smte3_{}, mte3s_{};
+    TEventID mte2s_{}, smte2_{}, vmte3_{}, mte3v_{}, smte3_{}, mte3s_{};
     GlobalTensor<bfloat16_t> latentGm_, ropeGm_;
     GlobalTensor<int64_t> positionTagsGm_, epochTagsGm_, positionsGm_, epochsGm_;
     GlobalTensor<int32_t> banksGm_;

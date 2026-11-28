@@ -20,6 +20,7 @@ SHIM=r'''
 #include <vector>
 #include <set>
 #include <utility>
+#include <type_traits>
 #define __aicore__
 #define __gm__
 using GM_ADDR=uint8_t*;
@@ -29,13 +30,18 @@ struct bfloat16_t{uint16_t bits;};
 enum class HardEvent{MTE2_S,S_MTE2,V_MTE3,MTE3_V,S_MTE3,MTE3_S};
 enum class TPosition{VECCALC};
 enum class RoundMode{CAST_RINT};
-using event_t=uint16_t;
+// The SDK allocates dynamic IDs as TEventID; event_t is a distinct enum.
+// Keeping them distinct prevents this host model from hiding API type errors.
+enum class event_t:uint16_t{EVENT_ID0=0};
+using TEventID=int32_t;
+static_assert(!std::is_convertible<TEventID,event_t>::value);
+static_assert(!std::is_convertible<event_t,TEventID>::value);
 inline std::set<std::pair<int,int>> reserved;
 inline uint32_t initBytes=0,events=0,releases=0,loads=0;
 inline bool metaReady=false,payloadPending=false,tagsPending=false;
 inline std::vector<int> trace;
-template<HardEvent E>void SetFlag(event_t id){Require(reserved.count({int(E),id}),"event not owned");trace.push_back(100+int(E));}
-template<HardEvent E>void WaitFlag(event_t id){
+template<HardEvent E>void SetFlag(TEventID id){Require(reserved.count({int(E),id}),"event not owned");trace.push_back(100+int(E));}
+template<HardEvent E>void WaitFlag(TEventID id){
  Require(reserved.count({int(E),id}),"event not owned");trace.push_back(200+int(E));
  if constexpr(E==HardEvent::MTE2_S)metaReady=true;
  if constexpr(E==HardEvent::MTE3_V)payloadPending=false;
@@ -63,8 +69,8 @@ public:
   Require(bytes%32==0,"unaligned UB allocation");Require(posix_memalign(&b.p,32,bytes)==0,"allocation failed");
   std::memset(b.p,0,bytes);b.bytes=bytes;initBytes+=bytes;
  }
- template<HardEvent E>event_t AllocEventID(){auto id=event_t(++events+10);reserved.insert({int(E),id});return id;}
- template<HardEvent E>void ReleaseEventID(event_t id){Require(reserved.erase({int(E),id})==1,"event release mismatch");++releases;}
+ template<HardEvent E>TEventID AllocEventID(){auto id=TEventID(++events+10);reserved.insert({int(E),id});return id;}
+ template<HardEvent E>void ReleaseEventID(TEventID id){Require(reserved.erase({int(E),id})==1,"event release mismatch");++releases;}
 };
 struct DataCopyExtParams{uint16_t blockCount;uint32_t blockLen;uint32_t srcStride,dstStride,rsv;};
 template<class T>struct DataCopyPadExtParams{bool isPad;uint8_t left,right;T value;};
@@ -154,6 +160,16 @@ class PrologRingDeviceHelperTest(unittest.TestCase):
             result=subprocess.run([str(executable)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertIn("HOST_HEADER_MODEL_PASS",result.stdout)
+            # Reintroducing the deployed type mistake must fail against this
+            # strict shim, rather than silently passing through an integer alias.
+            (root/"wrong_event_header.h").write_text(HEADER.read_text().replace("TEventID","event_t"))
+            (root/"wrong_event.cpp").write_text(PROGRAM.replace(
+                '#include "prolog_ring_write_device.h"','#include "wrong_event_header.h"'))
+            wrong=subprocess.run([compiler,"-std=c++17","-fsyntax-only",
+                "-D__NPU_ARCH__=3510","-D__DAV_C310_VEC__","-I"+str(root),
+                str(root/"wrong_event.cpp")],capture_output=True,text=True)
+            self.assertNotEqual(wrong.returncode,0,"Strict shim accepted dynamic IDs as event_t")
+            self.assertIn("event_t",wrong.stderr)
 
     def test_header_is_inline_vector_component_without_new_launch_or_host_abi(self):
         text=HEADER.read_text()

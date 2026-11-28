@@ -37,6 +37,26 @@ helper 不提供也不猜测私有 host launcher、tiling、proto 或 scalar 顺
 6. 完整接通已有公共 ABI1：原9参/原5项 query 返回、ring latent/KR、position/epoch、逐 token bank/position/epoch/valid、maxQ/window。
    新 wrapper 需要真实 side-write 才能声明 `recent128_abi_version=1`；不能给旧 op 贴标记替代实现。
 
+helper 的 include、成员类型/对象声明，以及 Init、ResolveRow、WriteLatentSlice、WriteRopeSlice、PublishTags、Release
+等所有引用都必须处于同一个**编译器实际选择的** Vector guard 内；只保护 include 会让 Cube/host pass 仍解析到不存在的 helper 类型。
+保留原 Cube 分支的计算和完整 launch 参数，不能用全局 AIV-only 绕过。
+
+```cpp
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510 && defined(__DAV_C310_VEC__)
+// helper include / member declaration / each call site: all use this guard.
+#endif
+```
+
+公共 ABI 标记必须设置在 `cloud_ops_turbo` 最终导出的**函数对象**上，例如真实 wrapper 定义、装饰和导出完成后：
+
+```python
+cloud_mla_prolog_v3_recent128.recent128_abi_version = 1
+```
+
+仅设置模块级 `recent128_abi_version` 不生效；值须为整数 `1`，不能是字符串或 `True`。
+双节点安装与函数标记通过只证明接口已就位。如果 TBE 在首次真实调用时才动态编译，
+该次编译、真实 mode4 side-write 以及 OFF/ON 原 C4/query 控制仍待实际完成，不能提前记为 producer 验收通过。
+
 ## 一次解决构建，不在设备上试 TBE 宏
 
 这些步骤全部先在内网 CPU 构建阶段完成，不加载模型、不调用 NPU：

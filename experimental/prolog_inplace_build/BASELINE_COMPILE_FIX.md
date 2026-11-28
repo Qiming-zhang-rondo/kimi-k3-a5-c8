@@ -1,5 +1,8 @@
 # 修复 562ca1ca 的两个 standalone ASC 编译错误
 
+4940380a 已报告真实 baseline 构建成功；后续版本宏、3510 LoadData API 与 kernel-type 常量核验见
+[SDK_COMPATIBILITY.md](SDK_COMPATIBILITY.md)。下文保留 562ca1ca 两项错误的修复依据。
+
 当前报错还在未修改 Prolog 的 baseline CPU 编译阶段，没有进入 NPU/模型执行，不需要安排新的 A5 数值试验。
 这里交付本地 staging 工具和真实 POD 加载 helper；不修改原私有源码、SDK 或 vendor，不假造私有 tiling。
 
