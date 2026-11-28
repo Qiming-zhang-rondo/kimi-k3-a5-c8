@@ -1,0 +1,21 @@
+{
+  "date": "2026-11-28 18:27",
+  "status": "ARENA_CODE_RUNNING_BUT_P_SIDE_STILL_NOT_REGISTERED",
+  "summary": "New arena code deployed and running (error message changed). C4 KV transfer succeeds. BF16 arena still fails: P-side memory not registered on transfer engine.",
+
+  "progress_evidence": {
+    "new_code_running": "Error message changed from 'batch_transfer_sync_read failed' to 'BF16 registered-arena RDMA read failed' (new pd_mooncake.py:292 code)",
+    "arena_address_aligned": "0x402f8ce00000 (ends in 00000, 2MiB aligned arena)",
+    "c4_transfer_works": "PULL-DBG shows C4 KV pulls succeed: 'KV cache transfer took 279.59 ms', raw_n=22/22, raw_n=79/79 all received",
+    "service_recovers": "Recovered from KV load failure, requests still complete via recompute"
+  },
+
+  "remaining_error": {
+    "error": "Server memory verification failed, memory is not registered, server_addr:0x402f8ce00000, buf_len:23552 bytes",
+    "meaning": "D-side tries RDMA read from P-side arena address, but this address is NOT registered on P-side transfer engine",
+    "c4_vs_bf16": "C4 KV transfers use their own registration (works), BF16 arena uses separate registration (fails)",
+    "remote_session": "172.18.121.165:20598 (P-side engine port)"
+  },
+
+  "question": "C4 KV transfer succeeds because C4 buffers are registered with the transfer engine during normal mooncake connector setup. But the BF16 arena registration is NOT being recognized. Possible causes: (1) arena registered on P but with different engine instance/port, (2) registration happens after D's read attempt, (3) arena address in descriptor doesn't match registered address, (4) registration API call fails silently on P. How does C4 registration work vs BF16 arena registration?"
+}
