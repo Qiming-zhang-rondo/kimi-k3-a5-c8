@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-28 11:00",
+  "status": "PRODUCER_KERNEL_CODE_READY_BUT_INPUT_SOURCE_UNRESOLVED",
+  "question": "Where does the standalone producer kernel get the pre-quantization FP32 KV latent?",
+
+  "problem": "The pre-quantization FP32 KV (post-RMSNorm, pre-MXFP4) exists ONLY inside the PROLOG kernel's UB (inputLocal in RmsNormAndQuantizeCkv). It is never written to GM. A standalone producer kernel cannot read it from outside.",
+
+  "producer_kernel_ready": {
+    "file": "prolog_producer.asc (local, not uploaded - private kernel patterns)",
+    "patterns": "Uses exact validated patterns from prolog_ring_smoke.asc: 3-arg DataCopy, HardEvent cross-pipeline sync, 4-param Cast count, bank*capacity+position%capacity addressing",
+    "validated_against": "DEVICE_BATCHED_READER_SELECTED_CASES_VALIDATED (B8Q4 all passed)"
+  },
+
+  "options": {
+    "A_modify_prolog_sidecar": "Modify PROLOG_V3 to write RMSNorm output (inputLocal) to a sidecar GM buffer. Standalone producer reads from sidecar. MINIMAL PROLOG change (one DataCopy to GM). But still requires TBE compilation of modified PROLOG.",
+    "B_producer_inside_prolog": "Add the full ring write inside PROLOG kernel (original approach). Requires TBE compilation and careful pipeline integration.",
+    "C_workspace_reading": "Read from PROLOG's workspace (mmCkvKrResGm_) if pointer is exposed. But workspace contains PRE-RMSNorm values (matmul output), not post-RMSNorm. Wrong stage.",
+    "D_functional_interface": "Check if cloud_mla_prolog_v3_functional can return pre-quant values. Currently returns quantized kv_out/kr_out only."
+  },
+
+  "tbe_compilation_challenge": "Previous attempts to compile PROLOG kernel through TBE failed on system header issues (variadic templates in kernel_log.h). Standalone CMake ASC compilation works (validated by smoke and batched reader) but PROLOG uses TBE-specific macros (REGISTER_TILING_DEFAULT, GET_TILING_DATA_WITH_STRUCT) not available standalone.",
+
+  "recommendation": "Option A (sidecar) seems simplest: one additional DataCopy in PROLOG kernel writing inputLocal to a GM buffer. Then standalone producer handles ring write. But need TBE compilation to work for the modified PROLOG. Need Codex guidance on: (1) best option, (2) how to compile modified PROLOG (TBE or standalone)"
+}
