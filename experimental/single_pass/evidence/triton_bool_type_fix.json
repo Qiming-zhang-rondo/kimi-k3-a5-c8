@@ -1,0 +1,8 @@
+{
+  "date": "2026-11-28 15:56",
+  "error": "ValueError: Mask must have boolean scalar type (Triton tl.store)",
+  "root_cause": "valid is loaded from GM uint8 tensor, type is int8 not bool. Bitwise & with boolean expressions results in int8, not bool. Triton tl.store mask requires bool type.",
+  "fix": "Changed valid to (valid != 0) for explicit bool conversion. Combined with previous broadcast fix (writable & (latent_col >= 0)) for vector shape.",
+  "warning_also_seen": "tl.where with a non-boolean condition is deprecated, Got int8 (same root cause)",
+  "note": "native_writer.py Triton kernel should use (valid != 0) not raw valid for boolean expressions. Also consider explicit tl.cast(valid, tl.int1) if needed."
+}
