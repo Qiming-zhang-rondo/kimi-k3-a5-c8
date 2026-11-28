@@ -1,5 +1,10 @@
 # Prolog热环：仅在内网实施，不再上传内部源码
 
+最新 b25593fc 的完整独立 writer 已通过 A5 8/8 用例，DataCopy smoke 阶段结束。
+当前生产接入任务以 [SERVING_TASK.md](SERVING_TASK.md) 为准：保留并发8/Graph/MTP 等原生产配置，
+将已验证写法接入真实 Prolog variant，使用新 serving runtime + 批量 reader，不继续运行旧 accuracy_eager。
+下面保留原写点与 ABI 合同作为实施参考，旧提交的“尚未编译”记录不代表独立 writer 当前状态。
+
 最新ac8bef44的DataCopy smoke已由外部直接提供完整替换，不再猜参数。
 先按[独立writer说明](../experimental/prolog_ring_smoke/README.md)构建和执行本仓
 `experimental/prolog_ring_smoke`；其AIV隔离、显式事件和真实ring回读通过后，移用正确模式到私有Prolog。

@@ -12,6 +12,7 @@ import sys
 from types import ModuleType
 
 from .launch_guard import require_explicit_config
+from .preflight import validate_engine_config
 
 
 CONFIG_KEY = "sfa_recent128"
@@ -54,6 +55,7 @@ def install():
     def init_ascend_config(vllm_config, *args, **kwargs):
         additional = getattr(vllm_config, "additional_config", None)
         require_explicit_config(additional)
+        validate_engine_config(vllm_config)
         if not isinstance(additional, Mapping) or CONFIG_KEY not in additional:
             return original(vllm_config, *args, **kwargs)
         vllm_config.additional_config = {

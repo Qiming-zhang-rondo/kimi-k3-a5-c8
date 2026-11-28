@@ -38,16 +38,22 @@ class Recent128Config:
         window = _integer("window", self.window)
         if window not in (0, 128):
             raise ContractError("sfa_recent128.window must be 0 or 128")
-        if _integer("max_query_chunk", self.max_query_chunk, 1) > 1024:
-            raise ContractError("max_query_chunk must be <=1024 for the current direct bridge query contract")
-        if self.execution != "accuracy_eager":
-            raise ContractError("Only execution='accuracy_eager' is implemented; no serving-performance claim")
+        query_limit = 65536 if self.execution == "serving" else 1024
+        if _integer("max_query_chunk", self.max_query_chunk, 1) > query_limit:
+            raise ContractError("max_query_chunk must be <=" + str(query_limit) + " for the selected reader's static query bound")
+        if self.execution not in ("accuracy_eager", "serving"):
+            raise ContractError("execution must be accuracy_eager or serving")
         if self.preprocess not in ("preserve", "native_accuracy"):
             raise ContractError("preprocess must be preserve or native_accuracy; the explicit override is offline accuracy only")
         if self.reader not in ("native", "fused_eligible", "fused_required", "single_pass"):
             raise ContractError("reader must be native, fused_eligible, fused_required or single_pass")
-        if self.single_pass_kernel not in ("overlay", "fast_pair", "load_tile4", "kv_split4"):
-            raise ContractError("single_pass_kernel must be overlay, fast_pair, load_tile4 or kv_split4")
+        if self.single_pass_kernel not in ("overlay", "fast_pair", "load_tile4", "kv_split4", "batched_v4"):
+            raise ContractError("Unsupported single_pass_kernel")
+        if self.execution == "serving":
+            if self.preprocess != "preserve" or self.reader != "single_pass" or self.single_pass_kernel != "batched_v4":
+                raise ContractError("serving requires preprocess=preserve, reader=single_pass, single_pass_kernel=batched_v4")
+        elif self.single_pass_kernel == "batched_v4":
+            raise ContractError("batched_v4 requires execution=serving")
         for name in ("library_dir", "source_root", "diagnostics_path"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -95,6 +101,14 @@ def validate_runtime_contract(config, *, preprocess_type=None, max_num_seqs=None
                               speculative_enabled=False, capturing=False):
     """Fail explicitly instead of changing the framework's selected path."""
     if not config.enabled:
+        return
+    if config.execution == "serving":
+        name = getattr(preprocess_type, "name", str(preprocess_type)).upper().rsplit(".", 1)[-1]
+        if name != "PROLOG_V3":
+            raise ContractError("serving recent128 requires the original PROLOG_V3 path with its explicit ring producer")
+        _integer("max_num_seqs", max_num_seqs, 1)
+        # Batch, Graph and MTP are handled by the serving implementation.
+        # This is configuration acceptance, never evidence of device support.
         return
     name = getattr(preprocess_type, "name", str(preprocess_type)).upper().rsplit(".", 1)[-1]
     if name != "NATIVE":

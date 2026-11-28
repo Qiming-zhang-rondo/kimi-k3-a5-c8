@@ -15,6 +15,9 @@
 #ifndef RECENT128_C4_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
 #define RECENT128_C4_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H
 
+#ifndef QSFA_RECENT_BATCHED
+#define QSFA_RECENT_BATCHED 0
+#endif
 #ifndef QSFA_RECENT_ROUTE_HOT
 #define QSFA_RECENT_ROUTE_HOT 0
 #endif
@@ -131,6 +134,27 @@ public:
 #endif
     }
 
+#if QSFA_RECENT_BATCHED
+    // Additive serving entry only. The legacy fifteen-pointer ABI is unchanged.
+    __aicore__ inline void InitServingBatch(__gm__ uint8_t *requestBanks,
+        __gm__ uint8_t *requestEpochs, __gm__ uint8_t *ringEpochs,
+        __gm__ uint8_t *queryValid, __gm__ uint8_t *faults,
+        uint32_t pools, uint32_t queries)
+    {
+        recentRequestBanksGm.SetGlobalBuffer((__gm__ int32_t *)requestBanks);
+        recentRequestEpochsGm.SetGlobalBuffer((__gm__ int64_t *)requestEpochs);
+        recentEpochTagsGm.SetGlobalBuffer((__gm__ int64_t *)ringEpochs);
+        recentQueryValidGm.SetGlobalBuffer((__gm__ uint8_t *)queryValid);
+        recentFaultsGm.SetGlobalBuffer((__gm__ int32_t *)faults);
+        recentServingPools = pools;
+        recentServingQueries = queries;
+        tPipe->InitBuffer(recentServingMeta, 64);
+        recentMetaMte2S = tPipe->AllocEventID<HardEvent::MTE2_S>();
+        recentMetaSMte2 = tPipe->AllocEventID<HardEvent::S_MTE2>();
+        recentMetaSMte3 = tPipe->AllocEventID<HardEvent::S_MTE3>();
+        recentMetaMte3S = tPipe->AllocEventID<HardEvent::MTE3_S>();
+    }
+#endif
     // 初始化LocalTensor
     __aicore__ inline void InitLocalBuffer(TPipe *pipe, ConstInfo &constInfo);
 #if QSFA_RECENT_KV_SPLIT
@@ -233,6 +257,47 @@ private:
     GlobalTensor<Q_T> recentRopeGm;
     GlobalTensor<int64_t> recentTagsGm;
     GlobalTensor<int64_t> recentPositionsGm;
+#if QSFA_RECENT_BATCHED
+    GlobalTensor<int32_t> recentRequestBanksGm;
+    GlobalTensor<int64_t> recentRequestEpochsGm;
+    GlobalTensor<int64_t> recentEpochTagsGm;
+    GlobalTensor<uint8_t> recentQueryValidGm;
+    GlobalTensor<int32_t> recentFaultsGm;
+    TBuf<TPosition::VECCALC> recentServingMeta;
+    TEventID recentMetaMte2S, recentMetaSMte2, recentMetaSMte3, recentMetaMte3S;
+    uint32_t recentServingPools = 0, recentServingQueries = 0;
+    int64_t recentServingRow = -1, recentServingBank = -1, recentServingEpoch = -1;
+    template <typename M>
+    __aicore__ inline M ReadServingScalar(GlobalTensor<M> &gm, uint64_t index)
+    {
+        // Fresh GM->UB reads avoid reusing scalar-DCache metadata on replay.
+        auto local = recentServingMeta.template Get<M>();
+        DataCopyExtParams copy{};
+        copy.blockCount = 1; copy.blockLen = sizeof(M);
+        DataCopyPadExtParams<M> pad{};
+        pad.isPad = false;
+        DataCopyPad(local, gm[index], copy, pad);
+        SetFlag<HardEvent::MTE2_S>(recentMetaMte2S);
+        WaitFlag<HardEvent::MTE2_S>(recentMetaMte2S);
+        const M result = local.GetValue(0);
+        SetFlag<HardEvent::S_MTE2>(recentMetaSMte2);
+        WaitFlag<HardEvent::S_MTE2>(recentMetaSMte2);
+        return result;
+    }
+    __aicore__ inline void MarkServingFault()
+    {
+        if (recentServingRow < 0 || recentServingRow >= recentServingQueries) return;
+        auto local = recentServingMeta.template Get<int32_t>()[8];
+        local.SetValue(0, 1);
+        SetFlag<HardEvent::S_MTE3>(recentMetaSMte3);
+        WaitFlag<HardEvent::S_MTE3>(recentMetaSMte3);
+        DataCopyExtParams copy{};
+        copy.blockCount = 1; copy.blockLen = sizeof(int32_t);
+        DataCopyPad(recentFaultsGm[recentServingRow], local, copy);
+        SetFlag<HardEvent::MTE3_S>(recentMetaMte3S);
+        WaitFlag<HardEvent::MTE3_S>(recentMetaMte3S);
+    }
+#endif
     TEventID recentVToMte2;
     TEventID recentMte2ToMte3;
 #if !QSFA_RECENT_ROUTE_FAST_PAIR
@@ -629,6 +694,30 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
 Recent128QSFAVectorService<TEMPLATE_ARGS>::PrepareRecentQuery(
     const RunInfo &runInfo, const ConstInfo &constInfo)
 {
+#if QSFA_RECENT_BATCHED
+    const int64_t globalRow = runInfo.attentionOutOffset / (constInfo.gSize * constInfo.dSizeV);
+    if (recentServingRow != globalRow) {
+        recentServingRow = globalRow;
+        recentRouteActive = recentEnabled && globalRow >= 0 && globalRow < recentServingQueries &&
+            constInfo.dSizeVInput == 400 && constInfo.dSizeNope == 512 &&
+            constInfo.dSizeRope == 64 && constInfo.sparseBlockSize == 1;
+        if (recentRouteActive) {
+            recentRouteActive = ReadServingScalar(recentQueryValidGm, globalRow) != 0;
+        }
+        if (recentRouteActive) {
+            recentQueryPosition = ReadServingScalar(recentPositionsGm, globalRow);
+            recentServingBank = ReadServingScalar(recentRequestBanksGm, runInfo.boIdx);
+            recentServingEpoch = ReadServingScalar(recentRequestEpochsGm, runInfo.boIdx);
+            if (recentQueryPosition < 0 || recentServingBank < 0 ||
+                recentServingBank >= recentServingPools || recentServingEpoch < 0) {
+                MarkServingFault();
+                recentRouteActive = false;
+            }
+            recentQueryFirst = recentQueryPosition >= recentWindow - 1 ?
+                recentQueryPosition - (recentWindow - 1) : 0;
+        }
+    }
+#else
     recentRouteActive = recentEnabled && runInfo.boIdx == 0 &&
         constInfo.dSizeVInput == 400 && constInfo.dSizeNope == 512 &&
         constInfo.dSizeRope == 64 && constInfo.sparseBlockSize == 1;
@@ -638,6 +727,7 @@ Recent128QSFAVectorService<TEMPLATE_ARGS>::PrepareRecentQuery(
         recentQueryFirst = recentQueryPosition >= recentWindow - 1 ?
             recentQueryPosition - (recentWindow - 1) : 0;
     }
+#endif
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline int64_t
@@ -646,8 +736,16 @@ Recent128QSFAVectorService<TEMPLATE_ARGS>::ResolveRecentHotSlot(int64_t token)
     if (token < recentQueryFirst || token > recentQueryPosition) {
         return -1;
     }
+#if QSFA_RECENT_BATCHED
+    const int64_t slot = recentServingBank * recentRingCapacity + token % recentRingCapacity;
+    const bool present = ReadServingScalar(recentTagsGm, slot) == token &&
+        ReadServingScalar(recentEpochTagsGm, slot) == recentServingEpoch;
+    if (!present) MarkServingFault();
+    return present ? slot : -1;
+#else
     const int64_t slot = token % recentRingCapacity;
     return recentTagsGm.GetValue(slot) == token ? slot : -1;
+#endif
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void
@@ -1818,6 +1916,10 @@ public:
     __aicore__ inline Recent128QSFAVectorServiceDummy() {};
     __aicore__ inline void InitRecentHot(__gm__ uint8_t *, __gm__ uint8_t *,
         __gm__ uint8_t *, __gm__ uint8_t *, int64_t, int64_t) {}
+#if QSFA_RECENT_BATCHED
+    __aicore__ inline void InitServingBatch(__gm__ uint8_t *, __gm__ uint8_t *,
+        __gm__ uint8_t *, __gm__ uint8_t *, __gm__ uint8_t *, uint32_t, uint32_t) {}
+#endif
 #if QSFA_RECENT_KV_SPLIT
     __aicore__ inline void InitKvSplitWorkspace(__gm__ uint8_t *) {}
     __aicore__ inline void InitEmptyKvSplit(const ConstInfo &) {}

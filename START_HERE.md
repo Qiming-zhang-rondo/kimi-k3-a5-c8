@@ -1,11 +1,16 @@
-# 当前任务：直接构建并验证完整的独立热环 writer
+# 当前任务：修复生产启动，不降低原配置
 
-ac8bef44 的 119 行 smoke 存在裸指针调用 GetValue、GM→GM DataCopy、固定第0槽回读、缺少 AIV 编译分支隔离和跨流水事件等问题。仓库现已提供完整可编译候选替换，停止逐个猜 DataCopy 参数。
+最新 366ae84 的加载后才报错问题和 a1ad5cd 的旧单请求 guard 已有实际代码修复候选。
+内网 agent 直接执行 [framework_integration/SERVING_TASK.md](framework_integration/SERVING_TASK.md)，不再让用户选择切C8、关Graph、改单请求或丢弃MTP。
 
-内网 agent 现在直接执行 [experimental/prolog_ring_smoke/README.md](experimental/prolog_ring_smoke/README.md) 的隔离构建及设备验证命令。复用已经配置成功的真实 CANN 9.2.1 / dav-3510 工具链，选择空闲设备，不改现有 vendor，不停服务，不升级 CANN。
+本次交付包含 serving runtime、真实 Prolog 调用路由、稳定请求bank/epoch与固定热环、runner/metadata/MTP位置接线、批量原生ASC reader、当前Torch薄桥、独立A5批量正确性脚本，以及托管overlay的runtime更新工具。原主cache仍是MXFP4 packed400，原TopK和query返回不改变。
 
-本目录含完整 ASC kernel、固定 ABI 头、CMake、真实 Torch stream 薄桥和验证脚本。测试覆盖 B1Q1/B8Q4、OFF、BF16 RNE、KR、bank/position/epoch、padding、回绕、输入未改及 Graph replay 的数据变化；不需要私有 Prolog 源码外传。
+明确使用 execution=serving / reader=single_pass / single_pass_kernel=batched_v4。它复用V4 load32/stride416流水，不冒充已测B1 KV-split4的速度。旧 accuracy_eager 保持独立；不能只删它的 max_num_seqs/Graph guard。
 
-外部已通过 4 项宿主测试和 C++ ABI 头语法检查；尚未在 A5 编译或执行。仅 writer 通过不等于 Prolog/C4 字节控制或服务已完成。设备通过后，把搬运/同步模式移到内网已定位的实际 FP32 KV 量化前写点，继续 [framework_integration/PROLOG_PRODUCER_TASK.md](framework_integration/PROLOG_PRODUCER_TASK.md) 的完整 ABI1 producer 任务。保留原 C4 数据/scale、PrologV3、Indexer MXFP4 以及用户要求的生产能力。
+静态配置检查在权重加载前执行，真实producer和批量库/薄桥能力在模型层构造时检查，避免等102个shard后才报已知问题。
 
-源码/构建/原始日志留内网，只回传部门允许披露的结果摘要或首个错误；不要继续上传内部头文件、schema、实现 diff、二进制或其余私有文件。
+外部125项framework宿主测试、5项producer路由测试通过，新增160B ABI/批量tiling的C++宿主编译检查通过。新批量ASC与真实Prolog联合设备验证尚未运行。b25593fc的8/8通过仅属于独立writer，不可外推成新批量reader或服务已成功。
+
+现在按任务文件在匹配SDK中编译真实私有Prolog variant和独立批量reader，跑run_batched_smoke，再更新hot128专用runtime/config并联调服务。Prefix/PD的真实BF16尾窗回调接口已交付，内网必须接好actual snapshot/传输完成；不能把C4到达当BF16到达。原baseline启动链和vendor保持。
+
+内部实现及原始日志留内网，只回传部门允许的测试状态/首错/摘要，不再批量外传源码、schema或二进制。

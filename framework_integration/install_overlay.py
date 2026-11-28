@@ -132,7 +132,8 @@ def _write(path, data):
 def install_overlay(mxllm_root, *, apply=False, output=None,
                     expected_source_sha256=PINNED_SOURCE_SHA256,
                     expected_worker_sha256=PINNED_WORKER_SHA256,
-                    expected_platform_sha256=PINNED_PLATFORM_SHA256, runtime_root=None):
+                    expected_platform_sha256=PINNED_PLATFORM_SHA256, runtime_root=None,
+                    update_runtime=False):
     root = Path(mxllm_root).resolve()
     if any(name in root.parts for name in ("site-packages", "dist-packages")):
         raise ValueError("Target an explicit source checkout, not installed site-packages")
@@ -174,8 +175,43 @@ def install_overlay(mxllm_root, *, apply=False, output=None,
         if (state.get("original_sha256") != expected or
                 any(sha(original[name]) != expected[name] for name in expected) or
                 regenerated != current or state.get("installed_source_sha256") != actual or
-                state.get("runtime_sha256") != hashes or installed_hashes != hashes):
+                installed_hashes != state.get("runtime_sha256")):
             raise ValueError("Installed source/runtime differs from the reviewed manifest; restore and review before reinstall")
+        if installed_hashes != hashes:
+            if not update_runtime:
+                raise ValueError("A newer runtime is available; use --update-runtime --output to back up and update only the managed runtime")
+            if not apply:
+                return dict(status="RUNTIME_UPDATE_READY",changed=False,mxllm_root=str(root),
+                            original_runtime_sha256=installed_hashes,runtime_sha256=hashes,device_launched=False)
+            if output is None:
+                raise ValueError("Runtime update requires --output for a restorable runtime backup")
+            destination=Path(output).resolve()
+            if destination.is_relative_to(root):
+                raise ValueError("Runtime backup must be outside the source checkout")
+            destination.mkdir(parents=True,exist_ok=True)
+            backup=Path(tempfile.mkdtemp(prefix="sfa-runtime-update-",dir=destination))
+            shutil.copytree(target,backup/"runtime")
+            staged=Path(tempfile.mkdtemp(prefix=".sfa-runtime-update-",dir=root))
+            old=root/(staged.name+"-previous")
+            try:
+                for name,data in contents.items():
+                    path=staged/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+                updated=dict(state,runtime_sha256=hashes,previous_runtime_backup=str(backup/"runtime"))
+                (staged/STATE).write_text(json.dumps(updated,indent=2)+"\n")
+                os.replace(target,old)
+                try:
+                    os.replace(staged,target)
+                except Exception:
+                    os.replace(old,target)
+                    raise
+                shutil.rmtree(old)
+            finally:
+                if staged.exists():shutil.rmtree(staged)
+            result=dict(status="RUNTIME_UPDATED",changed=True,mxllm_root=str(root),
+                        backup_directory=str(backup),runtime_sha256=hashes,source_sha256=actual,
+                        source_changed=False,device_launched=False)
+            (backup/"manifest.json").write_text(json.dumps(result,indent=2)+"\n")
+            return result
         return dict(status="ALREADY_INSTALLED",changed=False,mode="apply" if apply else "check",
                     mxllm_root=str(root),backup_directory=state.get("backup_directory"),
                     source_sha256=actual,runtime_sha256=hashes,device_launched=False)
@@ -246,6 +282,7 @@ def main():
     mode.add_argument("--check",action="store_true",help="Read-only validation (default)")
     mode.add_argument("--apply",action="store_true",help="Copy runtime and patch this source checkout")
     parser.add_argument("--output",type=Path,help="External experiment output for original-source backups/manifest")
+    parser.add_argument("--update-runtime",action="store_true",help="Back up and update a verified managed runtime; leave all MXLLM source patches unchanged")
     parser.add_argument("--source-profile",choices=tuple(SOURCE_PROFILES),default="legacy",
         help="Exact reviewed MXLLM three-file source set; pr199 is head 342680fb, not a compatibility override")
     parser.add_argument("--expected-source-sha256")
@@ -257,7 +294,8 @@ def main():
         result=install_overlay(args.mxllm_root,apply=args.apply,output=args.output,
             expected_source_sha256=args.expected_source_sha256 or source_hash,
             expected_worker_sha256=args.expected_worker_sha256 or worker_hash,
-            expected_platform_sha256=args.expected_platform_sha256 or platform_hash)
+            expected_platform_sha256=args.expected_platform_sha256 or platform_hash,
+            update_runtime=args.update_runtime)
         result["source_profile"]=args.source_profile
     except (ValueError,OSError,SyntaxError,json.JSONDecodeError) as error:
         parser.exit(2,f"Overlay refused: {error}\n")

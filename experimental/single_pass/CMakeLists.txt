@@ -42,6 +42,10 @@ option(QSFA_BUILD_KV_SPLIT "Build isolated KV-split ABI2 candidate alongside unc
 if(QSFA_BUILD_KV_SPLIT)
     target_sources(qsfa_recent128_direct PRIVATE kv_split_attention_wrapper.asc kv_split_reduce.asc)
 endif()
+option(QSFA_BUILD_BATCHED_SERVING "Build additive batched TND serving candidate" ON)
+if(QSFA_BUILD_BATCHED_SERVING)
+    target_sources(qsfa_recent128_direct PRIVATE batched_serving_wrapper.asc)
+endif()
 set_target_properties(qsfa_recent128_direct PROPERTIES POSITION_INDEPENDENT_CODE ON UNITY_BUILD OFF)
 target_compile_options(qsfa_recent128_direct PRIVATE
     $<$<COMPILE_LANGUAGE:ASC>:--npu-arch=dav-3510>

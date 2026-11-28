@@ -59,8 +59,22 @@ class Recent128ContractTest(unittest.TestCase):
         for bad in ("native", "NATIVE", "prolog", None, True):
             with self.subTest(preprocess=bad), self.assertRaisesRegex(ContractError, "preprocess"):
                 Recent128Config(preprocess=bad)
-        with self.assertRaisesRegex(ContractError, "accuracy_eager"):
+        with self.assertRaisesRegex(ContractError, "serving requires"):
             Recent128Config(preprocess="native_accuracy", execution="serving")
+
+    def test_serving_accepts_production_flags_without_claiming_device_support(self):
+        cfg = config(window=128, execution="serving", reader="single_pass",
+            single_pass_kernel="batched_v4", preprocess="preserve", max_query_chunk=32,
+            source_root="/operator", library_dir="/isolated/library")
+        validate_runtime_contract(cfg, preprocess_type="PROLOG_V3", max_num_seqs=8,
+            enforce_eager=False, capturing=True, speculative_enabled=True,
+            prefix_caching=True, pd_enabled=True)
+        self.assertEqual(cfg.capacity, 256)
+        self.assertEqual(cfg.preprocess, "preserve")
+        with self.assertRaisesRegex(ContractError, "PROLOG_V3"):
+            validate_runtime_contract(cfg, preprocess_type="NATIVE", max_num_seqs=8)
+        # This is configuration acceptance only; producer/reader/PD/prefix
+        # execution still needs hardware and lifecycle evidence.
 
     def test_config_disabled_and_cold_quantization_cannot_be_changed(self):
         disabled = parse_recent128_config({"other_feature": {"foo": 1}})

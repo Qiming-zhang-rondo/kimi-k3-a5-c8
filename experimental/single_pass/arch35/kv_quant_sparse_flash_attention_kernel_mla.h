@@ -84,6 +84,18 @@ public:
                 queryPositions, ringCapacity, window);
         }
     }
+#if QSFA_RECENT_BATCHED
+    __aicore__ inline void InitServingBatch(__gm__ uint8_t *requestBanks,
+        __gm__ uint8_t *requestEpochs, __gm__ uint8_t *ringEpochs,
+        __gm__ uint8_t *queryValid, __gm__ uint8_t *faults,
+        uint32_t pools, uint32_t queries)
+    {
+        if ASCEND_IS_AIV {
+            vecBlock.InitServingBatch(requestBanks, requestEpochs, ringEpochs,
+                queryValid, faults, pools, queries);
+        }
+    }
+#endif
     __aicore__ inline void Process();
 
 private:
