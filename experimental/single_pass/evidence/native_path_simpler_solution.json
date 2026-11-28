@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-28 15:02",
+  "status": "ARCHITECTURAL_PIVOT_RECOMMENDED",
+  "discovery": "DSA-CP is NOT the problem. The mxllm-c4 reference runs with enable_dsa_cp=true on P node and works fine. The issue is that the model ALWAYS selects NATIVE preprocessing, never PROLOG_V3, regardless of DSA-CP setting.",
+
+  "evidence": {
+    "mxllm_c4_reference_P_node": "enable_dsa_cp: true, works fine, normal C4 serving",
+    "mxllm_c4_reference_D_node": "no enable_dsa_cp (default), works fine",
+    "our_production_P_node": "enable_dsa_cp: true, same as reference",
+    "our_production_D_node": "enable_dsa_cp: false, still selects AscendSFADSACPImpl with NATIVE",
+    "conclusion": "The model's default implementation path is ALWAYS NATIVE preprocessing with AscendSFADSACPImpl. PROLOG_V3 (fused) is never selected in this deployment. Our ring write in PROLOG_V3 will never execute."
+  },
+
+  "key_insight": "In the NATIVE path, the pre-quantization BF16/FP32 values EXIST IN GM between separate operators (RMSNorm op → GM output → quantization op reads from GM). This means a STANDALONE kernel can read from GM without modifying any existing kernel.",
+
+  "native_path_data_flow": {
+    "step_1": "KV projection (matmul) → result in GM",
+    "step_2": "RMSNorm op → reads from GM, writes BF16/FP32 result to GM ← THIS IS WHERE THE RING WRITE SHOULD READ FROM",
+    "step_3": "RoPE op → reads from GM, writes result to GM",
+    "step_4": "Quantization op (MXFP4) → reads BF16 from GM, writes MXFP4 to cache",
+    "implication": "Pre-quantization BF16 values are IN GM at step 2-3 boundary. A standalone ring writer kernel can read them without any kernel modification."
+  },
+
+  "recommended_pivot": {
+    "abandon": "PROLOG_V3 integration (wrong path, will never execute in production)",
+    "adopt": "NATIVE path standalone ring writer",
+    "how": "1. Find the GM tensor that holds the RMSNorm output (pre-quantization BF16) in the NATIVE path. 2. Launch our already-validated standalone ring writer kernel to read from this GM tensor and write to the ring. 3. No existing kernel needs modification. 4. Works with DSA-CP (no conflict). 5. Works with the production AscendSFADSACPImpl.",
+    "advantages": [
+      "No kernel modification needed (zero risk to existing serving)",
+      "Works with DSA-CP (no conflict)",
+      "Works with production implementation (AscendSFADSACPImpl)",
+      "Uses already-validated ring writer smoke kernel (DEVICE_RING_WRITER_VALIDATED)",
+      "Simpler than PROLOG integration (no TBE, no VEC guards, no kernel changes)"
+    ]
+  },
+
+  "questions_for_codex": [
+    "1. In the NATIVE path, what is the exact GM tensor name/shape that holds the pre-quantization BF16 KV after RMSNorm and before MXFP4 quantization?",
+    "2. Where in the Python code (sfa_v1.py NATIVE path) does this tensor exist and can we access it for our standalone kernel?",
+    "3. Can we hook into the NATIVE path at the Python level (after RMSNorm op, before quant op) to launch our ring writer?",
+    "4. Is there an existing callback or hook point in the NATIVE preprocessing sequence?"
+  ]
+}
