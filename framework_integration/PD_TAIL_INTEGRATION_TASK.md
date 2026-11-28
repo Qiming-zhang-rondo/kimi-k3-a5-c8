@@ -1,5 +1,29 @@
 # 当前任务：识别真实 Mooncake 通道，接通 P→D BF16 recent128
 
+## 最新 15b5ec7：注册前移到 Store 初始化之前，并绑定同一个真实 peer
+
+本轮明确核对了精确c09公开源码：C4的 `global_te.register_buffer()` 也是循环调用同一个 `register_memory()`，不存在另一套批量注册API，不能单独调用它消耗原C4的一次性注册标记。之前“位于register_kv_caches前”仍可能晚于Multi的Store兄弟对象初始化共享引擎/建立连接。
+
+新修复在Mooncake worker构造完成后立即注册arena，先于Multi构造Store；复用同一bridge，原KV注册点仅幂等确认。针对hook首次安装在正在执行的原构造函数内的情况，也在facade的真实connector_worker赋值点确保提前注册。模型权重/真实layer rings在精确c09的connector构造前已加载，不推测层名或另建引擎。
+
+**内网现在一次执行：**
+
+1. P、D均拉取本分支，沿下方原manifest流程备份更新runtime，原参数启动新worker。保留attention/CANN/Cloud包、MXFP4、QLI、Graph/MTP/APC/并发。必须全新worker；旧HCCL连接不靠热拷贝文件刷新。
+2. 每个实际worker日志应看到 `RECENT128_PD_EARLY_ARENA ... before_store_constructor=1`。沿原成功请求JSON/真实PD代理地址执行同一条curl，内网自行填实际变量，不让用户再转述路径：
+
+   ```bash
+   curl --fail-with-body -sS --connect-timeout 15 --max-time 180 \
+     "$ACTUAL_PD_CHAT_COMPLETIONS_URL" \
+     -H 'Content-Type: application/json' \
+     --data-binary "@$ACTUAL_SMOKE_REQUEST_JSON"
+   ```
+
+3. 成功证据必须同时有：P `RECENT128_PD_SOURCE_READY ... register_ret=0`；D同一所选peer的 `RECENT128_PD_READ_BEGIN`，其native_rpc/source_rpc/remote端口一致；D `RECENT128_PD_READ_END ... ret=0`；最后 `Recent128 BF16 PD tail imported` 和正常curl输出。无KV-load-recompute、无sticky fault。不同TP peer的端口本来可不同；不能再把任意C4日志的15429直接与BF16所选peer20598比较。
+4. 如仍失败，本轮新增日志一次定位到具体边界：`RECENT128_PD_ENGINE_MISMATCH` 是arena/worker/globalTE对象不同；`RECENT128_PD_RPC_MISMATCH` 是引擎实时端口与worker缓存不同；`RECENT128_PD_SOURCE_BINDING_MISMATCH` 是控制线程绑定错误；`RECENT128_PD_SELECTED_PEER_RPC_MISMATCH` 是同一peer的native缓存/控制回包/源实时端口不同。若这些全部通过、P注册ret0且描述符在arena内，RDMA仍报未注册，则保留同一请求上述SOURCE_READY/READ_BEGIN及backend首错，不能继续写“Python没调用P注册”——需据这些实际值定位部署后端的MR发布/连接状态。
+5. 完整指针/端口/nonce日志仅留内网。推小型脱敏报告：commit、实际PID/rank、early_arena是否出现、同peer端口是否一致、P register结果、D read结果、import计数、首个错误标签/后端错误和本地产物位置。不要上传私有源码/大日志，也不要重算成功当PD通过。
+
+本轮208项框架检查＋23项传输/arena宿主检查通过，包含构造中途安装、提前注册一次、OFF不分配和同peer路由对照。A5成功与性能仍待本次真实curl，不能保证此候选已在设备解决全部问题。下面各节仅保留此前排障背景。
+
 ## 最新 e01b953：修复运行中新注册区域与多接收者释放，先测两条 P/D 请求
 
 最新错误已到真实RDMA read；`13312`字节正是13token的BF16 latent。D本地注册地址与P的源地址不同是正常现象，不能据此断言P漏注册。旧代码先对每个源clone注册并检查ret0再发布READY；但公开旧HCCL后端在首次peer连接时交换/缓存内存描述符，并要求注册区2MiB对齐，逐请求注册新clone仍可能不被已有连接识别。部署二进制根因尚未实证钉死，本轮消除此依赖。

@@ -1,5 +1,10 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口：15b5ec7 后将注册前移到 Store 构造前，真实同 peer 校验
+
+执行 [PD_TAIL_INTEGRATION_TASK 顶部](PD_TAIL_INTEGRATION_TASK.md)。已确认C4和arena使用同一个注册API；本轮修Multi/Store初始化时序，并对源注册引擎/控制回包/所选native peer端口做一致性检查。
+208项框架＋23项arena/传输宿主检查通过。两边原参数启动新worker，先同一条实际PD curl；成功必须有真实READ ret0+tail imported，任务已给失败时一次收齐的具体日志标签。
+
 ## 当前入口：修复 e01b953 的注册区域错误
 
 执行 [PD_TAIL_INTEGRATION_TASK 最新节](PD_TAIL_INTEGRATION_TASK.md)。已改为P/D建链前注册2MiB对齐固定arena，消除逐请求动态clone MR；并修多D读者的独立ACK/native完成双重释放门。

@@ -64,6 +64,7 @@ class Arena:
         # failure return must not leave a possibly registered allocation freed.
         _REGISTERED_ARENAS.append(self)
         result = engine.register_memory(pointer, registered_bytes)
+        self.registration_result = result
         _require(type(result) is int and result == 0,
                  "PD arena register_memory failed: " + repr(result))
 

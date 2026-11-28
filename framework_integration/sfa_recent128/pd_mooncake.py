@@ -7,6 +7,8 @@ This is an A5 candidate: host protocol tests do not validate the NPU transport.
 from functools import wraps
 import importlib
 import inspect
+import logging
+import os
 import secrets
 import threading
 import time
@@ -21,6 +23,7 @@ from .serving_state import TailSnapshot
 _BRIDGES = {}
 _EXT = "recent128_tail_v2"
 _FIELDS = ("latent", "rope", "position_tags", "epoch_tags")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _require(value, message):
@@ -54,6 +57,9 @@ class ControlSocket:
             metadata = self.codec.decode(frames[-1])
             _require(isinstance(metadata, dict), "Native Mooncake metadata must remain a mapping")
             try:
+                validate = getattr(self.bridge, "validate_source_metadata", None)
+                if callable(validate):
+                    validate(metadata)
                 metadata[_EXT] = self.bridge.control(self.command)
             except Exception as error:
                 import logging
@@ -87,6 +93,34 @@ class LegacyTailBridge:
             arena_layers=extent.get("layers"), pending_sources=len(self.pending),
             successful_reads=self.successful_reads, failed_reads=self.failed_reads,
             completed_imports=len(self.completed))
+
+    def source_identity(self):
+        worker = self.worker
+        _require(self.arena is not None and self.arena.engine is worker.engine,
+                 "RECENT128_PD_ENGINE_MISMATCH arena/worker engines differ")
+        module = importlib.import_module(LEGACY_MODULE)
+        global_engine = getattr(getattr(module, "global_te", None), "transfer_engine", None)
+        _require(global_engine is None or global_engine is worker.engine,
+                 "RECENT128_PD_ENGINE_MISMATCH native global_te and worker engines differ")
+        live_rpc = int(worker.engine.get_rpc_port())
+        _require(live_rpc == int(worker.te_rpc_port),
+                 f"RECENT128_PD_RPC_MISMATCH live={live_rpc} worker_cached={worker.te_rpc_port}")
+        return dict(pid=os.getpid(), engine_id=str(worker.engine_id),
+            engine_object=id(worker.engine), tp_rank=int(worker.tp_rank), device=str(self.device),
+            handshake_port=int(worker.handshake_port), live_rpc_port=live_rpc,
+            arena_register_result=self.arena.registration_result,
+            arena=dict(self.arena.registered_extent))
+
+    def validate_source_metadata(self, metadata):
+        identity = self.source_identity()
+        _require(str(metadata.get("engine_id")) == identity["engine_id"] and
+                 metadata.get("te_rpc_port") == identity["live_rpc_port"] and
+                 metadata.get("handshake_port") == identity["handshake_port"],
+                 "RECENT128_PD_SOURCE_BINDING_MISMATCH " +
+                 f"pid={identity['pid']} tp={identity['tp_rank']} " +
+                 f"live_rpc={identity['live_rpc_port']} metadata_rpc={metadata.get('te_rpc_port')} " +
+                 f"worker_handshake={identity['handshake_port']} metadata_handshake={metadata.get('handshake_port')}")
+        return identity
 
     def prepare_arena(self):
         """Must precede native KV registration, thread startup and peer links."""
@@ -187,9 +221,18 @@ class LegacyTailBridge:
                     secrets.token_hex(16), tuple(buffers)).validate()
                 self.generations[request_id] = generation
                 self.descriptors[request_id] = descriptor
-            self.lifetime.subscribe(request_id, receiver_id, descriptor.nonce)
+            subscribed = self.lifetime.subscribe(request_id, receiver_id, descriptor.nonce)
+            identity = self.source_identity()
+            if subscribed:
+                extent = self.arena.registered_extent
+                _LOGGER.info("RECENT128_PD_SOURCE_READY pid=%d device=%s tp=%d handshake=%d live_rpc=%d "
+                    "engine=%d arena=%#x arena_bytes=%d register_ret=%d src0=%#x bytes0=%d",
+                    identity["pid"], identity["device"], identity["tp_rank"], identity["handshake_port"],
+                    identity["live_rpc_port"], identity["engine_object"], extent["pointer"], extent["nbytes"],
+                    identity["arena_register_result"], descriptor.buffers[0].pointer, descriptor.buffers[0].nbytes)
             return dict(status="READY", descriptor=descriptor.to_dict(),
-                        registered_extent=dict(self.arena.registered_extent))
+                        registered_extent=dict(self.arena.registered_extent),
+                        source_identity=identity)
 
     def discard_unrequested(self, request_ids):
         with self.lock:
@@ -242,6 +285,12 @@ class LegacyTailBridge:
             _require(all(base <= b.pointer and b.pointer + b.nbytes <= base + length
                          for b in descriptor.buffers), "Source descriptor is outside its registered arena")
             _require(metadata.get("engine_id") == peer["remote_engine_id"], "BF16 source engine identity mismatch")
+            source = response.get("source_identity", {})
+            _require(source.get("arena_register_result") == 0 and
+                     source.get("handshake_port") == peer["remote_handshake_port"] and
+                     source.get("live_rpc_port") == metadata.get("te_rpc_port"),
+                     "RECENT128_PD_SOURCE_PROVENANCE_MISMATCH: source registration/control engine differ")
+            peer["recent128_source_identity"] = source
             plan["peers"][key] = (peer, metadata, descriptor)
 
     def exchange(self, thread, peer, command):
@@ -264,6 +313,22 @@ class LegacyTailBridge:
             if sock is not None:
                 thread._return_remote_socket(sock, host, port)
 
+    def selected_session(self, thread, peer, metadata):
+        # Compare THIS exact native peer, not another TP rank's log line.
+        remote_engine, remote_handshake = peer["remote_engine_id"], peer["remote_handshake_port"]
+        with thread.remote_metadata_lock:
+            native_rpc = thread.remote_te_port.get(remote_engine, {}).get(remote_handshake)
+        if native_rpc is None:
+            thread._get_remote_metadata(peer["remote_host"], remote_handshake)
+            with thread.remote_metadata_lock:
+                native_rpc = thread.remote_te_port[remote_engine][remote_handshake]
+        identity = peer["recent128_source_identity"]
+        _require(native_rpc == metadata["te_rpc_port"] == identity["live_rpc_port"],
+            "RECENT128_PD_SELECTED_PEER_RPC_MISMATCH " +
+            f"handshake={remote_handshake} native_rpc={native_rpc} " +
+            f"control_rpc={metadata['te_rpc_port']} source_live_rpc={identity['live_rpc_port']}")
+        return f"{peer['remote_host']}:{native_rpc}"
+
     def finish_receive(self, thread, request_id):
         with self.lock:
             if request_id in self.completed:
@@ -274,7 +339,10 @@ class LegacyTailBridge:
             # local-layer tail; retain every source until the final import.
             peer, metadata, descriptor = next(iter(plan["peers"].values()))
             state = self.state()
-            session = f"{peer['remote_host']}:{metadata['te_rpc_port']}"
+            session = self.selected_session(thread, peer, metadata)
+            native_rpc = metadata["te_rpc_port"]
+            remote_handshake = peer["remote_handshake_port"]
+            source_identity = peer["recent128_source_identity"]
             _require(self.arena is not None, "Destination BF16 arena was not registered at startup")
             _require(descriptor.layer_keys == frozenset(state.layers), "BF16 source must cover every local layer")
             slot_key = (request_id, descriptor.nonce)
@@ -285,11 +353,18 @@ class LegacyTailBridge:
                              for tensor, buffer in zip(arrays, descriptor.buffers)),
                          "Destination payload escaped startup registration")
                 try:
+                    _LOGGER.info("RECENT128_PD_READ_BEGIN pid=%d device=%s remote=%s handshake=%d native_rpc=%d "
+                        "source_pid=%d source_tp=%d source_rpc=%d src0=%#x dst0=%#x bytes0=%d buffers=%d",
+                        os.getpid(), state.device, session, remote_handshake, native_rpc,
+                        source_identity["pid"], source_identity["tp_rank"], source_identity["live_rpc_port"],
+                        descriptor.buffers[0].pointer, arrays[0].data_ptr(),
+                        descriptor.buffers[0].nbytes, len(arrays))
                     result = self.worker.engine.batch_transfer_sync_read(session,
                         [buffer.pointer for buffer in descriptor.buffers],
                         [tensor.data_ptr() for tensor in arrays],
                         [buffer.nbytes for buffer in descriptor.buffers])
                     _require(type(result) is int and result == 0, "BF16 registered-arena RDMA read failed: " + repr(result))
+                    _LOGGER.info("RECENT128_PD_READ_END pid=%d remote=%s ret=%d", os.getpid(), session, result)
                 except BaseException:
                     self.failed_reads += 1
                     # A failed transport may still own the destination slot.
@@ -337,13 +412,49 @@ def install_worker_hooks(module=None):
     if getattr(worker_cls, "_recent128_tail_transport", False):
         return
     original_init = worker_cls.__init__
+
+    def ensure_early_arena(worker):
+        if worker is None or not is_serving_config(worker.vllm_config):
+            return
+        bridge = getattr(worker, "_recent128_tail_bridge", None)
+        if bridge is None:
+            bridge = worker._recent128_tail_bridge = LegacyTailBridge(worker)
+        _BRIDGES[id(worker.vllm_config)] = bridge
+        # The exact c09 worker constructs connectors after model weight loading.
+        # Do this before Multi starts constructing its Store sibling: Store
+        # setup may already establish links on the shared transfer engine.
+        fresh = getattr(bridge, "arena", None) is None
+        bridge.prepare_arena()
+        if fresh:
+            _LOGGER.info("RECENT128_PD_EARLY_ARENA pid=%d before_store_constructor=1", os.getpid())
+
     @wraps(original_init)
     def init(worker, *args, **kwargs):
         original_init(worker, *args, **kwargs)
-        if is_serving_config(worker.vllm_config):
-            bridge = worker._recent128_tail_bridge = LegacyTailBridge(worker)
-            _BRIDGES[id(worker.vllm_config)] = bridge
+        ensure_early_arena(worker)
     worker_cls.__init__ = init
+
+    facade_cls = getattr(module, "MooncakeConnector", None)
+    if facade_cls is not None:
+        original_facade_init = facade_cls.__init__
+        original_facade_setattr = facade_cls.__setattr__
+
+        @wraps(original_facade_setattr)
+        def facade_setattr(connector, name, value):
+            original_facade_setattr(connector, name, value)
+            if name == "connector_worker" and value is not None:
+                # First installation can happen inside the original worker
+                # constructor, after the original facade constructor entered.
+                # Its next assignment still dispatches through this new slot.
+                ensure_early_arena(value)
+
+        @wraps(original_facade_init)
+        def facade_init(connector, *args, **kwargs):
+            original_facade_init(connector, *args, **kwargs)
+            ensure_early_arena(getattr(connector, "connector_worker", None))
+
+        facade_cls.__setattr__ = facade_setattr
+        facade_cls.__init__ = facade_init
 
     original_register = worker_cls.register_kv_caches
     @wraps(original_register)
