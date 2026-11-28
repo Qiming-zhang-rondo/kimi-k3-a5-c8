@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-28 11:52",
+  "status": "VARIANT_COMPILE_SUCCESS",
+  "milestone": "PROLOG_V3 + inline ring Writer variant compiled successfully",
+
+  "variant_details": {
+    "library": "libprolog_direct.so (547KB, clean rebuild)",
+    "ring_write_call_confirmed": "recent128Writer_ count=5 (declaration + setter + null_check + ResolveRow + WriteLatentSlice)",
+    "write_point": "RmsNormAndQuantizeCkv implementation, after DataSyncBarrier<MemDsbT::UB>(), before if constexpr (isPertile)",
+    "vec_guard": "All Writer code guarded by __DAV_C310_VEC__ (CUBE pass unaffected)",
+    "kernel_signature": "Original params + 12 recent128 params (8 GM addresses + 4 scalars)"
+  },
+
+  "fixes_applied_during_integration": [
+    "1. event_t → TEventID (AllocEventID return type)",
+    "2. Writer code VEC-guarded (was compiled in CUBE pass causing namespace not found)",
+    "3. Ring write call force-added after initial integration missed it (count was 2, now 5)"
+  ],
+
+  "integration_structure": {
+    "kernel_entry": "TPipe + Writer creation (VEC guarded) + op.Init + SetRingWriter (VEC guarded) + op.Process + Writer.Release",
+    "kernel_class": "Writer member (VEC guarded) + SetRingWriter method (VEC guarded) + ring write call in RmsNormAndQuantizeCkv (VEC guarded)",
+    "writer_header": "prolog_ring_write_device.h from Codex 462ee16 (fixed event_t → TEventID)"
+  },
+
+  "next_steps": [
+    "1. Device test OFF mode (should be byte-identical to baseline)",
+    "2. Device test ON mode (ring write verification)",
+    "3. Register as cloud_mla_prolog_v3_recent128 in cloud_ops_turbo with recent128_abi_version=1",
+    "4. Production service integration + GPQA accuracy test"
+  ]
+}
