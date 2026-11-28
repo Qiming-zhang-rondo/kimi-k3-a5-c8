@@ -98,7 +98,10 @@ def _default_kernel_factory():
                              LATENT_ROW: tl.constexpr, LATENT_COL: tl.constexpr,
                              ROPE_ROW: tl.constexpr, ROPE_COL: tl.constexpr):
         token = tl.program_id(0)
-        valid = tl.load(Valid + token)
+        # Some Ascend Triton builds expose torch.bool GM storage as a byte.
+        # Normalize its element type before bitwise predicates: every where,
+        # load mask and store mask below must stay int1, including scalar tags.
+        valid = tl.load(Valid + token) != 0
         bank = tl.load(Banks + token).to(tl.int64)
         position = tl.load(Positions + token)
         epoch = tl.load(Epochs + token)

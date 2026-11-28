@@ -26,11 +26,17 @@ def fixture(torch, phase):
     source = bits.to(torch.int16).view(torch.bfloat16)
     rows = torch.arange(TOKENS, dtype=torch.int64)
     requests = rows // MAX_QUERY
-    return dict(source=source,
+    data = dict(source=source,
         banks=((requests * 3 + phase) % POOLS).to(torch.int32),
         positions=254 + rows % MAX_QUERY + phase * CAPACITY,
         epochs=100 + requests + phase * 1000,
         valid=(rows % 7 != phase % 7))
+    # Validity alone must never authorize an invalid destination. These rows
+    # deliberately remain valid=True while each addressing predicate fails.
+    data["banks"][1], data["banks"][2] = -1, POOLS
+    data["positions"][3], data["epochs"][4] = -1, -1
+    data["valid"][1:5] = True
+    return data
 
 
 def expected_ring(torch, data, phase):
@@ -43,6 +49,8 @@ def expected_ring(torch, data, phase):
         if not bool(data["valid"][row]):
             continue
         bank, position = int(data["banks"][row]), int(data["positions"][row])
+        if not 0 <= bank < POOLS or position < 0 or int(data["epochs"][row]) < 0:
+            continue
         slot = position % CAPACITY
         latent[bank, slot].copy_(data["source"][row, :512])
         rope[bank, slot].copy_(data["source"][row, 512:])

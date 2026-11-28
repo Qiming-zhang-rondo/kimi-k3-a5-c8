@@ -2,6 +2,12 @@
 
 ## 当前70669eb：已经有真实Native/CP候选代码，按此验证
 
+最新3c6f55b的mask类型修复已合入实际kernel：`valid = tl.load(Valid + token) != 0`。
+“boolean scalar type”指元素dtype不是布尔，不是标量形状不能广播；显式vector广播不解决int8类型。
+同一布尔`writable`控制where、两路load和四路store，包括标量tags。保留标量布尔mask，依接口自动广播。
+小型writer fixture也包含valid=True但bank越界/position负数/epoch负数，验证不会非法写入。
+先重跑相同writer eager/Graph，不为这个编译类型问题重新加载模型。主框架包的同步必须包含修正后的native_writer.py。
+
 本轮首请求停在`lane.binding`：全局runner行数与DSACP本rank query行数不同。
 本次提交补了实际代码，**不要继续安装2fb7562中`.modified`占位文件**：
 
