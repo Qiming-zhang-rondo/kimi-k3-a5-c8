@@ -1,3 +1,15 @@
+# 当前阶段：补齐 P→D BF16 尾窗，核实当前 worker
+
+内网 agent 直接执行 [PD_TAIL_INTEGRATION_TASK](framework_integration/PD_TAIL_INTEGRATION_TASK.md)。本轮交付可执行身份采集、实际 worker 诊断入口、PD传输核心和worker导入助手；实际Mooncake backend hook尚未接线，D的非零起点错误不能宣布已解决。
+
+先在实际P、D环境解析真实connector（不加载模型），有既有worker RPC则一次刷新当前状态。只推脱敏小摘要，不再让用户搬类名或上传私有源码。793a514的producer/read零计数来自旧PID/旧文件，不能判断后续请求；Graph Python计数不是replay计数。
+
+保留已成功attention/kernel、MXFP4主cache、QLI、Graph/MTP/APC/并发及原P/D配置。无需为了身份采集重启服务；实际适配候选明确验证后再沿既有流程部署。此前性能/GPQA任务继续有效，但先解决真实PD/APC链。
+
+---
+
+以下为前一阶段冻结评测要求；以顶部的新任务为当前入口。
+
 # 当前阶段：冻结已成功版本，测性能/GPQA并收齐适配缺口
 
 用户已确认第二次bool修复后推理成功，并明确不为新推送重装。本次提交仅文档，不改变runtime；不重写kernel，不重启当前服务做文档同步。最新d3bf7b9的类型求助属于此前材料，不覆盖后续成功结论。

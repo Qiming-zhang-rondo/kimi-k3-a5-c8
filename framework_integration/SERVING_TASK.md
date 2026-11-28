@@ -1,5 +1,12 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口：处理 74dee986 的 D 尾窗缺失与 793a514 的旧诊断疑问
+
+先执行 [PD_TAIL_INTEGRATION_TASK](PD_TAIL_INTEGRATION_TASK.md)，一次采集实际P/D connector身份和可取得的真实worker状态；用户无需再搬类名。
+本轮新增传输核心、worker导入和只读身份工具，不替换已经成功的attention/kernel；实际Mooncake hook尚未接线，不能宣布D已修好。
+793a514的零计数来自旧PID/时间文件，文件非实时更新，Graph replay不经过每次Python计数；通过真实worker的显式flush核实，不加每层推理日志。
+下方冻结性能/GPQA任务在真实PD/APC链验证后继续；本次明确的D失败优先修复，不关闭功能回避。
+
 ## 当前阶段：冻结已成功推理版本，验证剩余适配并测性能/GPQA
 
 用户确认第二次bool修复后推理成功，明确先不为新提交重装。执行 [BENCHMARK_GPQA_TASK](BENCHMARK_GPQA_TASK.md)，
