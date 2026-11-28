@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-28 17:27",
+  "status": "BOTH_NODES_FACTORY_RESOLVED",
+  "finding": "Both P and D nodes use the SAME connector: AscendMultiConnector",
+
+  "connector_identity": {
+    "module": "vllm_ascend.distributed.kv_transfer.ascend_multi_connector",
+    "class": "AscendMultiConnector",
+    "sha256": "300fb9de9259ffc16f2680bcab0fb5b075ddb6f98c187639e511e8f1a703a2c7",
+    "file": "/home/ma-user/AscendCloud/vllm-ascend-c09d3e20b9c45c80b34ae3781440d90904a44023/vllm_ascend/distributed/kv_transfer/ascend_multi_connector.py",
+    "wraps": ["MooncakeConnectorV1", "AscendStoreConnector"],
+    "key_methods": [
+      "register_kv_caches(self, kv_caches)",
+      "build_connector_worker_meta(self)",
+      "update_connector_output(self, connector_output)",
+      "start_load_kv(self, forward_context, **kwargs)",
+      "get_finished(self, finished_req_ids)",
+      "request_finished(self, request, blocks)"
+    ]
+  },
+
+  "d_node": {
+    "status": "PD_FACTORY_RESOLVED_NOT_LIVE_WORKER",
+    "kv_role": "kv_consumer",
+    "connector": "same as above"
+  },
+  "p_node": {
+    "status": "PD_FACTORY_RESOLVED_NOT_LIVE_WORKER",
+    "kv_role": "kv_producer",
+    "connector": "same as above"
+  },
+
+  "environment_requirements": {
+    "VLLM_PLUGINS": "ascend_vllm,modelarts_ascend_kv_connector,ascend_model_loader,ascend_service_profiling,ascend_model,modelarts_general_plugin_patch",
+    "PYTHONPATH": "/tmp/mxllm-split4-experiment added",
+    "overlay_files": 23,
+    "engine_json": "must include kv_transfer_config with MultiConnector + MooncakeConnectorV1 + AscendStoreConnector"
+  },
+
+  "next_step": "Wire the BF16 tail transfer through AscendMultiConnector's existing methods (register_kv_caches, start_load_kv, get_finished, request_finished). This is the actual adapter target, NOT a bare MooncakeConnector."
+}
