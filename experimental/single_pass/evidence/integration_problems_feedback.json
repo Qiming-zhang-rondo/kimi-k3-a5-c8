@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-28 12:00",
+  "type": "COMPREHENSIVE_ENGINEERING_FEEDBACK",
+  "summary": "6 avoidable problems during PROLOG Writer integration caused by vague/incomplete instructions. Each problem cost a debugging round. Codex instructions need to be precise about types, compilation contexts, and expected verification states.",
+
+  "problems_and_solutions": [
+
+    {
+      "problem": "1. event_t vs TEventID type mismatch",
+      "symptom": "assigning to 'event_t' from incompatible type 'AscendC::TEventID' (aka 'signed char')",
+      "root_cause": "prolog_ring_write_device.h (Codex-delivered) declares event IDs as 'event_t' but TPipe::AllocEventID returns 'TEventID'. The header was never compiled against the actual SDK.",
+      "solution": "Changed event_t to TEventID in both member variables and Fence function parameter",
+      "codex_should_have": "Test-compiled the delivered header against CANN 9.2.1 before delivering. Or documented: 'AllocEventID returns TEventID, use TEventID not event_t'"
+    },
+
+    {
+      "problem": "2. VEC guard missing — Writer namespace not found in CUBE pass",
+      "symptom": "use of undeclared identifier 'QsfaPrologRingWrite'",
+      "root_cause": "Writer header is guarded by #if __DAV_C310_VEC__ (VEC pass only). But PROLOG kernel is MIX_AIC (compiled in BOTH CUBE and VEC passes). Integration code referenced Writer in both passes without VEC guard.",
+      "solution": "Added VEC guard (#if defined(__DAV_C310_VEC__)) around all Writer references in kernel entry and header",
+      "codex_should_have": "PROLOG_INLINE_INTEGRATION.md should explicitly state: 'The Writer namespace only exists in VEC pass. ALL references in the mixed kernel MUST be wrapped in #if defined(__DAV_C310_VEC__) guards. Here is the exact guard pattern.'"
+    },
+
+    {
+      "problem": "3. Ring write call missing from initial integration",
+      "symptom": "recent128Writer_ count=2 (only declaration + setter, no actual write call in RmsNormAndQuantizeCkv)",
+      "root_cause": "Integration script added Writer member and setter but the WRITE CALL at the write point was never inserted. Detection was fooled by a 'Recent128 ring write' COMMENT string elsewhere in the file.",
+      "solution": "Force-added write call after DataSyncBarrier in RmsNormAndQuantizeCkv. Verified with recent128Writer_ count=5 (declaration + setter + null_check + ResolveRow + WriteLatentSlice)",
+      "codex_should_have": "Integration instructions should include VERIFICATION STEPS: 'After integration, grep count of recent128Writer_ must be >= 5. If < 5, the write call is missing.' Also provide the exact code block to insert."
+    },
+
+    {
+      "problem": "4. LoadDataRepeatParam 4-arg vs 3-arg (old vs new API)",
+      "symptom": "LoadDataRepeatParam constructor requires 3 arguments, but 4 were provided",
+      "root_cause": "Source has #if ASC_DEVKIT_VERSION_NUM >= 90000000 conditional. Standalone compilation doesn't define this macro, so old API branch was taken. Old API takes 4 args, current SDK's struct takes 3.",
+      "solution": "Removed conditional, directly used new API SetLoadDataRepeatWithStride({0, 1, 0, dstStride})",
+      "codex_should_have": "Staging tool should handle ALL version conditionals in the source. Or document: 'ASC_DEVKIT_VERSION_NUM is not defined in standalone compilation. The source has version conditionals that need manual resolution. List of known conditionals: [this one]'"
+    },
+
+    {
+      "problem": "5. ASCENDC_TPL_MIX_AIC_1_1 value not provided",
+      "symptom": "use of undeclared identifier 'ASCENDC_TPL_MIX_AIC_1_1'",
+      "root_cause": "Staging manifest listed 'remaining_template_symbol_tokens_to_verify' but provided NO VALUES. We had to find the value (=4, same as KERNEL_TYPE_MIX_AIC_1_1) ourselves from the bisheng compiler header.",
+      "solution": "Created qsfa_device_template_constants.h with ASCENDC_TPL_MIX_AIC_1_1=4 and other constants",
+      "codex_should_have": "Manifest should provide actual values: 'ASCENDC_TPL_MIX_AIC_1_1 = 4 (= KERNEL_TYPE_MIX_AIC_1_1 from __clang_cce_aicore_functions.h)'. Not just list symbol names."
+    },
+
+    {
+      "problem": "6. Build cache produced false success",
+      "symptom": "Build reported SUCCESS but .so timestamp unchanged (used cached .o from previous build)",
+      "root_cause": "cmake --build detected changed source but the incremental build may not always recompile correctly after our file modifications. The .so was stale.",
+      "solution": "rm -rf build && full clean rebuild. Verified fresh compilation with [50%] Building ASC object line in output.",
+      "codex_should_have": "Build instructions should include: 'After source modifications, ALWAYS do clean rebuild (rm -rf build && cmake ... && cmake --build). Verify .so timestamp is fresh. Check for [50%] Building line in output to confirm actual compilation occurred.'"
+    }
+  ],
+
+  "request": "Future instructions MUST include:",
+  "requirements": [
+    "1. Exact types (not approximations): 'use TEventID not event_t'",
+    "2. Compilation context guards: 'this code MUST be wrapped in VEC guard, here is the exact guard pattern'",
+    "3. Verification steps after each integration: 'grep count must be N, if not then X is missing'",
+    "4. Actual values for all symbols (not just names): 'CONSTANT = 4 from specific header'",
+    "5. Known SDK version incompatibilities in source conditionals and their resolutions",
+    "6. Build verification: 'check .so timestamp, confirm [Building] line in output'",
+    "7. Complete code blocks to insert (not descriptions of what to insert)"
+  ]
+}
