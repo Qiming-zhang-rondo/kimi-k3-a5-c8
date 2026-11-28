@@ -38,7 +38,11 @@ KR64从真实post-RoPE输出另路捕获；不要把K和KR视为同一个inputLo
 本项目的`sfa_recent128.prolog_provider`提供OFF透明直通、ON元数据校验和明确的能力检查；
 新公共Python入口约定为`cloud_ops_turbo.cloud_mla_prolog_v3_recent128`，这是**待内网实现的新接口**，不是声称旧包已有。
 新函数对象声明`recent128_abi_version=1`，不存在/不匹配时直接报错，不能回退NATIVE或拿反量化结果伪装。
-它接收原Prolog9个位置参数和原kwargs，新增以下明确sidecar参数；原参数与五个query输出不改变：
+它接收原Prolog参数和新增sidecar参数；原参数与五个query输出不改变。
+serving路由按已审阅Cloud源的9个参数名称，将这些值与原kwargs合并后全部以keyword传给新provider，
+因此新Pythonwrapper必须接受原字段名称，不能按Torch/C++的不同位置顺序重新解读它们。
+显式None是原值，不能过滤；重复原字段是错误，不能选择一方覆盖。直接调用者未提供源名称合同时仍保留旧位置调用方式。
+新增sidecar合同如下：
 
 | 参数 | 合同 |
 | --- | --- |

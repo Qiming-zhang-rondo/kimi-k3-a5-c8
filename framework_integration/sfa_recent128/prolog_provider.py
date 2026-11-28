@@ -106,12 +106,38 @@ def validate_ring_binding(token_x, ring):
         validation="shape/dtype/device/contiguity only; device contents remain vendor responsibility")
 
 
-def call_prolog_with_ring(original, args, kwargs, ring=None, module=None):
+def _named_prolog_arguments(args, kwargs, positional_names):
+    """Name values from the reviewed SOURCE contract, never a new wrapper order.
+
+    There is no winner for duplicate arguments. Explicit None is a value and
+    remains distinct from an absent keyword. This inspects no tensor contents
+    and performs no signature reflection in the per-layer hot path.
+    """
+    _require(isinstance(positional_names, (tuple, list))
+             and len(positional_names) == len(args)
+             and all(isinstance(name, str) and name.isidentifier() for name in positional_names)
+             and len(set(positional_names)) == len(positional_names)
+             and positional_names[0] == "token_x",
+             "Prolog positional_names must be unique original argument names matching args, starting with token_x")
+    reserved = set(positional_names).intersection(PROVIDER_KEYWORDS)
+    _require(not reserved, "Prolog positional_names contain reserved Recent128 keywords: "
+             + ", ".join(sorted(reserved)))
+    duplicates = set(positional_names).intersection(kwargs)
+    _require(not duplicates, "Duplicate original Prolog arguments: " + ", ".join(sorted(duplicates)))
+    named = dict(zip(positional_names, args))
+    named.update(kwargs)
+    return named
+
+
+def call_prolog_with_ring(original, args, kwargs, ring=None, module=None, *, positional_names=None):
     """OFF passes straight through; ON requires the exact new vendor variant.
 
     No existing operator is relabelled as the new producer. There is no fallback
     to C4 dequantization, NATIVE projection or a separate attention operation.
     Return the vendor's original five-element tuple/list object unchanged.
+    The serving route supplies positional_names from its reviewed source
+    contract, so the new provider receives original arguments by name. Direct
+    callers without that contract retain the existing positional convention.
     """
     if ring is None:
         return original(*args, **kwargs)
@@ -120,6 +146,8 @@ def call_prolog_with_ring(original, args, kwargs, ring=None, module=None):
     _require(isinstance(kwargs, dict), "original PrologV3 kwargs must be a dictionary")
     conflicts = set(PROVIDER_KEYWORDS).intersection(kwargs)
     _require(not conflicts, "Recent128 keyword collision: " + ", ".join(sorted(conflicts)))
+    extended = (dict(kwargs) if positional_names is None else
+                _named_prolog_arguments(args, kwargs, positional_names))
     validate_ring_binding(args[0], ring)
     if module is None:
         module = importlib.import_module("cloud_ops_turbo")
@@ -128,10 +156,10 @@ def call_prolog_with_ring(original, args, kwargs, ring=None, module=None):
     marker = getattr(provider, "recent128_abi_version", None)
     _require(type(marker) is int and marker == PROVIDER_ABI,
              PROVIDER_NAME + ".recent128_abi_version must be integer 1")
-    extended = dict(kwargs)
     extended.update({name: getattr(ring, name) for name in RING_KEYWORDS})
     extended["recent_window"] = RECENT_WINDOW
-    result = provider(*args, **extended)
+    result = (provider(*args, **extended) if positional_names is None else
+              provider(**extended))
     _require(isinstance(result, (tuple, list)) and len(result) == 5,
              "Recent128 provider must return exactly five original query outputs")
     return result

@@ -45,7 +45,7 @@ def fixtures():
         _expected_kr_cache_shape=lambda kv,rope:(0,kv.shape[1],kv.shape[2],rope.shape[-1]))
     vendor=SimpleNamespace(cloud_mla_prolog_v3_recent128=candidate)
     kwargs={name:Tensor((4,7168)) if name=="token_x" else object() for name in names}
-    kwargs.update(kv_cache=Tensor((32,128,1,400)),kr_cache=Tensor((0,128,1,64)),rope_cos=Tensor((4,64)),
+    kwargs.update(kv_cache=Tensor((32,128,1,400)),kr_cache=Tensor((0,128,1,64)),rope_cos=Tensor((4,64)),rope_sin=None,
         k_nope_clip_alpha=object(),kv_cache_quant_mode=3,ckvkr_repo_mode=0,quant_scale_repo_mode=0,tile_size=64)
     return patch,vendor,kwargs,original_calls,producer_calls,output
 
@@ -70,7 +70,9 @@ class ServingPrologTest(unittest.TestCase):
         self.assertIs(actual,output);self.assertEqual(state.provider_calls,1)
         self.assertFalse(old);self.assertEqual(len(new),1);self.assertEqual(kwargs,before)
         args,extra=new[0]
-        self.assertIs(args[0],kwargs["token_x"]);self.assertIs(args[7],kwargs["kv_cache"]);self.assertIs(args[8],kwargs["kr_cache"])
+        self.assertEqual(args,())
+        for name in patch._CLOUD_PROLOG_POSITIONAL_ARGS:self.assertIs(extra[name],kwargs[name])
+        self.assertIsNone(extra["rope_sin"])
         self.assertEqual((extra["kv_cache_quant_mode"],extra["ckvkr_repo_mode"],extra["quant_scale_repo_mode"],extra["tile_size"]),(4,1,1,128))
         self.assertNotIn("k_nope_clip_alpha",extra)
         self.assertIs(extra["recent_latent"],binding.recent_latent)
@@ -83,8 +85,39 @@ class ServingPrologTest(unittest.TestCase):
         routing.install_prolog_route(patch,vendor)
         with routing.prolog_scope(object(),ring()):patch._call_mxfp4_cloud_prolog(kwargs)
         self.assertEqual(len(dummy.allocations),1)
-        self.assertEqual(new[0][0][8].shape,(0,128,1,64))
+        self.assertEqual(new[0][0],())
+        self.assertEqual(new[0][1]["kr_cache"].shape,(0,128,1,64))
         self.assertIs(kwargs["kr_cache"],dummy)
+
+    def test_explicit_wrapper_with_trig_before_cache_binds_source_names_once(self):
+        patch,vendor,kwargs,old,new,output=fixtures()
+        captured=[]
+        # Explicit 32-parameter Python wrapper fixture: forwarding nine source
+        # positional values would bind cache tensors to rope_sin/rope_cos.
+        def candidate(token_x,weight_dq,weight_uq_qr,weight_uk,weight_dkv_kr,
+                      rmsnorm_gamma_cq,rmsnorm_gamma_ckv,rope_sin=None,rope_cos=None,
+                      kv_cache=None,kr_cache=None,cache_index=None,dequant_scale_x=None,
+                      dequant_scale_w_dq=None,dequant_scale_w_uq_qr=None,dequant_scale_w_uk=None,
+                      query_norm_flag=True,kv_cache_quant_mode=4,ckvkr_repo_mode=1,
+                      quant_scale_repo_mode=1,tile_size=128,recent_latent=None,recent_rope=None,
+                      recent_position_tags=None,recent_epoch_tags=None,token_ring_slots=None,
+                      token_positions=None,token_request_epochs=None,token_valid=None,
+                      max_query_per_request=None,recent_window=None,rmsnorm_epsilon=1e-6):
+            captured.append(dict(locals()));return output
+        candidate.recent128_abi_version=1
+        vendor.cloud_mla_prolog_v3_recent128=candidate
+        kwargs.update(cache_index=None,dequant_scale_x=None,query_norm_flag=False)
+        before=dict(kwargs);binding=ring()
+        routing.install_prolog_route(patch,vendor)
+        with routing.prolog_scope(object(),binding) as state:
+            actual=patch._call_mxfp4_cloud_prolog(kwargs)
+        self.assertIs(actual,output);self.assertEqual(state.provider_calls,1)
+        self.assertFalse(old);self.assertEqual(len(captured),1)
+        for name in patch._CLOUD_PROLOG_POSITIONAL_ARGS:self.assertIs(captured[0][name],kwargs[name])
+        for name in ("rope_sin","rope_cos","cache_index","dequant_scale_x","query_norm_flag"):
+            self.assertIs(captured[0][name],kwargs[name])
+        self.assertIs(captured[0]["recent_latent"],binding.recent_latent)
+        self.assertEqual(kwargs,before)
 
     def test_nested_off_exception_restoration_and_context_isolation(self):
         patch,vendor,kwargs,old,new,output=fixtures();routing.install_prolog_route(patch,vendor)
@@ -116,6 +149,16 @@ class ServingPrologTest(unittest.TestCase):
         with routing.prolog_scope(object(),ring()):patch._call_mxfp4_cloud_prolog(kwargs)
         self.assertEqual(len(new),1)
         self.assertFalse(old)
+
+    def test_reordered_source_adapter_contract_is_rejected_before_routing(self):
+        patch,vendor,kwargs,old,new,output=fixtures()
+        names=list(patch._CLOUD_PROLOG_POSITIONAL_ARGS)
+        names[1],names[2]=names[2],names[1]
+        patch._CLOUD_PROLOG_POSITIONAL_ARGS=tuple(names)
+        original=patch._call_mxfp4_cloud_prolog
+        with self.assertRaises(PrologProviderError):routing.install_prolog_route(patch,vendor)
+        self.assertIs(patch._call_mxfp4_cloud_prolog,original)
+        self.assertFalse(old);self.assertFalse(new)
 
 
 if __name__=="__main__":unittest.main()

@@ -21,6 +21,9 @@ _MARKER = "_sfa_recent128_serving_prolog_route"
 _ORIGINAL = "_sfa_recent128_original_prolog_call"
 _PROVIDER_STATE = "_sfa_recent128_provider_state"
 _ACTIVE = ContextVar("sfa_recent128_active_prolog", default=None)
+_REVIEWED_CLOUD_PROLOG_POSITIONAL_ARGS = (
+    "token_x", "weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr",
+    "rmsnorm_gamma_cq", "rmsnorm_gamma_ckv", "kv_cache", "kr_cache")
 
 
 @dataclass
@@ -75,8 +78,8 @@ def _provider_capability(module, required):
 
 def _source_contract(module):
     names = getattr(module, "_CLOUD_PROLOG_POSITIONAL_ARGS", None)
-    if (not isinstance(names, (tuple, list)) or len(names) != 9 or names[0] != "token_x"
-            or len(set(names)) != len(names) or "kv_cache" not in names or "kr_cache" not in names):
+    if (not isinstance(names, (tuple, list))
+            or tuple(names) != _REVIEWED_CLOUD_PROLOG_POSITIONAL_ARGS):
         raise PrologProviderError("MXLLM Prolog positional contract differs from the reviewed nine-argument adapter")
     normalized = {}
     for key, source, expected in (
@@ -149,7 +152,7 @@ def install_prolog_route(patch_module=None, provider_module=None, *, require_pro
                 return original(prolog_kwargs)
             args, kwargs = _normalized_arguments(module, prolog_kwargs, names, mode_kwargs)
             result = call_prolog_with_ring(None, args, kwargs, ring=active.binding,
-                                          module=provider_state["module"])
+                                          module=provider_state["module"], positional_names=names)
             active.provider_calls += 1
             return result
 

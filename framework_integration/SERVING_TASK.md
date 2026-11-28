@@ -1,5 +1,38 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口 52db594：修复Python参数转发，不重编内核
+
+本次首错是`cloud_mla_prolog_v3_recent128() got multiple values for argument 'rope_sin'`，
+发生在Python绑定参数阶段，还没进入这个provider的计算。报告的“原调用30多个位置参数和关键字重复”与已审阅代码不符：
+上游Torch调用全按名称，MXLLM Cloud适配器只把以下9项取为位置参数：
+
+```python
+("token_x", "weight_dq", "weight_uq_qr", "weight_uk", "weight_dkv_kr",
+ "rmsnorm_gamma_cq", "rmsnorm_gamma_ckv", "kv_cache", "kr_cache")
+```
+
+`rope_sin/rope_cos`留在kwargs，不在这9项中。若新wrapper第8/9位置采用Torch的rope顺序，就会出现本次冲突；
+私有wrapper内部适配或部署源码漂移也需在内网核实，不能仅按报告断言是哪一层。
+
+公共修复已在serving route提供完整的原9项参数名称，`call_prolog_with_ring`据此命名后
+**只调用`provider(**完整命名参数)`**。新wrapper的物理形参顺序不再决定这9项的含义。
+它保留所有原kwargs及显式None，不根据新wrapper顺序重新猜映射，也不做signature反射/设备操作。
+重复原参数明确拒绝，没有“关键字优先”“None当缺省”的规则；OFF仍调用原MXLLM分支。
+
+内网一次执行：
+
+1. 在现有隔离框架安装中同步本轮`prolog_provider.py`和`serving_prolog.py`，确认工作进程实际import该路径，启动新worker。
+   使用既有overlay安装流程；不升级SDK、不改成功的TBE/内核、不重编reader。
+2. 保留已安装私有provider，但撤销临时“按30多个位置推测/用None过滤/重复键覆盖”的merge补丁。
+   新入口接收原参数的同名keyword和ring keyword；若保留`*args, **kwargs`，本轮路由传入args为空。
+   内部继续按真实绑定/TBE声明转发，显式None原样保留；不能静默过滤未知字段或给旧op贴ABI标记。
+3. 先用实际wrapper做一次本地仅Python参数绑定对照（不launch、不上传私有签名）：
+   `kv_cache/kr_cache`与`rope_sin/rope_cos`身份对应原字段，原映射不被修改，ring绑定完整。
+   然后继续原producer OFF/ON控制与服务启动，记录实际首错；不重复已经完成的baseline构建。
+
+这次修改仅Python调用约定，无新增kernel、拷贝、设备同步或图内tensor分配；不作为完整服务性能已验收的证明。
+下面的安装与producer任务继续有效，旧章节只作背景。
+
 ## 当前入口 fd7a60d6：沿用两节点已安装的variant，完成真实调用对照
 
 最新提交只新增了汇总报告：称178/209均已安装variant，Python函数ABI=1已确认，TBE将在首次调用动态编译。

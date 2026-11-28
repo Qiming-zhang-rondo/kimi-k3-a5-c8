@@ -1,15 +1,9 @@
-# 当前任务：完成真实 Prolog recent128 调用，继续启动服务
+# 当前任务：修复Prolog命名参数转发，继续原服务启动
 
-最新同步到 `fd7a60d6`：报告称新版 Prolog 已安装在178/209，最终导出函数的 ABI=1 已确认，TBE 首次调用编译及真实 producer/服务结果仍待验证。这个提交仅增加汇总报告，不能从“已安装”推导出写环、Graph、APC 或 P/D 已通过。
+最新错误提交 `52db594`：Python wrapper 绑定时 rope_sin 重复，尚未进入该算子的计算。已审阅Cloud源只将9项转为位置参数，rope_sin/cos原本保留在kwargs；不能按报告猜测“30多个位置参数重复”并做覆盖合并。
 
-内网 agent 直接执行 [SERVING_TASK.md 当前入口](framework_integration/SERVING_TASK.md)。沿当前已经成功的私有 source、SDK、variant 和 wrapper，不重做 baseline、不重新 staging 旧源码、不重编已通过 reader，不再要求用户转发内部源码。
+本轮修复将9个值按原Cloud参数名称还原，与原kwargs合并后全部按名称传给新provider，避免新wrapper的形参顺序差异。显式None保留，真实重复键明确拒绝；OFF沿用原调用。15项相关宿主检查通过，包含会复现原冲突的不同参数顺序32参wrapper；不是A5/服务运行结果。
 
-本轮只做一条连续链：本地核实实际 latent/KR/tag 写入及原参数+新增12参数转发 → 现有 producer 入口的 OFF/ON 和 B1/B8/Graph 对照 → 继续原服务启动。已有安装入口不用另搭第二套 bridge；首次 TBE 动态编译也必须实际通过。保留并发8、Graph、MTP、APC/P-D原配置，自动 BF16 尾窗回填仍是已知接线项，不能静默关闭或回退C4。
+内网agent直接执行 [SERVING_TASK当前入口](framework_integration/SERVING_TASK.md) 的52db594章节：同步两份Python适配文件到现有隔离框架，启动新worker；撤销私有wrapper中临时按位置猜测/丢None/覆盖键的merge，按真实同名参数转发。沿用已安装variant，不升级CANN、不重编内核或reader、不重做baseline构建，也不要求用户搬私有源码。
 
-公共 helper 已修正 TEventID，补齐 VEC3510 guard 与函数 ABI 属性示例。12项本地检查通过（4 SDK工具、6调用审计、2 helper类型/行为），均非目标 SDK/A5 执行证明。
-
-- [inline Writer 接线说明](experimental/prolog_ring_smoke/PROLOG_INLINE_INTEGRATION.md)
-- [SDK 兼容性和真实符号核验](experimental/prolog_inplace_build/SDK_COMPATIBILITY.md)
-- [本地实际调用审计工具](tools/audit_prolog_writer_calls.py)：只读内网源码，排除注释/字符串，输出留内网；不是运行证明。
-
-已通过的11项独立批量 reader 对照保持有效；本轮不重跑它们，不再启动新的单算子性能扫描或真实激活采集。用户当前目标是拉起自研 MXFP4 主缓存+BF16 recent128 的框架服务，DSL 缓存迁移暂不实施。
+随后继续真实producer OFF/ON对照与原服务启动，保留并发8、Graph、MTP、APC和P/D配置。latent/KR/tag真实写入及BF16尾窗恢复仍按既有任务核验，不能因Python参数绑定通过就宣布服务精度/性能已完成。
