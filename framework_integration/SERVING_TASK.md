@@ -1,5 +1,33 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 最新 f23f328 / a139cb79：reader通过，集中完成真实Prolog和P/D
+
+已归档的11项独立 reader 对照（两轮）通过：B1Q1、B1Q4、B8Q4 的 eager/Graph，以及坏 epoch 锁存。
+B8 L2=0.00194345（eager/Graph phase0）、0.00195217（phase1），faults=0；仍未测 latency、原生量化器或完整服务。
+测试使用 current_npu_stream reader，不应把这些结果扩大为显式生产 execution lane、真实 MTP/APC/PD 也已验收。
+本阶段不再重复 reader smoke。
+
+Prolog直接执行 [inline writer集成任务](../experimental/prolog_ring_smoke/PROLOG_INLINE_INTEGRATION.md)。
+新 header 接受原 Prolog 已有的 LocalTensor，在同一次 launch 内旁路 BF16 写环；不是又写一个独立 kernel 去找 UB。
+真实私有 Prolog variant 的编译、接通和输出对照仍未完成，不能将公共 Python 适配或 helper 标为整个 producer 完成。
+
+**a139cb79 的长/短 prompt 分析必须纠正：长 prompt 的初始 decode 同样需要 P→D 尾窗。**
+令 L 为 prompt 长度，d 为 D 已经本地物化的新 KV token 数；本轮最后 query 的位置为 L+d-1。
+最近128窗口与 prompt 的交集 token 数为 min(L,max(0,128-d))。例如：
+
+| prompt L | D本地新KV数 d | 最近窗口中仍来自P的token数 |
+| --- | --- | --- |
+| 8192 | 1 | 127 |
+| 8192 | 4 | 124 |
+| 8192 | 127 | 1 |
+| 8192 | 128 | 0 |
+| 64 | 1 | 64 |
+
+具体 attention 只读取原 TopK 选中的 token；但不能预先假定它没有选中上述 prompt 尾部。
+因此无论 GPQA prompt 是否大于128，都必须保留 P→D 的实际 BF16 尾窗传输及完成通知。
+P保存并传输最后min(128,L)个prompt的latent/KR和tags，D收到完整尾窗后再允许首步读取；同时保留原C4传输。
+不把缺失 BF16 改为冷C4后仍称为完整 recent128，不以“只影响短prompt”延期这个已知缺口。
+
 ## 最新 434b09d：B1七项通过，修复清理上下文后只补跑B8
 
 实际 traceback 停在 B1Q4 的 reader.reset_faults，尚未进入 B8；不是多请求计算失败。
@@ -60,8 +88,8 @@ python experimental/single_pass/run_batched_smoke.py \
 | --- | --- | --- |
 | 原 MXFP4 主缓存 | 保留 packed400 写入和原 TopK 合同；OFF 不走新路径 | 真实新 Prolog ON/OFF 的 query、C4 packed/scale 尚无设备逐字节对照 |
 | 真实 PrologV3 | 公共调用适配、完整 ABI1、实际写点要求、已通过的独立 writer | 私有 producer variant 必须实际编译注册；独立 writer 不是 producer |
-| 并发8 | 稳定请求 bank/epoch、批量 TND reader、隔离路由；批量库已编译，B1Q1 eager 精度通过 | B8 尚未执行；不能外推 B1 或旧 P8 writer 成为并发 attention 已通过 |
-| Graph | 固定缓冲与显式 execution lane；独立 reader 的 B1Q1/B1Q4 Graph 已通过 | 所有 layer/lane/bucket 必须捕获前准备；B8和完整服务的动态 replay 尚未设备验证 |
+| 并发8 | 独立批量 TND reader 的B8Q4 eager/Graph/epoch控制已通过 | 合成reader不是完整vLLM并发服务验收，真实producer及调度还须联合验证 |
+| Graph | 独立 reader 的 B1Q1/B1Q4/B8Q4 Graph 已通过 | 所有 layer/lane/bucket 必须捕获前准备；生产execution lane和完整服务的动态 replay尚未验收 |
 | MTP | 修正后的 GPU 位置、draft lane 隔离、容量保护、事务 API | 完整接受/拒绝和提交链未验证；draft 层自己的历史 BF16 热窗来源仍须核实，不能拿 target 层就绪代替 |
 | APC / prefix cache | 实际 BF16 尾窗快照导出/导入 API | **尚未自动接通 prefix 命中、驱逐、抢占恢复。不是仅缺测试。** 非零位置新请求缺真实尾窗会报错 |
 | P/D | 实际尾窗导入及接收完成事件 API | **尚未接通 Mooncake 的 BF16 尾窗发送、接收和通知协议。不是仅缺测试。** C4 传输成功不足以证明 BF16 已到 |

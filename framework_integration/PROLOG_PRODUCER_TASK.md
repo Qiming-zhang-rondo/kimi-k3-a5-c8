@@ -1,13 +1,16 @@
 # Prolog热环：仅在内网实施，不再上传内部源码
 
+**本轮 f23f328 直接执行 [inline 集成任务](../experimental/prolog_ring_smoke/PROLOG_INLINE_INTEGRATION.md)。**
+B8 reader 已通过，不再写独立 producer 去找 UB 输入。选择已确定的 B 路线：在原 Prolog 的量化输入 UB 上侧路 BF16，直接写环。
+新增可复用 inline helper 为 `experimental/prolog_ring_smoke/prolog_ring_write_device.h`；不是新的 launch，不使用 FP32 GM 中转。
+先按任务完成原 entry/variant 的真实构建，随后一次完成 producer 小矩阵。以下旧阶段记录仅保留为写点/ABI参考，不能重复执行已经通过的 writer。
+
 最新 b25593fc 的完整独立 writer 已通过 A5 8/8 用例，DataCopy smoke 阶段结束。
 当前生产接入任务以 [SERVING_TASK.md](SERVING_TASK.md) 为准：保留并发8/Graph/MTP 等原生产配置，
 将已验证写法接入真实 Prolog variant，使用新 serving runtime + 批量 reader，不继续运行旧 accuracy_eager。
 下面保留原写点与 ABI 合同作为实施参考，旧提交的“尚未编译”记录不代表独立 writer 当前状态。
 
-最新ac8bef44的DataCopy smoke已由外部直接提供完整替换，不再猜参数。
-先按[独立writer说明](../experimental/prolog_ring_smoke/README.md)构建和执行本仓
-`experimental/prolog_ring_smoke`；其AIV隔离、显式事件和真实ring回读通过后，移用正确模式到私有Prolog。
+ac8bef44的DataCopy smoke已由外部直接提供完整替换，且已通过设备验证，不再猜参数或重跑该独立writer阶段。
 原三参UB搬运在Vector pass可用，不能把GM→GM错误概括成所有DataCopy都要四参。
 
 最新192946ea已在源中修正Cast、寻址、valid和容量，但仍未编译。
@@ -51,7 +54,8 @@ KR64从真实post-RoPE输出另路捕获；不要把K和KR视为同一个inputLo
 T为token_x前导维的展平token数；所有sidecar与token_x同设备、连续，地址在图捕获前固定。
 GPU有效mask、slot、位置和epoch由框架step级准备，新producer按值执行掩码和边界检查，不能在图内CPU读取。
 当前Python接口适配器只验证shape/dtype/device等元数据，不调用.item/.cpu/.tolist，不分配替代张量。
-它还未挂进生产runtime，也不等于Graph或B8已通过；内网先实现并注册这个producer接口，随后对接生产元数据。
+它已经挂入新 serving runtime 的真实 Prolog 调用适配；仍需内网实现并注册实际 producer。
+公共接口和 reader 的 Graph/B8 测试不等于真实 producer 的这些能力已经通过。
 
 按此公共合同在内网修改真实V3 wrapper/绑定/新op variant/tiling/kernel，旧入口保持原样。
 不要求上传这些私有改动。新wrapper可以在模块初始化时为函数设置ABI版本标记；
@@ -60,7 +64,7 @@ GPU有效mask、slot、位置和epoch由框架step级准备，新producer按值�
 先做producer独立控制：OFF与原Prolog原query输出和C4 packed/scale字节一致；ON仍保持C4字节一致，
 sidecar等于本次实际FP32量化输入的BF16_RNE。覆盖B1Q1/B1Q4/B8Q4、环回绕、padding、request重排和MTP暂存/提交。
 Graph捕获后修改token_x、位置、slot和有效mask并毒化sidecar，replay检查payload及tag真正更新。
-只测producer的B8通过不能被写成batched attention已支持；后续reader另有多请求寻址与任务调度工作。
+只测producer的B8通过不能被写成完整服务已支持；批量 reader 的独立测试已在7ba01aa通过，但完整框架/PD/APC仍需接通。
 
 ## 42b0f78阶段材料说明（已由fac32bf36的正确KV定位推进）
 
