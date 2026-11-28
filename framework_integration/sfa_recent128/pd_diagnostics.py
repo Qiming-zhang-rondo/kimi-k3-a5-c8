@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 
 _METHODS = ("register_kv_caches", "build_connector_worker_meta", "update_connector_output",
-    "start_load_kv", "get_finished", "request_finished", "_handle_request", "_handle_requests",
+    "start_load_kv", "get_finished", "get_transfer_results", "request_finished", "_handle_request", "_handle_requests",
     "_reformat_pending_kv_caches", "process_pulling_result", "run_busy_loop", "_run_busy_loop",
     "register_memory", "unregister_memory", "batch_transfer_sync_read", "batch_transfer_sync_write")
 
@@ -94,18 +94,34 @@ def inspect_live_pd(*, modules=None):
         if connector is None:
             continue
         report.update(status="LIVE_CONNECTOR_IDENTIFIED_NOT_TRANSFER_VALIDATED", connector=describe(connector), getter_module=name)
-        candidates = [connector]
-        for key in ("connector_worker", "_connector_worker", "worker", "_worker"):
-            child = getattr(connector, key, None)
-            if child is not None:
-                report["children"][key] = describe(child)
-                candidates.append(child)
-        for parent in candidates:
-            label = type(parent).__qualname__
-            for key in ("engine", "kv_send_thread", "kv_recv_thread", "_recving_thread", "_sending_thread"):
+        seen = {id(connector): "connector"}
+
+        def visit(parent, prefix="", depth=0):
+            if depth > 32:
+                report.setdefault("traversal_errors", {})[prefix] = "MAX_DEPTH"
+                return
+            # MultiConnector owns children here; sub_connectors returns a copy.
+            children = getattr(parent, "_connectors", None)
+            if not isinstance(children, (list, tuple)):
+                children = getattr(parent, "sub_connectors", None)
+            links = []
+            if isinstance(children, (list, tuple)):
+                links.extend((f"_connectors[{index}]", child) for index, child in enumerate(children))
+            for key in ("connector_worker", "_connector_worker", "worker", "_worker",
+                        "engine", "kv_send_thread", "kv_recv_thread", "_recving_thread", "_sending_thread"):
                 child = getattr(parent, key, None)
                 if child is not None:
-                    report["children"][label + "." + key] = describe(child)
+                    links.append((key, child))
+            for key, child in links:
+                path = prefix + "." + key if prefix else key
+                if id(child) in seen:
+                    report["children"][path] = dict(alias_of=seen[id(child)])
+                    continue
+                seen[id(child)] = path
+                report["children"][path] = describe(child)
+                visit(child, path, depth + 1)
+
+        visit(connector)
         return report
     return report
 

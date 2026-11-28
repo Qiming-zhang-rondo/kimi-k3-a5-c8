@@ -62,9 +62,15 @@ def install():
             key: value for key, value in additional.items() if key != CONFIG_KEY
         }
         try:
-            return original(vllm_config, *args, **kwargs)
+            result = original(vllm_config, *args, **kwargs)
         finally:
             vllm_config.additional_config = additional
+        if getattr(vllm_config, "kv_transfer_config", None) is not None:
+            from .pd_connector import is_serving_config
+            if is_serving_config(vllm_config):
+                from .pd_mooncake import install as install_pd
+                install_pd()
+        return result
 
     setattr(init_ascend_config, _MARKER, True)
     setattr(init_ascend_config, _ORIGINAL, original)

@@ -1,5 +1,31 @@
 # 当前任务：识别真实 Mooncake 通道，接通 P→D BF16 recent128
 
+## 最新 0d9421f：已提供真实 legacy 子通道接线候选，直接部署验证
+
+两节点的 AscendMultiConnector 源码 SHA 已与公开 c09d3e20 完全匹配。外壳下真实 MooncakeConnectorV1 子对象才是传输位置，Store兄弟分支保持原流程。本轮新增 `pd_connector.py`、`pd_mooncake.py` 并接入 config初始化和runner释放前边界，**不再停留在身份采集**。
+
+内网 agent 现在直接执行：
+
+1. 拉取本分支，冻结现有成功P/D启动命令和runtime备份；不要重编/替换attention库、CANN、Cloud包、MXFP4权重。两边沿既有overlay更新流程同步runtime，新进程才能加载新的config和connector hook。实际checkout自行定位，备份输出用新目录：
+
+   ```bash
+   python framework_integration/install_overlay.py \
+     --mxllm-root "$ACTUAL_MXLLM_CHECKOUT" \
+     --apply --update-runtime --replace-edited-runtime \
+     --output "$NEW_BACKUP_DIR"
+   ```
+
+   这是受manifest约束的runtime更新；不能直接覆盖私有源码或删掉guard。若原三处source已变且manifest不匹配，保留本地改动与差异，不能强行覆盖。本轮共195项框架宿主检查和18项传输核心检查通过，不等于A5已通过。
+2. 在原候选P、D环境以原启动命令启动新worker，原并发/Graph/MTP/APC/P-D/QLI参数全部保留。新增接线随 `sfa_recent128` serving + 原 `kv_transfer_config` 生效，无新端口，无额外功能开关；两边都必须更新。它通过真实Multi children递归定位legacy，不替换Store或修改原C4缓存张量。
+3. 服务ready后先跑原先成功的同一条单curl，走实际P→D代理。预期D不再报`Nonzero request start ... import_tail first`。查实际P/D worker的异常和reader sticky faults，确认完整输出；再补一个短prompt，不能用只启动成功替代推理。暂不混跑性能/GPQA或扩展扫描。
+4. 有现成worker RPC时调用下方`verify_worker_recent128`获取当前PID/真实子通道/fault；没有RPC就以本轮真实worker日志和请求输出为证，不用旧PID文件判断。上传小型结果：本commit、实际P/D worker PID、请求是否完成、首个异常（如有）与本地日志位置。不要再让用户转述身份或传私有源。
+
+接线实际顺序：scheduler的原`request_finished`给出已物化prompt长度→同轮metadata带`recent128_sends`→runner在原finished bank释放前固定真实BF16尾窗→沿既有GET_META/控制socket发布独立注册快照→D在每个C4 shard DONE之前固定源descriptor→收齐C4后导入BF16→精确nonce ACK→原receive-done。C4全命中而native仍有请求时也会先获取tail，不靠非空block列表决定。
+
+**明确边界：**这是首次真实PD设备候选，尚无A5成功结果。真实尾窗层集/position/epoch不全仍会拒绝，不伪造MTP层或反量化C4。当前为保证跨线程/RDMA可见性，在请求传输边界做真实设备同步和tag校验；不在每层/Graph replay加同步，但P/D传输开销尚未实测，不能宣称性能零代价。此接线没有同时实现Store/APC任意共享前缀h的高精度持久化；那些缺口仍沿适配清单处理，不关APC来冒充通过。不同PP层集的自动拼接尚未实现，真实descriptor必须覆盖本地完整层集。
+
+以下身份采集/接口合同是背景；当前不重复执行已完成的factory身份采集。
+
 内网 agent 直接执行本文件，不再让用户手工收集类名或转述问题。当前 P 已有成功推理，D 的非零起点报 `prefix/PD import_tail first`：原 C4 传输成功不等于 BF16 尾窗已传。保持已成功 attention/kernel、MXFP4 主缓存、QLI、Graph、MTP、APC、并发与原 P/D 配置。
 
 ## 先执行一次采集

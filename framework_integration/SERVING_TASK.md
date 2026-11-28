@@ -1,5 +1,11 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口：真实 Multi→MooncakeV1 BF16 PD 候选，直接验证一条 curl
+
+执行 [PD_TAIL_INTEGRATION_TASK 顶部](PD_TAIL_INTEGRATION_TASK.md)。已按0d9421f匹配源码实现scheduler committed边界、释放前固定快照、既有Mooncake控制socket、D导入与独立ACK。
+195项框架+18项核心宿主检查通过；首次A5 P→D仍待验证。沿原manifest更新两节点runtime并以原参数启动候选worker，不重编attention，不再重复采集外层身份。
+请求边界存在真实同步/校验开销，性能待测；Store/APC任意前缀持久化不因这次PD接线自动完成。
+
 ## 当前入口：处理 74dee986 的 D 尾窗缺失与 793a514 的旧诊断疑问
 
 先执行 [PD_TAIL_INTEGRATION_TASK](PD_TAIL_INTEGRATION_TASK.md)，一次采集实际P/D connector身份和可取得的真实worker状态；用户无需再搬类名。

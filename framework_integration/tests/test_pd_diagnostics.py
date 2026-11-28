@@ -52,11 +52,45 @@ class PDDiagnosticsTest(unittest.TestCase):
         self.assertEqual(report["runtime"]["layers"][0]["warmed_native_plan_count"],1)
         self.assertEqual(report["connector"]["qualname"],"Connector")
         self.assertEqual(report["children"]["connector_worker"]["qualname"],"Worker")
-        self.assertIn("batch_transfer_sync_read",report["children"]["Worker.engine"]["methods"])
+        self.assertIn("batch_transfer_sync_read",report["children"]["connector_worker.engine"]["methods"])
         rendered=json.dumps(report)
         self.assertNotIn("do-not-report-this",rendered)
         self.assertNotIn("private cached kernel source",rendered)
         self.assertIn("not GPU kernel execution or Graph replay",rendered)
+
+    def test_multi_connector_recurses_indexed_children_and_stops_cycles(self):
+        transfer,runtime=self.fixtures()
+        leaf=Connector();nested=SimpleNamespace(_connectors=[leaf])
+        root=SimpleNamespace(_connectors=[nested,SimpleNamespace()])
+        leaf.connector_worker.worker=root
+        transfer.get_kv_transfer_group=lambda:root
+        report=diagnostics.inspect_live_pd(modules={"vllm.distributed.kv_transfer":transfer})
+        children=report["children"]
+        self.assertEqual(children["_connectors[0]._connectors[0].connector_worker"]["qualname"],"Worker")
+        self.assertIn("batch_transfer_sync_read",children["_connectors[0]._connectors[0].connector_worker.engine"]["methods"])
+        self.assertEqual(children["_connectors[0]._connectors[0].connector_worker.worker"],dict(alias_of="connector"))
+        self.assertIn("_connectors[1]",children)
+
+    def test_factory_resolves_nested_configs_without_instantiating_connectors(self):
+        from probe_pd_connector import resolve_factory_tree
+        class Multi:
+            def __init__(self,*args,**kwargs):raise AssertionError("must not construct")
+            @classmethod
+            def _get_connector_classes_and_configs(cls,*args):raise AssertionError("not called")
+        class Leaf:
+            def __init__(self,*args,**kwargs):raise AssertionError("must not construct")
+        configs=[]
+        def config_type(**options):
+            configs.append(options)
+            return SimpleNamespace(engine_id=options.get("engine_id"),kv_connector_extra_config=options.get("kv_connector_extra_config",{}),name=options["kv_connector"])
+        factory=SimpleNamespace(get_connector_class=lambda config:Multi if config.name=="Multi" else Leaf)
+        result=resolve_factory_tree(dict(kv_connector="Multi",engine_id="private-engine",kv_connector_extra_config=dict(
+            connectors=[dict(kv_connector="Multi",kv_connector_extra_config=dict(connectors=[dict(kv_connector="MooncakeConnectorV1")])),dict(kv_connector="AscendStoreConnector")])),config_type,factory)
+        self.assertEqual(result["children"][0]["index"],0)
+        self.assertEqual(result["children"][1]["requested"]["kv_connector"],"AscendStoreConnector")
+        self.assertEqual(result["children"][0]["children"][0]["requested"]["kv_connector"],"MooncakeConnectorV1")
+        self.assertTrue(all(config["engine_id"]=="private-engine" for config in configs))
+        self.assertNotIn("private-engine",json.dumps(result))
 
     def test_empty_process_is_explicit_and_does_not_create_framework(self):
         report=diagnostics.inspect_live_pd(modules={})

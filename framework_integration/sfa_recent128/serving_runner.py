@@ -122,6 +122,11 @@ def install_runner_hooks(runner_class=None, builder_class=None):
             config = _selected(runner.vllm_config)
             if config is not None:
                 state = get_state(runner.vllm_config, config, runner.device)
+                if getattr(runner.vllm_config, "kv_transfer_config", None) is not None:
+                    from vllm.distributed.kv_transfer import get_kv_transfer_group
+                    from .pd_mooncake import pin_finished_tails
+                    pin_finished_tails(get_kv_transfer_group(),
+                        getattr(scheduler_output, "kv_connector_metadata", None))
                 for request_id in getattr(scheduler_output, "finished_req_ids", ()):
                     state.release_request(request_id)
             return execute(runner, scheduler_output, *args, **kwargs)

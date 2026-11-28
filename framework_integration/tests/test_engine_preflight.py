@@ -91,7 +91,9 @@ class EnginePreflightTest(unittest.TestCase):
             self.assertEqual(calls,[])
             self.assertIs(invalid.additional_config,additional)
             valid=engine(True);original_additional=valid.additional_config
-            self.assertEqual(module.init_ascend_config(valid),"vendor-result")
+            with patch("sfa_recent128.pd_mooncake.install") as install_pd:
+                self.assertEqual(module.init_ascend_config(valid),"vendor-result")
+            install_pd.assert_called_once_with()
             self.assertEqual(calls,[{"vendor":{"unchanged":True}}])
             self.assertIs(valid.additional_config,original_additional)
 
