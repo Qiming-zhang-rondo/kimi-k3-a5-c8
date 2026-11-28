@@ -1,5 +1,13 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前阶段：冻结已成功推理版本，验证剩余适配并测性能/GPQA
+
+用户确认第二次bool修复后推理成功，明确先不为新提交重装。执行 [BENCHMARK_GPQA_TASK](BENCHMARK_GPQA_TASK.md)，
+只整理测试和运行证据，不再改当前运行代码。新的只读 [适配清单](ADAPTATION_STATUS.md) 区分APC/PD实际接线缺口、抢占/MTP生命周期及Graph/chunk已实现待验项。
+当前内网若另有未推送适配，核实并复用；不要仅凭公开报告判断所有功能已支持或全都不支持。
+先一次冷请求/真实APC命中/真实PD链确认，再采集同配置OFF/ON性能及完整198题GPQA；不关闭原功能换通过。
+以下安装/修复章节是此前阶段记录，不是要求当前服务为了文档同步而重启。
+
 ## 当前入口70669eb：修全局写环/本rank读取，安装真实Native候选
 
 执行 [NATIVE_DSACP_TASK顶部](NATIVE_DSACP_TASK.md)。本轮已有真实BF16 writer、TP交换、local query路由和实际forward/store接线，
