@@ -1,0 +1,10 @@
+{
+  "date": "2026-11-28 16:55",
+  "status": "D_NODE_NEEDS_PD_BF16_TAIL_TRANSFER",
+  "progress": "P node works! D node starts but fails on requests with existing KV cache (nonzero start).",
+  "error": "ServingStateError: Nonzero request start needs acquire_request + prefix/PD import_tail first",
+  "location": "serving_state.py line 258, bind_step()",
+  "root_cause": "D node receives requests from P with existing KV cache (prefill already done on P). Request start != 0. serving_state requires import_tail to be called first to receive the BF16 tail window from P. P-to-D BF16 tail transfer not yet implemented.",
+  "known_issue": "This is the PD BF16 tail transfer that has been listed as pending. P sends C4 KV via mooncake but not BF16 ring data. D needs the BF16 tail to serve the hot window.",
+  "question": "How to implement import_tail for P-to-D BF16 transfer? This is the last major integration piece for the D node to work."
+}
