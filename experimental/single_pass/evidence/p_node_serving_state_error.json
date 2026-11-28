@@ -1,0 +1,9 @@
+{
+  "date": "2026-11-28 15:25",
+  "status": "P_NODE_STARTS_BUT_INFERENCE_FAILS",
+  "progress": "P node successfully started with hot128. Native path accepted, model loaded, service up. First inference fails.",
+  "error": "ServingStateError: Layer rows differ from the runner's bound step",
+  "location": "serving_state.py line 318",
+  "call_chain": "hooks.read -> serving_runtime.read -> lane.binding -> query.shape[0] != step.token_count",
+  "question": "Why do query rows differ from bound step token_count? TP8 splitting? Speculative decode? Chunked prefill?"
+}
