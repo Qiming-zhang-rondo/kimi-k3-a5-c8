@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-28 11:45",
+  "type": "ENGINEERING_FEEDBACK",
+  "issue": "Build instructions lacked SDK version compatibility documentation, causing 2 avoidable debugging rounds",
+
+  "problems_encountered": {
+    "1_LoadDataRepeatParam": {
+      "error": "LoadDataRepeatParam constructor requires 3 arguments, but 4 were provided",
+      "root_cause": "Old API (< 9.0.0 beta.2) uses 4-arg braced init. The staged source had a version conditional #if ASC_DEVKIT_VERSION_NUM >= 90000000 but this macro was not defined in standalone compilation, so the old API branch was taken.",
+      "fix_applied": "Removed conditional, directly used new API SetLoadDataRepeatWithStride({0, 1, 0, dstStride})",
+      "question": "Why wasn't this documented? The source code itself has the version conditional — Codex should have flagged that ASC_DEVKIT_VERSION_NUM needs to be defined or the conditional needs to be handled in staging."
+    },
+    "2_ASCENDC_TPL_MIX_AIC_1_1": {
+      "error": "use of undeclared identifier ASCENDC_TPL_MIX_AIC_1_1",
+      "root_cause": "Template constant was in the excluded host header. The staging manifest listed it as 'remaining_template_symbol_tokens_to_verify' but didn't provide the actual value.",
+      "fix_applied": "Created qsfa_device_template_constants.h with ASCENDC_TPL_MIX_AIC_1_1=4 (= KERNEL_TYPE_MIX_AIC_1_1 from bisheng header)",
+      "question": "Manifest listed the symbols but didn't give values. We had to find the value ourselves from the compiler header."
+    }
+  },
+
+  "request": "Please include README-style documentation with build instructions that covers:",
+  "documentation_needed": [
+    "1. Required SDK version and how to verify (CANN version, ASC_DEVKIT_VERSION_NUM value)",
+    "2. Known API version incompatibilities (old vs new API conditionals in source)",
+    "3. Template constants that need device-safe definitions (with actual values, not just symbol names)",
+    "4. Required compile definitions (QSFA_ASC_DIRECT_BUILD=1, ASC_DEVKIT_VERSION_NUM, etc.)",
+    "5. Expected include paths and their sources",
+    "6. Common pitfalls and their symptoms (so agents can self-diagnose)"
+  ],
+
+  "suggestion": "Add a BUILD_NOTES.md or SDK_COMPATIBILITY.md to the repo that documents all known SDK version requirements and API compatibility issues. This prevents agents from spending debugging cycles on known issues."
+}
