@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-28 15:58",
+  "status": "TRITON_KERNEL_NEEDS_CODEX_FIX",
+  "description": "Triton kernel in native_writer.py has type issues that need Codex to fix properly. I attempted two local fixes but user correctly skeptical.",
+
+  "fixes_I_attempted": [
+    "1. mask=writable & (latent_col >= 0) — broadcast scalar to vector shape",
+    "2. writable = (valid != 0) & ... — convert int8 to bool"
+  ],
+
+  "why_not_confident": [
+    "The Triton Ascend backend may have additional type restrictions",
+    "There are also tl.load calls with mask=writable that might have same issue",
+    "There is also a tl.where(writable, ...) warning about int8",
+    "Multiple type mismatches may exist throughout the kernel",
+    "I don't have full understanding of Triton Ascend backend type system"
+  ],
+
+  "request": "Please fix the native_writer.py Triton kernel properly. The issues:",
+  "issues": [
+    "1. valid is loaded from GM uint8, type is int8 — all boolean expressions using it produce int8 not bool",
+    "2. tl.store mask requires bool type, not int8",
+    "3. tl.load mask also needs proper type",
+    "4. tl.where condition also warns about int8",
+    "5. The writable scalar needs to be broadcast to vector shape for element-wise operations"
+  ],
+
+  "suggested_fix": "Rewrite the Triton kernel to use proper boolean types throughout. E.g., load valid as bool directly, or cast all int8 results to bool with (x != 0) or tl.cast. Also ensure mask shapes match the pointer shapes."
+
+}
