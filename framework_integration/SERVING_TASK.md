@@ -1,5 +1,15 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 当前入口 41bef5c：支持真实Native路径，不扩大“从未使用Prolog”的结论
+
+执行 [NATIVE_DSACP_TASK.md](NATIVE_DSACP_TASK.md)。公开源核对已确认Native量化前BF16 `k_nope` 与post-RoPE `k_rope`可取，
+也确认DSACP tap只有TP本rank分片，因此需要高精度交换及reader local-query路由，不是仅解除Prolog guard或重用FP32 smoke。
+原Prolog variant保留；根据实际路径选择producer，不强制改变生产预处理。
+
+当前41bef5c只有推论报告，没有Native/CP候选实现或设备通过结果。D=false但实际DSACP与已审阅selector不一致，
+本轮失败诊断新增`dispatch_state`一次收齐有效开关、validated配置、实际方法链/模块位置和SHA，报告留内网。
+按真实身份修复，不再要求用户逐项搬私有文件，也不把不同运行报告合并为“永远Native”。
+
 ## 当前入口 79334045：先取得真实选路原因，不再猜测安装状态
 
 此次`contract.py`报错只说明实际层的`preprocess_type`不是PROLOG_V3，**没有检查ring producer是否安装**。

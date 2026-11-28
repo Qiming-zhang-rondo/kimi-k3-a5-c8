@@ -155,6 +155,12 @@ def require_layer_contract(impl, config):
     report = layer_contract_report(impl, config)
     if not report["errors"]:
         return report
+    from .dispatch_diagnostics import collect_dispatch_state
+    try:
+        report["dispatch_state"] = collect_dispatch_state(impl)
+    except Exception as error:
+        # A diagnostic failure must never hide the actual layer contract.
+        report["dispatch_state_error"] = type(error).__name__ + ": " + str(error)
     diagnostic = None
     try:
         directory = Path(config.diagnostics_path)
