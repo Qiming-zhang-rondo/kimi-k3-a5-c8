@@ -1,0 +1,62 @@
+{
+  "status": "ERROR",
+  "scope": "isolated_batched_reader_not_prolog_or_service",
+  "native_quantizer_tested": false,
+  "prolog_validated": false,
+  "latency": "NOT_MEASURED",
+  "graph_requested": true,
+  "cases": {
+    "b1_q1_eager": {
+      "finite": true,
+      "relative_l2": 0.0022918426779878153,
+      "worst_row_relative_l2": 0.002457344787285628,
+      "max_abs": 9.980959387476118e-05,
+      "passed": true,
+      "faults_zero": true
+    }
+  },
+  "bridge": {
+    "abi_version": 1,
+    "buffers_bytes": 160,
+    "kernel_entry": "qsfa_recent128_batched_serving",
+    "geometry": "load32_stride416_input2_output1",
+    "batched_tnd": true,
+    "epoch_checked": true,
+    "sticky_device_faults": true,
+    "fault_reset_automatic": false,
+    "kv_split": false,
+    "device_validation": "PENDING",
+    "execution": "serving",
+    "performance_claim": false,
+    "build_identity": {
+      "library": "/tmp/hot128_serving/reader-build/libqsfa_recent128_direct.so",
+      "library_sha256": "64d4a94eb843d97b172ee1dcff61abbe7e83fa515d680138c59c3b5f02b83955",
+      "source_sha256": {
+        "batched_serving_bridge.cpp": "0ac14b5e2c2f89e68de6aa9968417ef43a15ca951faf47bbd3d1c0004147f2d4",
+        "batched_serving_api.h": "d3c396d979bfcd1c97bc5121e3a78b1302a11160c9d79813cc999090f3b376de",
+        "single_pass_api.h": "48c2a55e741fb17cf24b578137eb2d812ef7df5197718b0b2a4dee357d54881d",
+        "single_pass_tiling.h": "988a49d9785f6ba7ca4411e47598b264ce73e0e51c1e50f739b8b1ee98d89698"
+      },
+      "sdk_root": "/usr/local/Ascend/cann-9.2.1",
+      "device_validation": "PENDING",
+      "configuration": {
+        "abi_version": 1,
+        "buffers_bytes": 160,
+        "kernel_entry": "qsfa_recent128_batched_serving",
+        "geometry": "load32_stride416_input2_output1",
+        "batched_tnd": true,
+        "epoch_checked": true,
+        "sticky_device_faults": true,
+        "fault_reset_automatic": false,
+        "kv_split": false,
+        "device_validation": "PENDING"
+      }
+    },
+    "original_topk_unchanged": true,
+    "cold_layout": "INT8[pages,128,1,400]",
+    "hot_layout": "BF16[P,C,512]+BF16[P,C,64]"
+  },
+  "error": "Serving shape was not prepared before capture; prepare it during warmup",
+  "traceback": "Traceback (most recent call last):\n  File \"/tmp/sfa_merge_src_upload/experimental/single_pass/run_batched_smoke.py\", line 189, in main\n    with torch.npu.graph(graph):output = call()\n                                         ^^^^^^\n  File \"/tmp/sfa_merge_src_upload/experimental/single_pass/run_batched_smoke.py\", line 164, in call\n    return reader.read(buffers[\"query\"][:,:,:512],buffers[\"query\"][:,:,512:],buffers[\"cold\"],\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/sfa_merge_src_upload/framework_integration/sfa_recent128/serving_reader.py\", line 177, in read\n    _require(key in self.prepared, \"Serving shape was not prepared before capture; prepare it during warmup\")\n  File \"/tmp/sfa_merge_src_upload/framework_integration/sfa_recent128/serving_reader.py\", line 26, in _require\n    raise RuntimeError(message)\nRuntimeError: Serving shape was not prepared before capture; prepare it during warmup\n",
+  "stop_after_first_failure": true
+}
