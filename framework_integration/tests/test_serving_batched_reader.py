@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SINGLE = ROOT/"experimental/single_pass"
@@ -55,6 +57,55 @@ int main(){
         self.assertFalse(names & {"cpu","numpy","tolist","item","empty","zeros","ones","tensor","as_tensor","nonzero"})
         self.assertNotIn("reset_faults",names)
         self.assertNotIn("step_marker",ast.get_source_segment(SERVING.read_text(),read))
+
+    def test_stream_change_needs_explicit_execution_reservation(self):
+        spec = importlib.util.spec_from_file_location("serving_reader_stream_test", SERVING)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        current = SimpleNamespace(npu_stream=7)
+        fake_torch = SimpleNamespace(npu=SimpleNamespace(current_stream=lambda device:current))
+        query = SimpleNamespace(shape=(4,64,512),device="npu:0")
+        cold = SimpleNamespace(shape=(16,128,1,400))
+        table = SimpleNamespace(shape=(1,16))
+        def reader(lane):
+            value = module.ServingReader.__new__(module.ServingReader)
+            value._execution_lane = lane
+            value.prepared = {}
+            return value
+        with patch.dict(sys.modules,{"torch":fake_torch}):
+            unbound = reader(None)
+            original_lane = unbound._plan_lane(query.device)
+            unbound.prepared[("npu:0",original_lane,4,1,16,16,1,256)] = object()
+            self.assertTrue(unbound.is_prepared(query,cold,table))
+            current.npu_stream = 99  # torch.npu.graph's implicit side stream
+            self.assertFalse(unbound.is_prepared(query,cold,table))
+            reservation = module.ServingExecutionLane()
+            bound = reader(reservation)
+            prepared_lane = bound._plan_lane(query.device)
+            bound.prepared[("npu:0",prepared_lane,4,1,16,16,1,256)] = object()
+            current.npu_stream = 123
+            self.assertTrue(bound.is_prepared(query,cold,table))
+            independent = reader(module.ServingExecutionLane())
+            self.assertNotEqual(bound._plan_lane(query.device),independent._plan_lane(query.device))
+            self.assertFalse(independent.is_prepared(query,cold,table))
+
+    def test_where_uses_only_tensor_branches_and_smoke_captures_warmed_stream(self):
+        tree = ast.parse(SERVING.read_text())
+        cls = next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=="ServingReader")
+        read = next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=="read")
+        calls = [n for n in ast.walk(read) if isinstance(n,ast.Call) and
+                 isinstance(n.func,ast.Attribute) and n.func.attr=="where"]
+        self.assertEqual(len(calls),2)
+        for call in calls:
+            self.assertTrue(all(not isinstance(arg,ast.Constant) for arg in call.args[1:3]))
+        source = (SINGLE/"run_batched_smoke.py").read_text()
+        smoke = ast.parse(source)
+        capture = [n for n in ast.walk(smoke) if isinstance(n,ast.Call) and
+                   isinstance(n.func,ast.Attribute) and n.func.attr=="graph"]
+        self.assertEqual(len(capture),1)
+        stream = next(k.value for k in capture[0].keywords if k.arg=="stream")
+        self.assertIsInstance(stream,ast.Name)
+        self.assertEqual(stream.id,"stream")
 
     def test_b8_graph_data_mutates_all_routing_metadata_and_preserves_causal_ids(self):
         import numpy as np

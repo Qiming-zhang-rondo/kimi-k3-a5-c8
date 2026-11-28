@@ -1,22 +1,11 @@
-# 上 A5 前先看完整能力边界
+# 当前动作：修复7d0ee407的Graph stream缓存错配，继续同一批reader测试
 
-当前6486b3d是生产接入候选，不是完整生产版本。APC/prefix和P/D只有BF16尾窗接口，自动接线尚未完成；MTP draft层自己的历史热窗也须核实。B8/Graph新reader代码只有宿主验证，尚未A5编译运行。不要把允许配置或旧独立writer通过当成全功能通过。
+最新证据：新批量库已完成编译，B1Q1 eager通过（L2=0.0022918427、faults=0）。Graph在进入attention内核前因预热/捕获stream不同而查不到plan。B1Q4/B8Q4尚未执行，完整Prolog/服务仍未验证。
 
-先读[完整能力清单与成批验收计划](framework_integration/SERVING_TASK.md)最前面的表格，处理已知实现缺口后再安排完整服务验收。这次清单/配置前置检查无需另开A5实验。PCP/DCP未完成sidecar协议，现在会在权重加载前明确报错，不修改用户配置。
+本次修复仅Python：smoke显式使用已预热的capture stream；生产reader按builder/draft/ubatch预留逻辑执行lane，避免stream切换造成漏查，同时保持不同执行链的scratch隔离。两处where独立核对PyTorch2.10原始schema后改成预分配同dtype/同device Tensor分支；不是把内网的临时补丁原样照搬，也不是NPU独有的scalar限制。
 
-# 当前任务：修复生产启动，不降低原配置
+直接按[framework_integration/SERVING_TASK.md](framework_integration/SERVING_TASK.md)最前面的7d0ee407修复步骤继续：更新Python，复用 /tmp/hot128_serving/reader-build 的已编译.so，不重编ASC、不加载模型、不改vendor；新输出目录一次跑原B1Q1/B1Q4/B8Q4+Graph+epoch矩阵。相关27项宿主检查通过，新A5 Graph结果待重跑。
 
-最新 366ae84 的加载后才报错问题和 a1ad5cd 的旧单请求 guard 已有实际代码修复候选。
-内网 agent 直接执行 [framework_integration/SERVING_TASK.md](framework_integration/SERVING_TASK.md)，不再让用户选择切C8、关Graph、改单请求或丢弃MTP。
+任务文件的完整能力表仍有效：APC/prefix和P/D自动尾窗接线尚未完成，MTP draft层历史热窗需核实，不能将配置允许、writer通过或B1 eager通过当成全功能验证。先处理已知实现缺口，再做完整服务验收，保留MXFP4/并发8/Graph/MTP/APC/P-D目标配置。
 
-本次交付包含 serving runtime、真实 Prolog 调用路由、稳定请求bank/epoch与固定热环、runner/metadata/MTP位置接线、批量原生ASC reader、当前Torch薄桥、独立A5批量正确性脚本，以及托管overlay的runtime更新工具。原主cache仍是MXFP4 packed400，原TopK和query返回不改变。
-
-明确使用 execution=serving / reader=single_pass / single_pass_kernel=batched_v4。它复用V4 load32/stride416流水，不冒充已测B1 KV-split4的速度。旧 accuracy_eager 保持独立；不能只删它的 max_num_seqs/Graph guard。
-
-静态配置检查在权重加载前执行，真实producer和批量库/薄桥能力在模型层构造时检查，避免等102个shard后才报已知问题。
-
-外部125项framework宿主测试、5项producer路由测试通过，新增160B ABI/批量tiling的C++宿主编译检查通过。新批量ASC与真实Prolog联合设备验证尚未运行。b25593fc的8/8通过仅属于独立writer，不可外推成新批量reader或服务已成功。
-
-现在按任务文件在匹配SDK中编译真实私有Prolog variant和独立批量reader，跑run_batched_smoke，再更新hot128专用runtime/config并联调服务。Prefix/PD的真实BF16尾窗回调接口已交付，内网必须接好actual snapshot/传输完成；不能把C4到达当BF16到达。原baseline启动链和vendor保持。
-
-内部实现及原始日志留内网，只回传部门允许的测试状态/首错/摘要，不再批量外传源码、schema或二进制。
+内部实现和原始材料留内网，只回传部门允许的状态、首错和测试摘要；不批量外传源码/schema/二进制。

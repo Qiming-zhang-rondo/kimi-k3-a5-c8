@@ -72,14 +72,27 @@ def load_bridge(source_root, library_dir):
     return bridge
 
 
+class ServingExecutionLane:
+    """Explicit scratch reservation for one serialized forward/replay chain.
+
+    The owner may warm up on a side stream and capture on another stream.
+    Independently overlapping model executions must have different lane objects.
+    This opt-in does not discover or merge arbitrary stream-owned plans.
+    """
+    __slots__ = ()
+
+
 class ServingReader:
-    def __init__(self, config, impl):
+    def __init__(self, config, impl, *, execution_lane=None):
         _require(config.window == 128 and config.execution == "serving", "Serving reader requires execution=serving/W128")
         _require(config.single_pass_kernel == "batched_v4",
                  "Serving uses the explicit batched_v4 entry; it does not claim batched kv_split4")
         _require(impl.kv_lora_rank == 512 and impl.qk_rope_head_dim == 64 and impl.num_kv_heads == 1,
                  "Serving ABI requires MLA latent512/RoPE64/KV-head1")
         _require(math.isfinite(float(impl.scale)) and float(impl.scale) > 0, "Invalid attention scale")
+        _require(execution_lane is None or isinstance(execution_lane, ServingExecutionLane),
+                 "execution_lane must be an explicit ServingExecutionLane reservation")
+        self._execution_lane = execution_lane
         self.config, self.impl = config, impl
         self.bridge = load_bridge(config.source_root, config.library_dir)
         self.heads = int(impl.local_num_heads)
@@ -92,7 +105,14 @@ class ServingReader:
         return dict(self.bridge.configuration(), execution="serving", performance_claim=False,
                     build_identity=getattr(self.bridge, "_serving_build_identity", {}),
                     original_topk_unchanged=True, cold_layout="INT8[pages,128,1,400]",
-                    hot_layout="BF16[P,C,512]+BF16[P,C,64]", device_validation="PENDING")
+                    hot_layout="BF16[P,C,512]+BF16[P,C,64]", device_validation="PENDING",
+                    scratch_lane="explicit_serialized_reservation" if self._execution_lane is not None else "current_npu_stream")
+
+    def _plan_lane(self, device):
+        if self._execution_lane is not None:
+            return ("reservation", self._execution_lane)
+        import torch
+        return ("stream", int(torch.npu.current_stream(device).npu_stream))
 
     def prepare(self, *, device, cold_pages, token_capacity, request_capacity,
                 ring_binding, table_columns):
@@ -105,8 +125,7 @@ class ServingReader:
                  "Invalid serving bucket geometry")
         _require(capacity % 128 == 0 and capacity >= 128 + ring_binding.max_query_per_request - 1,
                  "Ring capacity must protect every query in the configured per-request chunk")
-        stream = torch.npu.current_stream(device)
-        lane = int(stream.npu_stream)
+        lane = self._plan_lane(device)
         local_key = (str(device), lane, t, b, pages, columns, pools, capacity)
         key = (str(self.config.library_dir), str(self.config.source_root), *local_key, self.heads, float(self.impl.scale))
         with _LOCK:
@@ -117,6 +136,8 @@ class ServingReader:
                               capacity, pools, float(self.impl.scale)) for g in range(groups))
                 _PLANS[key] = dict(query=query, plans=plans,
                     indices=torch.empty((t,1,2048), device=device, dtype=torch.int32),
+                    index_pad=torch.full((1,1,1), -1, device=device, dtype=torch.int32),
+                    output_zero=torch.zeros((1,1,1), device=device, dtype=torch.bfloat16),
                     table=torch.empty((b,columns), device=device, dtype=torch.int32),
                     qcum=torch.empty((b,), device=device, dtype=torch.int32),
                     kvlen=torch.empty((b,), device=device, dtype=torch.int32),
@@ -133,7 +154,7 @@ class ServingReader:
         import torch
         t = int(query.shape[0])
         b, columns = tuple(table.shape)
-        lane = int(torch.npu.current_stream(query.device).npu_stream)
+        lane = self._plan_lane(query.device)
         prefix = (str(query.device), lane, t, b, int(cold.shape[0]), columns)
         return any(key[:6] == prefix for key in self.prepared)
 
@@ -172,7 +193,7 @@ class ServingReader:
                    ring_binding.recent_latent,ring_binding.recent_rope,ring_binding.recent_position_tags,
                    ring_binding.recent_epoch_tags,ring_binding.token_positions,ring_binding.token_valid)
         _require(all(value.device == device for value in tensors), "All serving inputs must share the query device")
-        lane = int(torch.npu.current_stream(device).npu_stream)
+        lane = self._plan_lane(device)
         key = (str(device), lane, t, b, int(cold.shape[0]), columns, pools, capacity)
         _require(key in self.prepared, "Serving shape was not prepared before capture; prepare it during warmup")
         scratch = self.prepared[key]
@@ -193,7 +214,7 @@ class ServingReader:
         valid_view = valid.view(t,1,1)
         # Original selected IDs remain untouched. Only inactive/padding rows in
         # the private launch copy become -1, preserving valid-prefix semantics.
-        torch.where(valid_view, topk, -1, out=scratch["indices"])
+        torch.where(valid_view, topk, scratch["index_pad"], out=scratch["indices"])
         for group, plan in enumerate(scratch["plans"]):
             start = group*64
             width = min(64, heads-start)
@@ -204,7 +225,7 @@ class ServingReader:
                 ring_binding.recent_latent,ring_binding.recent_rope,ring_binding.recent_position_tags,
                 ring_binding.token_positions,launch_banks,launch_epochs,ring_binding.recent_epoch_tags,
                 valid)
-            torch.where(valid_view, result[:,:width], 0,
+            torch.where(valid_view, result[:,:width], scratch["output_zero"],
                         out=scratch["output"][:,start:start+width])
         self.last_faults = tuple(plan.faults() for plan in scratch["plans"])
         self.last_call_metadata = dict(kernel="batched_load_tile32", tokens=t, requests=b,

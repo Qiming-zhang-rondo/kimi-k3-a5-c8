@@ -1,5 +1,33 @@
 # 直接修复 a1ad5cd 的生产接入
 
+## 最新 7d0ee407：继续同一批 reader 验证，不重编内核
+
+新批量库已编译，B1Q1 eager 对独立数学参考通过：relative L2=0.0022918427、max_abs=9.98e-5、faults=0。
+Graph 在进入 attention 内核之前因 plan key 不匹配退出，B1Q4/B8Q4 尚未执行。
+
+根因是 torch.npu.graph 未指定 stream 时会切换内部捕获 stream，原代码按当前 stream 查找已预热的 plan，
+因此外层 stream 已准备也会查不到。现在 smoke 显式传入同一预热 stream；生产入口按 builder/draft/ubatch
+显式预留独立 execution lane，既允许预热/捕获切换 stream，也不合并独立并发 workspace。
+
+两处 where 同步独立修复：PyTorch 2.10 的 where.self_out 两个分支要求 Tensor，ScalarOther 重载没有 out。
+这不是 NPU 独有约束。-1 INT32 和 0 BF16 的同设备 Tensor 在 prepare 阶段创建，read 中只广播使用；
+原 TopK 不改，输出 dtype 不改，无 read 内新增 Tensor 分配。
+依据：[PyTorch 2.10 原始重载](https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/native_functions.yaml)、
+[Ascend graph 的默认捕获 stream](https://github.com/Ascend/pytorch/blob/master/torch_npu/npu/graphs.py)。
+
+本轮只更新 Python，复用已经通过编译的 /tmp/hot128_serving/reader-build/libqsfa_recent128_direct.so
+（原结果 SHA256=64d4a94eb843d97b172ee1dcff61abbe7e83fa515d680138c59c3b5f02b83955）。
+不要重编 ASC、加载模型或再改 vendor；用新输出目录一次执行原矩阵：
+
+```bash
+python experimental/single_pass/run_batched_smoke.py \
+  --library-dir /tmp/hot128_serving/reader-build --source-root "$PWD" \
+  --device npu:0 --graph --output "$NEW_RUN/batched-smoke"
+```
+
+设备号沿用已确认空闲的测试设备。该命令集中覆盖 B1Q1、B1Q4、B8Q4、Graph 两阶段元数据变化与坏 epoch 锁存。
+本地相关 27 项宿主检查通过，A5 Graph 结果待此次重跑；不能把 B1 eager 通过写成 Graph 或 B8 已通过。
+
 ## 使用 A5 之前一次说清楚的能力边界
 
 6486b3d 是生产接入**候选代码**，不是完整服务已可用的证明。130 项宿主测试不能代替设备或完整模型验证。
@@ -9,7 +37,7 @@
 | --- | --- | --- |
 | 原 MXFP4 主缓存 | 保留 packed400 写入和原 TopK 合同；OFF 不走新路径 | 真实新 Prolog ON/OFF 的 query、C4 packed/scale 尚无设备逐字节对照 |
 | 真实 PrologV3 | 公共调用适配、完整 ABI1、实际写点要求、已通过的独立 writer | 私有 producer variant 必须实际编译注册；独立 writer 不是 producer |
-| 并发8 | 稳定请求 bank/epoch、批量 TND reader、隔离路由，宿主测试通过 | 新批量 ASC 尚未 A5 编译/运行；不能外推旧 P8 writer 成为并发 attention 已通过 |
+| 并发8 | 稳定请求 bank/epoch、批量 TND reader、隔离路由；批量库已编译，B1Q1 eager 精度通过 | B8 尚未执行；不能外推 B1 或旧 P8 writer 成为并发 attention 已通过 |
 | Graph | 固定缓冲、按 device/stream/shape 准备 plan；新 smoke 覆盖动态元数据 | 所有 layer/lane/bucket 必须捕获前准备；新 serving 动态 replay 尚未设备验证 |
 | MTP | 修正后的 GPU 位置、draft lane 隔离、容量保护、事务 API | 完整接受/拒绝和提交链未验证；draft 层自己的历史 BF16 热窗来源仍须核实，不能拿 target 层就绪代替 |
 | APC / prefix cache | 实际 BF16 尾窗快照导出/导入 API | **尚未自动接通 prefix 命中、驱逐、抢占恢复。不是仅缺测试。** 非零位置新请求缺真实尾窗会报错 |
@@ -22,7 +50,7 @@ R0/272、其他 TopK、页大小或格式没有实现。每64个 local heads 一
 新物理 ring 容量 C=align128(128+max_query_chunk-1)，不是固定128槽。
 max_query_chunk 必须覆盖实际每请求 prefill/verify chunk，不能只按 MTP 的4个 token 填写；总 token/pool/表宽也受预分配界限制。
 
-已完成的 A5 设备证据仅为旧独立 ring writer 8/8，它不测试真实 Prolog、C4 量化、attention 或完整 MTP。
+已完成的 A5 设备证据为旧独立 ring writer 8/8，加最新独立批量 reader 的 B1Q1 eager；它们不验证真实 Prolog、C4 量化或完整 MTP。
 同一次 Graph 中 valid mask 变化的测试覆盖，也不能用旧 writer 的固定 valid mask 重放替代。
 
 ## 一次准备、一次成批验收的执行约定

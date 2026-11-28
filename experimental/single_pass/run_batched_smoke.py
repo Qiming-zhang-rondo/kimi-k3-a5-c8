@@ -179,6 +179,8 @@ def main(argv=None):
                 report["bridge"] = reader.configuration()
                 if args.graph:
                     graph = torch.npu.NPUGraph()
+                    # Passing this stream explicitly is essential: graph() with
+                    # stream=None selects its own internal side stream instead.
                     stream = torch.npu.Stream()
                     stream.wait_stream(torch.npu.current_stream())
                     with torch.npu.stream(stream):
@@ -186,7 +188,7 @@ def main(argv=None):
                         reader.prepare(device=device,cold_pages=data["cold"].shape[0],token_capacity=t,
                             request_capacity=batch,ring_binding=ring,table_columns=data["table"].shape[1])
                         call()
-                        with torch.npu.graph(graph):output = call()
+                        with torch.npu.graph(graph,stream=stream):output = call()
                     torch.npu.current_stream().wait_stream(stream)
                     for phase in (0,1):
                         updated,expected,_ = make_data(batch,queries,phase)

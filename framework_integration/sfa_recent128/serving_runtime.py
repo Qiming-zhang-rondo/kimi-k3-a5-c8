@@ -97,6 +97,7 @@ class ServingRuntime:
         self.state.register_layer(self.layer_key)
         from .serving_reader import ServingReader
         self.reader = ServingReader(config, impl)
+        self._readers_by_lane = {}
         self.state.runtime_readers.append(self.reader)
         self.state.runtime_layers.append(self)
         self.producer_calls = 0
@@ -145,13 +146,29 @@ class ServingRuntime:
         table = metadata.block_table if block_table is None else block_table
         binding = lane.binding(self.layer_key, token_rows=query.shape[0])
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-        if not self.reader.is_prepared(query, cold, table):
+        key = id(lane)
+        if key not in self._readers_by_lane:
+            if bool(_EXTRA_CTX.capturing):
+                raise RuntimeError("Warm up this recent128 routing lane before Graph capture; no reader creation inside capture")
+            from .serving_reader import ServingReader, ServingExecutionLane
+            reservation = getattr(lane, "reader_execution", None)
+            if reservation is None:
+                reservation = ServingExecutionLane()
+                lane.reader_execution = reservation
+            reader = ServingReader(self.config, self.impl, execution_lane=reservation)
+            # Keep each route alive with its reader. Stable routing lanes make
+            # target/draft/ubatch workspaces independent across stream changes.
+            self._readers_by_lane[key] = (lane, reader)
+            self.state.runtime_readers.append(reader)
+        reader = self._readers_by_lane[key][1]
+        self.reader = reader
+        if not reader.is_prepared(query, cold, table):
             if bool(_EXTRA_CTX.capturing):
                 raise RuntimeError("Warm up this recent128 batch bucket before Graph capture; no plan allocation inside capture")
-            self.reader.prepare(device=query.device, cold_pages=int(cold.shape[0]),
+            reader.prepare(device=query.device, cold_pages=int(cold.shape[0]),
                 token_capacity=int(query.shape[0]), request_capacity=int(table.shape[0]),
                 ring_binding=binding, table_columns=int(table.shape[1]))
-        result = self.reader.read(query, rope, cold, topk, table, q_lengths, kv_lengths,
+        result = reader.read(query, rope, cold, topk, table, q_lengths, kv_lengths,
             binding, lane.step.request_banks, lane.step.request_epochs)
         self.read_calls += 1
         return result

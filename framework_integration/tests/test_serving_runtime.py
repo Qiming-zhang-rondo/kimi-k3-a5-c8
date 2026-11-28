@@ -55,8 +55,9 @@ class ServingRuntimeTest(unittest.TestCase):
                 value=SimpleNamespace(layer=key,rows=token_rows)
                 testcase.bindings.append(value);return value
         class Reader:
-            def __init__(reader,config,impl):
+            def __init__(reader,config,impl,*,execution_lane=None):
                 reader.prepared=False;reader.preparations=[];reader.reads=[];reader.result=object()
+                reader.execution_lane=execution_lane
                 events.append("reader_created")
             def is_prepared(reader,query,cold,table):
                 # Enforce the actual reader's contract: this is one packed tensor,
@@ -74,6 +75,7 @@ class ServingRuntimeTest(unittest.TestCase):
             return Tensor(shape,"bool",kwargs["device"])
         fake_torch.empty=empty
         fake_reader=ModuleType("sfa_recent128.serving_reader");fake_reader.ServingReader=Reader
+        fake_reader.ServingExecutionLane=type("ServingExecutionLane",(),{})
         fake_context=ModuleType("vllm_ascend.ascend_forward_context");fake_context._EXTRA_CTX=self.capture
         fake_top=ModuleType("vllm_ascend");fake_top.__path__=[]
         fake_old=ModuleType("sfa_recent128.runtime")
@@ -176,6 +178,25 @@ class ServingRuntimeTest(unittest.TestCase):
         self.assertFalse(runtime.reader.preparations)
         self.assertFalse(runtime.reader.reads)
         self.assertEqual(runtime.read_calls,0)
+
+    def test_distinct_routing_lanes_have_distinct_reservations_and_reuse_per_lane(self):
+        runtime=self.initialized();values,_=self.inputs(runtime)
+        runtime.read(*values)
+        main_reader=runtime.reader
+        self.assertIsNotNone(main_reader.execution_lane)
+        lane=SimpleNamespace(pool_owner=runtime.state,step=runtime.state.step,binding=runtime.state.binding)
+        alternate=list(values)
+        alternate[4]=SimpleNamespace(recent128_state=lane,max_query_len=4,block_size=128,
+            block_table=values[4].block_table)
+        runtime.read(*alternate)
+        draft_reader=runtime.reader
+        self.assertIsNot(main_reader,draft_reader)
+        self.assertIsNot(main_reader.execution_lane,draft_reader.execution_lane)
+        self.capture.capturing=True
+        runtime.read(*values)
+        self.assertIs(runtime.reader,main_reader)
+        self.assertEqual(len(main_reader.preparations),1)
+        self.assertEqual(len(draft_reader.preparations),1)
 
 
 if __name__=="__main__":unittest.main()
